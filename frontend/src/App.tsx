@@ -3,9 +3,11 @@ import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockvie
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ReactElement } from 'react';
-import { McpServersForm, SettingsPanel, usePreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelSettings, type SaveState } from './settings';
+import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelSettings, type SaveState } from './settings';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { renderMarkdown } from './markdown';
+import { RUNTIME_WS_URL } from './runtime-url';
+import { estimateCostUsd, formatCost } from './token-cost';
 
 type TodoStatus = 'done' | 'active' | 'pending';
 
@@ -17,7 +19,7 @@ type RuntimeMessage = {
 const TODO_ITEMS = ['定义任务契约', '运行执行网关', '验证工具证据', '准备交接文档'];
 
 function connectRuntime(onMessage: (message: RuntimeMessage) => void): () => void {
-  const socket = new WebSocket('ws://localhost:8080');
+  const socket = new WebSocket(RUNTIME_WS_URL);
   socket.onmessage = (event) => {
     try { onMessage(JSON.parse(String(event.data)) as RuntimeMessage); } catch { /* Ignore non-JSON runtime messages. */ }
   };
@@ -126,13 +128,29 @@ interface ToolStep {
   result: string;
 }
 
+interface TraceEvent {
+  seq: number;
+  kind: 'model_call' | 'tool_call' | 'subagent_call' | 'reply' | 'error';
+  label: string;
+  startedAt: number;
+  durationMs?: number;
+  ok?: boolean;
+  detail?: string;
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   images?: string[];
   files?: string[];
   steps?: ToolStep[];
+  usage?: ChatUsage;
+  model?: string;
+  trace?: TraceEvent[];
+  completedAt?: number;
 }
+
+interface ChatUsage { input_tokens: number; output_tokens: number; calls: number; duration_ms: number }
 
 const MAX_CHAT_IMAGES = 4;
 const MAX_IMAGE_EDGE = 1600;
@@ -177,9 +195,13 @@ const PERMISSION_STORAGE_KEY = 'hiero-permission-mode';
 
 function readStoredPermission(): string {
   const saved = localStorage.getItem(PERMISSION_STORAGE_KEY);
-  return saved && CHAT_PERMISSION_OPTIONS.includes(saved) ? saved : '严格';
+  return saved && CHAT_PERMISSION_OPTIONS.includes(saved) ? saved : '标准';
 }
 const CHAT_CONTEXT_OPTIONS = ['临时会话', '持久化 Markdown'];
+// 热边：鼠标距窗口左边缘多少像素内触发展开；离开侧栏后延迟收起，避免抖动。
+const HOT_EDGE_PX = 8;
+const HOT_EDGE_HIDE_DELAY_MS = 300;
+const TIMESTAMP_IDLE_HIDE_MS = 1500;
 
 interface ChatState {
   conversations: Conversation[];
@@ -196,6 +218,7 @@ interface ChatState {
   deleteConversation: (id: string) => void;
   rewindConversation: (messageIndex: number) => void;
   send: (text: string, images?: string[]) => void;
+  cancel: () => void;
 }
 
 function readPathArgument(rawArguments: string): string {
@@ -216,11 +239,12 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
   let activeRequest: { conversationId: string; requestId: string } | null = null;
   let pendingFiles: string[] = [];
   let pendingSteps: ToolStep[] = [];
+  let pendingTrace: TraceEvent[] | undefined;
   const updateConversation = (id: string, change: (conv: Conversation) => Conversation) =>
     set((state) => ({ conversations: state.conversations.map((conv) => (conv.id === id ? change(conv) : conv)) }));
   const ensureSocket = (): WebSocket => {
     if (socket && socket.readyState <= WebSocket.OPEN) return socket;
-    const next = new WebSocket('ws://localhost:8080');
+    const next = new WebSocket(RUNTIME_WS_URL);
     next.onmessage = (event) => {
       let message: RuntimeMessage;
       try { message = JSON.parse(String(event.data)) as RuntimeMessage; } catch { return; }
@@ -242,22 +266,53 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
           const path = readPathArgument(args);
           if (path) pendingFiles.push(path);
         }
+      } else if (message.type === 'CHAT_TRACE') {
+        pendingTrace = parseTraceEvents(message.payload?.events);
       } else if (message.type === 'CHAT_REPLY') {
         const content = typeof message.payload?.content === 'string' ? message.payload.content : get().streamingText;
         const files = pendingFiles.length > 0 ? [...new Set(pendingFiles)] : undefined;
         const steps = pendingSteps.length > 0 ? pendingSteps : undefined;
+        const usage = parseChatUsage(message.payload?.usage);
+        const model = typeof message.payload?.model === 'string' ? message.payload.model : undefined;
+        const trace = pendingTrace;
         pendingFiles = [];
         pendingSteps = [];
-        updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content, files, steps }], updatedAt: Date.now() }));
+        pendingTrace = undefined;
+        updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content, files, steps, usage, model, trace, completedAt: Date.now() }], updatedAt: Date.now() }));
+        activeRequest = null;
+        set({ pending: false, streamingText: '', streamingSteps: [], error: null });
+      } else if (message.type === 'CHAT_CANCELLED') {
+        const partial = get().streamingText.trim();
+        const files = pendingFiles.length > 0 ? [...new Set(pendingFiles)] : undefined;
+        const steps = pendingSteps.length > 0 ? pendingSteps : undefined;
+        pendingFiles = [];
+        pendingSteps = [];
+        pendingTrace = undefined;
+        if (partial || steps) {
+          updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content: partial, files, steps, completedAt: Date.now() }], updatedAt: Date.now() }));
+        }
         activeRequest = null;
         set({ pending: false, streamingText: '', streamingSteps: [], error: null });
       } else if (message.type === 'CHAT_ERROR') {
         const detail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
+        pendingFiles = [];
+        pendingSteps = [];
+        pendingTrace = undefined;
         activeRequest = null;
         set({ pending: false, streamingText: '', streamingSteps: [], error: detail });
       }
     };
-    next.onclose = () => { if (socket === next) socket = null; };
+    const abandonPending = () => {
+      if (socket !== next) return;
+      socket = null;
+      if (!activeRequest) return;
+      activeRequest = null;
+      pendingFiles = [];
+      pendingSteps = [];
+      set({ pending: false, streamingText: '', streamingSteps: [], error: '与后端的连接已断开，请重试。' });
+    };
+    next.onclose = abandonPending;
+    next.onerror = abandonPending;
     socket = next;
     return next;
   };
@@ -322,7 +377,16 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       set({ pending: true, streamingText: '', streamingSteps: [], error: null });
       const target = ensureSocket();
       const { model, permission, workspace, contextMode } = state.options;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: history, model, permission, workspace, context_mode: contextMode });
+      const subagent = useSubagentPreferences.getState().values;
+      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: history, model, permission, workspace, context_mode: contextMode, subagent });
+      if (target.readyState === WebSocket.OPEN) target.send(payload);
+      else target.addEventListener('open', () => target.send(payload), { once: true });
+    },
+    cancel: () => {
+      const request = activeRequest;
+      if (!request || !get().pending) return;
+      const target = ensureSocket();
+      const payload = JSON.stringify({ type: 'chat_cancel', request_id: request.requestId });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
@@ -334,6 +398,18 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
 
 function PencilIcon(): ReactElement {
   return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>;
+}
+
+function CopyIcon(): ReactElement {
+  return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>;
+}
+
+function CheckIcon(): ReactElement {
+  return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5" /></svg>;
+}
+
+function GitForkIcon(): ReactElement {
+  return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="6" cy="3" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="6" cy="21" r="2" /><path d="M6 5v14" /><path d="M18 8a6 6 0 0 1-6 6H6" /></svg>;
 }
 
 function TrashIcon(): ReactElement {
@@ -385,19 +461,52 @@ function ToolChain({ steps }: { steps: ToolStep[] }): ReactElement {
   </div>;
 }
 
-function ChatMessageView({ role, content, images, files, steps, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
+function parseChatUsage(raw: unknown): ChatUsage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const item = raw as Record<string, unknown>;
+  const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  return { input_tokens: num(item.input_tokens), output_tokens: num(item.output_tokens), calls: num(item.calls), duration_ms: num(item.duration_ms) };
+}
+
+function summarizeSessionUsage(messages: ChatMessage[]): { calls: number; input_tokens: number; output_tokens: number; costUsd: number | undefined } {
+  const total = { calls: 0, input_tokens: 0, output_tokens: 0, costUsd: 0 as number | undefined };
+  for (const message of messages) {
+    if (!message.usage || message.usage.calls === 0) continue;
+    total.calls += message.usage.calls;
+    total.input_tokens += message.usage.input_tokens;
+    total.output_tokens += message.usage.output_tokens;
+    const cost = estimateCostUsd(message.usage, message.model);
+    // Any message without a known price makes the session total unknown rather than underestimated.
+    if (cost === undefined) total.costUsd = undefined;
+    else if (total.costUsd !== undefined) total.costUsd += cost;
+  }
+  return total;
+}
+
+function ChatMessageView({ role, content, images, files, steps, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
   const [copied, setCopied] = useState(false);
+  const [timeVisible, setTimeVisible] = useState(false);
+  const idleTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(idleTimer.current), []);
   const copy = () => {
     navigator.clipboard.writeText(content).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     }).catch(() => undefined);
   };
-  return <div className={`chat-message chat-${role}`} data-message-index={anchorIndex}>
+  const showTimeUntilIdle = () => {
+    setTimeVisible(true);
+    window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(() => setTimeVisible(false), TIMESTAMP_IDLE_HIDE_MS);
+  };
+  const hideTime = () => {
+    window.clearTimeout(idleTimer.current);
+    setTimeVisible(false);
+  };
+  const bubble = <div className={`chat-message chat-${role}`} data-message-index={anchorIndex}>
     <div className="chat-message-head">
       <span className="chat-role">{role === 'user' ? '你' : 'Hiero'}</span>
-      <button type="button" className="chat-copy" onClick={copy} aria-label="复制消息">{copied ? '已复制' : '复制'}</button>
-      {onRewind && <button type="button" className="chat-copy" onClick={onRewind} disabled={rewindDisabled} aria-label="回退到此消息之前" title="删除此消息及之后的内容">回退到此处</button>}
+      <button type="button" className="chat-copy" onClick={copy} aria-label={copied ? '已复制' : '复制消息'} title={copied ? '已复制' : '复制消息'}>{copied ? <CheckIcon /> : <CopyIcon />}</button>
     </div>
     {steps && steps.length > 0 && <ToolChain steps={steps} />}
     {images && images.length > 0 && <div className="chat-images">
@@ -407,11 +516,69 @@ function ChatMessageView({ role, content, images, files, steps, onRewind, rewind
     {files && files.length > 0 && <div className="chat-files">
       {files.map((file) => <button type="button" key={file} className="chat-file" onClick={() => requestOpenFile(file)} title={`在文件管理器中打开 ${file}`}>📄 {file}</button>)}
     </div>}
+    {usage && usage.calls > 0 && <div className="chat-usage" title="模型调用轨迹">
+      模型调用 {usage.calls} 次 · 输入 {usage.input_tokens} / 输出 {usage.output_tokens} tokens · 耗时 {(usage.duration_ms / 1000).toFixed(1)}s · 成本 {formatCost(estimateCostUsd(usage, model))}
+    </div>}
+    {trace && trace.length > 0 && <TraceTimeline events={trace} />}
+  </div>;
+  const checkpoint = onRewind && <button type="button" className="chat-checkpoint" onClick={onRewind} disabled={rewindDisabled} title="还原到此消息之前，删除此消息及之后的内容">
+    <span>还原检查点</span><span aria-hidden="true">·</span><GitForkIcon />
+  </button>;
+  if (checkpoint) return <>{checkpoint}{bubble}</>;
+  if (role !== 'assistant' || completedAt === undefined) return bubble;
+  return <div className={`chat-message-wrap chat-${role}`} onPointerEnter={showTimeUntilIdle} onPointerMove={showTimeUntilIdle} onPointerLeave={hideTime}>
+    {bubble}
+    <div className={`chat-timestamp${timeVisible ? ' is-visible' : ''}`}>{formatMessageTime(completedAt)}</div>
   </div>;
 }
 
+function formatMessageTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString('zh-CN', { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+const TRACE_KINDS: TraceEvent['kind'][] = ['model_call', 'tool_call', 'subagent_call', 'reply', 'error'];
+const TRACE_KIND_LABELS: Record<TraceEvent['kind'], string> = { model_call: '模型', tool_call: '工具', subagent_call: '子代理', reply: '回复', error: '错误' };
+
+function parseTraceEvents(raw: unknown): TraceEvent[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const events: TraceEvent[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    if (!TRACE_KINDS.includes(record.kind as TraceEvent['kind'])) continue;
+    if (typeof record.label !== 'string' || typeof record.startedAt !== 'number') continue;
+    events.push({
+      seq: typeof record.seq === 'number' ? record.seq : events.length + 1,
+      kind: record.kind as TraceEvent['kind'],
+      label: record.label,
+      startedAt: record.startedAt,
+      ...(typeof record.durationMs === 'number' ? { durationMs: record.durationMs } : {}),
+      ...(typeof record.ok === 'boolean' ? { ok: record.ok } : {}),
+      ...(typeof record.detail === 'string' ? { detail: record.detail } : {}),
+    });
+  }
+  return events.length > 0 ? events : undefined;
+}
+
+function TraceTimeline({ events }: { events: TraceEvent[] }): ReactElement {
+  const origin = events[0].startedAt;
+  return <details className="chat-trace">
+    <summary>执行时间线（{events.length} 步）</summary>
+    <ol className="chat-trace-list">
+      {events.map((event) => <li key={event.seq} className={`chat-trace-item chat-trace-${event.kind}${event.ok === false ? ' chat-trace-failed' : ''}`}>
+        <span className="chat-trace-seq">{event.seq}</span>
+        <span className="chat-trace-kind">{TRACE_KIND_LABELS[event.kind]}</span>
+        <span className="chat-trace-label">{event.label}</span>
+        <span className="chat-trace-time">+{((event.startedAt - origin) / 1000).toFixed(2)}s{event.durationMs !== undefined ? ` · ${(event.durationMs / 1000).toFixed(2)}s` : ''}</span>
+        {event.ok === false && <span className="chat-trace-status">失败</span>}
+        {event.detail && <div className="chat-trace-detail">{event.detail}</div>}
+      </li>)}
+    </ol>
+  </details>;
+}
+
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, streamingText, streamingSteps, error, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send } = useChatStore();
+  const { conversations, activeId, pending, streamingText, streamingSteps, error, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore();
   const [draft, setDraft] = useState('');
   const [folderPicking, setFolderPicking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
@@ -554,6 +721,7 @@ function ChatPanel(): ReactElement {
     event.preventDefault();
     setMenu({ x: event.clientX, y: event.clientY, id });
   };
+  const sessionUsage = summarizeSessionUsage(messages);
   return <section className="panel-content chat-panel">
     <div className="chat-layout" style={{ gridTemplateColumns: `${sidebarWidth}px 6px minmax(0, 1fr)` }}>
       <aside className="chat-sidebar">
@@ -592,10 +760,14 @@ function ChatPanel(): ReactElement {
             <span className="chat-jump-text">{message.content.replace(/\s+/g, ' ').trim() || '（图片或文件）'}</span>
           </button> : null)}
         </div>}
+        {sessionUsage.calls > 0 && <div className="chat-session-usage" title="本会话所有助手回复的模型调用合计（成本为估算）">
+          会话合计：模型调用 {sessionUsage.calls} 次 · 输入 {sessionUsage.input_tokens} / 输出 {sessionUsage.output_tokens} tokens · 成本 {formatCost(sessionUsage.costUsd)}
+        </div>}
         <div className="chat-log" ref={logRef}>
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
-          {messages.map((message, index) => <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
-          {pending && <ChatMessageView role="assistant" content={streamingText || '思考中……'} steps={streamingSteps} />}
+          {messages.map((message, index) => <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
+          {pending && (streamingText || streamingSteps.length > 0) && <ChatMessageView role="assistant" content={streamingText} steps={streamingSteps} />}
+          {pending && !streamingText && <div className="chat-loader" role="status" aria-label="思考中"><span /><span /><span /></div>}
         </div>
         {error && <p className="chat-error">{error}</p>}
         {folderError && <p className="chat-error">{folderError}</p>}
@@ -621,7 +793,9 @@ function ChatPanel(): ReactElement {
           <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="M21 15l-5-5L5 21" /></svg>
           </button>
-          <button className="primary-button" type="button" onClick={submit} disabled={pending || (!draft.trim() && images.length === 0)}>发送</button>
+          {pending
+            ? <button className="primary-button" type="button" onClick={cancel} title="停止生成" aria-label="停止生成">停止</button>
+            : <button className="primary-button chat-send-button" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0} title={!draft.trim() && images.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">发送</button>}
         </div>
         </div>
       </div>
@@ -648,7 +822,7 @@ function MissionControl(): ReactElement {
     const nextGoal = goal.trim() || '新的 Hiero 任务';
     setGoal(nextGoal);
     setStarted(true);
-    const socket = new WebSocket('ws://localhost:8080');
+    const socket = new WebSocket(RUNTIME_WS_URL);
     socket.addEventListener('open', () => {
       socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: permission === '自动' ? 'auto' : permission === '标准' ? 'standard' : 'strict', context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral' } }));
       window.setTimeout(() => socket.close(), 500);
@@ -800,7 +974,7 @@ function SettingsBuffer(): ReactElement {
   };
   useEffect(() => {
     let active = true;
-    const socket = new WebSocket('ws://localhost:8080');
+    const socket = new WebSocket(RUNTIME_WS_URL);
     socketRef.current = socket;
     socket.onopen = () => {
       if (!active) return;
@@ -924,11 +1098,11 @@ const MEMORY_SCOPE_LABELS: Record<MemoryScope, string> = { global: '全局准则
 function requestWorkspace(body: WorkspaceRequestBody): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const socket = new WebSocket('ws://localhost:8080');
+    const socket = new WebSocket(RUNTIME_WS_URL);
     const timer = window.setTimeout(() => { socket.close(); reject(new Error('请求超时，运行时无响应')); }, 60_000);
     const workspace = useChatStore.getState().options.workspace;
     socket.onopen = () => socket.send(JSON.stringify({ ...body, workspace, request_id: requestId }));
-    socket.onerror = () => { window.clearTimeout(timer); reject(new Error('无法连接运行时 ws://localhost:8080')); };
+    socket.onerror = () => { window.clearTimeout(timer); reject(new Error('无法连接运行时 ' + RUNTIME_WS_URL)); };
     socket.onmessage = (event) => {
       const message = JSON.parse(String(event.data)) as RuntimeMessage;
       if (message.type !== 'WORKSPACE_RESULT' || message.payload?.request_id !== requestId) return;
@@ -949,7 +1123,7 @@ function ApprovalModal(): ReactElement | null {
 
   useEffect(() => {
     let active = true;
-    const socket = new WebSocket('ws://localhost:8080');
+    const socket = new WebSocket(RUNTIME_WS_URL);
     socketRef.current = socket;
     socket.onmessage = (event) => {
       let message: RuntimeMessage;
@@ -997,7 +1171,7 @@ function RollbackButton(): ReactElement {
   const rollback = () => {
     setBusy(true);
     setResult(null);
-    const socket = new WebSocket('ws://localhost:8080');
+    const socket = new WebSocket(RUNTIME_WS_URL);
     const finish = (text: string) => { setResult(text); setBusy(false); socket.close(); };
     socket.onopen = () => socket.send(JSON.stringify({ type: 'write_rollback' }));
     socket.onerror = () => finish('回退失败：无法连接后端。');
@@ -1030,7 +1204,7 @@ function McpCategoryView(): ReactElement {
   const socketRef = useRef<WebSocket | null>(null);
   useEffect(() => {
     let active = true;
-    const socket = new WebSocket('ws://localhost:8080');
+    const socket = new WebSocket(RUNTIME_WS_URL);
     socketRef.current = socket;
     socket.onopen = () => { if (active) socket.send(JSON.stringify({ type: 'mcp_config_get' })); };
     socket.onmessage = (event) => {
@@ -1622,7 +1796,40 @@ function App(): ReactElement {
   const clearBuffers = useWorkspaceStore((state) => state.clearBuffers);
   const [api, setApi] = useState<DockviewApi | null>(null);
   const [screenDraft, setScreenDraft] = useState('');
-  const [railOpen, setRailOpen] = useState(true);
+  const hotEdgeSidebar = usePreferences((state) => state.values.hotEdgeSidebar);
+  const [railOpen, setRailOpen] = useState(() => !usePreferences.getState().values.hotEdgeSidebar);
+  const railHideTimer = useRef<number | undefined>(undefined);
+  const railPinned = useRef(false);
+  useEffect(() => {
+    if (!hotEdgeSidebar) {
+      setRailOpen(true);
+      return;
+    }
+    setRailOpen(false);
+    railPinned.current = false;
+    const onMove = (event: PointerEvent): void => {
+      if (event.clientX <= HOT_EDGE_PX) {
+        window.clearTimeout(railHideTimer.current);
+        setRailOpen(true);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.clearTimeout(railHideTimer.current);
+    };
+  }, [hotEdgeSidebar]);
+  const scheduleHideRail = (): void => {
+    if (!hotEdgeSidebar || railPinned.current) return;
+    window.clearTimeout(railHideTimer.current);
+    railHideTimer.current = window.setTimeout(() => setRailOpen(false), HOT_EDGE_HIDE_DELAY_MS);
+  };
+  const keepRailOpen = (): void => window.clearTimeout(railHideTimer.current);
+  const toggleRail = (): void => {
+    railPinned.current = true;
+    window.clearTimeout(railHideTimer.current);
+    setRailOpen((open) => !open);
+  };
 
   const openBuffer = (kind: PanelKind) => {
     if (!api) return;
@@ -1721,8 +1928,8 @@ function App(): ReactElement {
       <span className="topbar-meta"><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className="live-pill"><b /> 在线</span></span>
     </header>
     <div className="workspace-body">
-      <aside className={`quick-rail ${railOpen ? 'open' : 'closed'}`} aria-label="快捷入口">
-        <button type="button" className="rail-toggle" onClick={() => setRailOpen((open) => !open)} aria-label={railOpen ? '收起快捷栏' : '展开快捷栏'}>{railOpen ? '«' : '»'}</button>
+      <aside className={`quick-rail ${railOpen ? 'open' : 'closed'}`} aria-label="快捷入口" onPointerEnter={keepRailOpen} onPointerLeave={scheduleHideRail}>
+        <button type="button" className="rail-toggle" onClick={toggleRail} aria-label={railOpen ? '收起快捷栏' : '展开快捷栏'}>{railOpen ? '«' : '»'}</button>
         {railOpen && RAIL_KINDS.map((kind) => <button key={kind} type="button" className="rail-item" onClick={() => openBuffer(kind)}><span>{kind.toUpperCase().slice(0, 3)}</span>{PANEL_TITLES[kind]}</button>)}
       </aside>
       <div className="workspace">

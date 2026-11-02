@@ -5,19 +5,32 @@ import type { McpServerConfig } from './mcp-client.js';
 
 export const MCP_CONFIG_FILE = join('.hiero', 'mcp.json');
 
+const serverNameSchema = z.string().trim().min(1).regex(/^[A-Za-z0-9_-]+$/, '名称只能包含字母、数字、下划线和连字符');
+const commonFields = { name: serverNameSchema, enabled: z.boolean().default(true) };
+
 const stdioServerSchema = z.object({
-  name: z.string().trim().min(1).regex(/^[A-Za-z0-9_-]+$/, '名称只能包含字母、数字、下划线和连字符'),
+  ...commonFields,
   transport: z.literal('stdio').default('stdio'),
   command: z.string().trim().min(1, 'command 不能为空'),
   args: z.array(z.string()).default([]),
   cwd: z.string().optional(),
   env: z.record(z.string(), z.string()).optional(),
-  enabled: z.boolean().default(true),
 });
 
-export const mcpConfigSchema = z.object({ servers: z.array(stdioServerSchema) });
+const remoteServerSchema = z.object({
+  ...commonFields,
+  transport: z.enum(['sse', 'http']),
+  url: z.string().trim().url('url 必须是合法的 http(s) 地址').refine((value) => /^https?:/.test(value), 'url 必须使用 http 或 https'),
+  headers: z.record(z.string(), z.string()).optional(),
+});
+
+const mcpServerSchema = z.union([stdioServerSchema, remoteServerSchema]);
+
+export const mcpConfigSchema = z.object({ servers: z.array(mcpServerSchema) });
 
 export type McpStdioServerEntry = z.infer<typeof stdioServerSchema>;
+export type McpRemoteServerEntry = z.infer<typeof remoteServerSchema>;
+export type McpServerEntry = z.infer<typeof mcpServerSchema>;
 export type McpConfigFile = z.infer<typeof mcpConfigSchema>;
 
 export function mcpConfigPath(root = process.cwd()): string {
@@ -25,14 +38,16 @@ export function mcpConfigPath(root = process.cwd()): string {
 }
 
 /** Official filesystem server, scoped to the workspace root. Written to disk on first run so the user can edit or remove it. */
-export const DEFAULT_MCP_CONFIG: McpConfigFile = {
-  servers: [{ name: 'filesystem', transport: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', 'D:\\new'], enabled: true }],
-};
+export function defaultMcpConfig(root = process.cwd()): McpConfigFile {
+  return {
+    servers: [{ name: 'filesystem', transport: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', root], enabled: true }],
+  };
+}
 
 /** Reads the MCP config. A missing file writes and returns the default config. Invalid content throws with a readable message. */
 export function readMcpConfig(root = process.cwd()): McpConfigFile {
   const path = mcpConfigPath(root);
-  if (!existsSync(path)) return saveMcpConfig(DEFAULT_MCP_CONFIG, root);
+  if (!existsSync(path)) return saveMcpConfig(defaultMcpConfig(root), root);
   const parsed = mcpConfigSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')));
   if (!parsed.success) throw new Error(parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; '));
   return parsed.data;
@@ -53,13 +68,30 @@ export function saveMcpConfig(input: unknown, root = process.cwd()): McpConfigFi
   return parsed.data;
 }
 
-export function toClientConfig(server: McpStdioServerEntry): McpServerConfig {
-  return {
-    name: server.name,
-    transport: 'stdio',
-    command: server.command,
-    args: server.args,
-    ...(server.cwd ? { cwd: server.cwd } : {}),
-    ...(server.env ? { env: server.env } : {}),
-  };
+/** Expands ${NAME} from the runtime environment at connect time, so secrets never need to be written to mcp.json. */
+export function expandEnvPlaceholders(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
+    const resolved = env[name];
+    if (resolved === undefined || resolved === '') throw new Error(`环境变量 ${name} 未设置`);
+    return resolved;
+  });
+}
+
+const expandRecord = (record: Record<string, string> | undefined): Record<string, string> | undefined =>
+  record ? Object.fromEntries(Object.entries(record).map(([key, value]) => [key, expandEnvPlaceholders(value)])) : undefined;
+
+export function toClientConfig(server: McpServerEntry): McpServerConfig {
+  if (server.transport === 'stdio') {
+    const env = expandRecord(server.env);
+    return {
+      name: server.name,
+      transport: 'stdio',
+      command: server.command,
+      args: server.args.map((arg) => expandEnvPlaceholders(arg)),
+      ...(server.cwd ? { cwd: server.cwd } : {}),
+      ...(env ? { env } : {}),
+    };
+  }
+  const headers = expandRecord(server.headers);
+  return { name: server.name, transport: server.transport, url: expandEnvPlaceholders(server.url), ...(headers ? { headers } : {}) };
 }

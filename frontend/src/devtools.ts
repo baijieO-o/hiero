@@ -1,3 +1,4 @@
+import { RUNTIME_WS_URL } from './runtime-url';
 export type LogLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
 
 export type ConsoleEntry = { id: number; time: number; level: LogLevel; text: string; source: 'console' | 'uncaught' | 'eval' };
@@ -7,7 +8,7 @@ export type RuntimeEntry = { id: number; time: number; type: string; detail: str
 export type DevtoolsSnapshot = { console: ConsoleEntry[]; network: NetworkEntry[]; runtime: RuntimeEntry[] };
 
 const MAX_ENTRIES = 500;
-const RUNTIME_URL = 'ws://localhost:8080';
+const RUNTIME_URL = RUNTIME_WS_URL;
 
 let nextId = 1;
 let snapshot: DevtoolsSnapshot = { console: [], network: [], runtime: [] };

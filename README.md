@@ -12,7 +12,7 @@
 - `TaskContract`、`HandoffDocument`、`ErrorRecord` 等核心契约。
 - OpenAI-compatible Model Gateway：令牌池、429 冷却、401 废弃、fallback 基础逻辑。
 - Tool Gateway：Zod 参数校验、权限检查、证据记录。
-- MCP stdio/SSE 客户端基础实现和 Skill 渐进式披露路由。
+- MCP stdio/SSE/HTTP 客户端和 Skill 渐进式披露路由。远程服务器的 headers 与 env 支持 ${VAR} 占位符，在连接时从环境变量展开，凭据不落盘。WebSocket 服务仅接受本机连接；前端可通过 `VITE_HIERO_WS_URL` 指定运行时地址（默认 `ws://localhost:8080`）。
 - 独立 `SystemAgent` 子进程，用于扩展安装流程。
 - 工作区文本快照和 `FILE_DIFF` 广播。
 - 前端 Mission Control、TodoList、CodeReview、HandoffPanel。
@@ -66,6 +66,35 @@ npm run dev
 ```
 
 也可以使用仓库中的 Windows 启动脚本，但请先确认本地配置文件已经正确设置。
+
+终端命令通过 Docker 容器执行；请先安装并启动 Docker。容器将工作区挂载到 `/workspace`，禁用网络、使用只读根文件系统并施加 CPU/内存/PID 限制。首次执行会拉取 `node:22-alpine`。若 Docker 不可用，命令会失败关闭，不会在宿主机执行。
+
+
+Hiero 的模型网关使用 OpenAI Chat Completions 兼容协议，可连接本机 Ollama 或 vLLM，无需云端 API 密钥。Agent 工具调用需要模型本身支持 function calling。
+
+Ollama 示例（先运行 `ollama pull qwen3:8b`）：
+
+```dotenv
+HIERO_LLM_ENDPOINT=http://localhost:11434/v1/chat/completions
+HIERO_LLM_MODEL=qwen3:8b
+HIERO_LLM_TOKENS=
+```
+
+也可将模型替换为 Ollama 已拉取且支持工具调用的 Llama 模型，例如 `llama3.1:8b`。
+
+vLLM 示例（以兼容 API 启动）：
+
+```powershell
+vllm serve Qwen/Qwen2.5-7B-Instruct --host 0.0.0.0 --port 8000
+```
+
+```dotenv
+HIERO_LLM_ENDPOINT=http://localhost:8000/v1/chat/completions
+HIERO_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+HIERO_LLM_TOKENS=
+```
+
+如果 vLLM 启用了 API key，将 `HIERO_LLM_TOKENS` 设为相应密钥。设置面板也可填写这些字段。复制下方 `.env` 模板后按需取消注释本地配置。
 
 ## LLM 配置
 
@@ -134,7 +163,7 @@ node .\dist\examples\real-test.js
 
 - 自动 Handoff 会保存文档并进入 Handoff，但尚未自动创建新上下文无缝续跑。
 - Token 计量目前是字符数近似值，不是模型专用 tokenizer。
-- MCP 运行时默认 Server 自动发现和严格 JSON Schema → Zod 转换尚未完整闭环。
+- MCP 运行时默认 Server 自动发现和严格 JSON Schema → Zod 转换尚未完整闭环。前端 MCP 预设（文件系统、GitHub、Postgres）默认禁用。
 - SystemAgent 是独立进程，不等同于安全沙箱；扩展依赖仍可能在宿主机执行。
 - 前端各面板尚未统一为单一、带重连的 WebSocket 事件总线。
 - 已有全局准则与项目记忆（第 0、1 层，聊天时注入）；第 2 层深层记忆已实现为本地关键词检索（无向量库），完整 Verify（编译/测试/格式化）闭环或自动 Git commit 审批流程。
@@ -151,7 +180,7 @@ src/
   context-manager.ts      Handoff 文档持久化和阈值判断
   contracts.ts            核心接口和结构化错误
   hiero-runtime.ts        运行时组装和 WebSocket 任务入口
-  mcp-client.ts           MCP stdio/SSE 客户端
+  mcp-client.ts           MCP stdio/SSE/HTTP 客户端\n  ws-guard.ts             WebSocket 回环地址和 Origin 校验
   model-gateway.ts        OpenAI-compatible 模型网关
   runtime-server.ts       WebSocket 事件广播
   state-machine.ts        显式状态机

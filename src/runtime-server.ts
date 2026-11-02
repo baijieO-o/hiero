@@ -1,8 +1,10 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ErrorRecord, HandoffDocument } from './contracts.js';
 import { AgentStateMachine, type AgentState, type StateTransition } from './state-machine.js';
-import type { McpStdioServerEntry } from './mcp-config.js';
+import type { ChatTraceEvent } from './chat-trace.js';
+import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
+import { isAllowedOrigin, isLoopbackAddress } from './ws-guard.js';
 export type RuntimeEvent =
   | { type: 'STATE_CHANGE'; payload: { node: AgentState; status: 'running' | 'completed' } }
   | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string } }
@@ -12,12 +14,14 @@ export type RuntimeEvent =
   | { type: 'CHAT_DELTA'; payload: { request_id: string; text: string } }
   | { type: 'CHAT_RESET'; payload: { request_id: string } }
   | { type: 'CHAT_TOOL'; payload: { request_id: string; name: string; arguments: string; result: string } }
-  | { type: 'CHAT_REPLY'; payload: { request_id: string; content: string; model: string } }
+  | { type: 'CHAT_REPLY'; payload: { request_id: string; content: string; model: string; usage?: { input_tokens: number; output_tokens: number; calls: number; duration_ms: number } } }
   | { type: 'CHAT_ERROR'; payload: { request_id: string; code: string; message: string } }
+  | { type: 'CHAT_TRACE'; payload: { request_id: string; events: ChatTraceEvent[] } }
+  | { type: 'CHAT_CANCELLED'; payload: { request_id: string } }
   | { type: 'SETTINGS'; payload: { endpoint: string; model: string; token_count: number } }
   | { type: 'SETTINGS_SAVE_RESULT'; payload: { ok: true; settings: { endpoint: string; model: string; token_count: number } } | { ok: false; message: string } }
-  | { type: 'MCP_CONFIG'; payload: { servers: McpStdioServerEntry[]; statuses: McpServerStatus[]; path: string } }
-  | { type: 'MCP_CONFIG_SAVE_RESULT'; payload: { ok: true; servers: McpStdioServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string } }
+  | { type: 'MCP_CONFIG'; payload: { servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } }
+  | { type: 'MCP_CONFIG_SAVE_RESULT'; payload: { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string } }
   | { type: 'WORKSPACE_RESULT'; payload: Record<string, unknown> & { request_id: string; kind: string } }
   | { type: 'APPROVAL_REQUIRED'; payload: { approval_id: string; tool_name: string; summary: string; input: unknown } }
   | { type: 'ROLLBACK_RESULT'; payload: { ok: true; restored: string[]; skipped: string[]; warning?: unknown } | { ok: false; message: string } };
@@ -27,7 +31,14 @@ export class RuntimeWebSocketServer {
   private readonly clients = new Set<WebSocket>();
 
   public constructor(private readonly machine: AgentStateMachine, port = 8080) {
-    this.server = new WebSocketServer({ port });
+    this.server = new WebSocketServer({
+      port,
+      verifyClient: ({ origin, req }, done) => {
+        if (!isLoopbackAddress(req.socket.remoteAddress)) return done(false, 403, 'Forbidden: loopback clients only');
+        if (!isAllowedOrigin(origin)) return done(false, 403, 'Forbidden: origin not allowed');
+        done(true);
+      },
+    });
     this.server.on('connection', (client) => {
       this.clients.add(client);
       client.on('close', () => this.clients.delete(client));
@@ -81,3 +92,4 @@ export class RuntimeWebSocketServer {
     await new Promise<void>((resolve, reject) => this.server.close((cause) => cause ? reject(cause) : resolve()));
   }
 }
+

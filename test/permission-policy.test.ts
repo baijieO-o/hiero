@@ -24,6 +24,21 @@ test('standard mode allows read-only commands and blocks others', () => {
   assert.equal(checkCommandPolicy('', 'standard').allowed, false);
 });
 
+test('standard mode rejects git flags that write files or run programs', () => {
+  assert.equal(checkCommandPolicy('git diff --output=out.txt', 'standard').allowed, false);
+  assert.equal(checkCommandPolicy('git log -o out.txt', 'standard').allowed, false);
+  assert.equal(checkCommandPolicy('git diff --ext-diff', 'standard').allowed, false);
+  assert.equal(checkCommandPolicy('git show --textconv HEAD', 'standard').allowed, false);
+});
+
+test('standard mode rejects path arguments outside the workspace', () => {
+  assert.equal(checkCommandPolicy('cat src/index.ts', 'standard').allowed, true);
+  assert.equal(checkCommandPolicy('cat ../secret.txt', 'standard').allowed, false);
+  assert.equal(checkCommandPolicy('cat C:\\Windows\\win.ini', 'standard').allowed, false);
+  assert.equal(checkCommandPolicy('ls /etc', 'standard').allowed, false);
+  assert.equal(checkCommandPolicy('head ~/.ssh/id_rsa', 'standard').allowed, false);
+});
+
 test('auto mode allows any command', () => {
   assert.equal(checkCommandPolicy('rm -rf build', 'auto').allowed, true);
 });

@@ -1,4 +1,4 @@
-﻿import { strict as assert } from 'node:assert';
+import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { z } from 'zod';
 import { createServer } from 'node:http';
@@ -49,6 +49,19 @@ test('ModelGateway rotates past 5xx and network failures to the next token', asy
   const response = await gateway.complete(task, { prompt: 'hello' });
   assert.equal(response.token_id, 'healthy');
   assert.deepEqual(calls, ['broken', 'offline', 'healthy']);
+});
+
+test('ModelGateway supports unauthenticated local OpenAI-compatible models', async () => {
+  let receivedToken = 'not-called';
+  const gateway = new ModelGateway({
+    complete: async (_request, token) => {
+      receivedToken = token;
+      return { model: 'local-model', token_id: token, content: 'ok' };
+    },
+  }, []);
+  const response = await gateway.complete({ ...task, model_config: { preferred_model: 'qwen3:8b', fallback_chain: [] } }, { prompt: 'hello' });
+  assert.equal(receivedToken, '');
+  assert.equal(response.content, 'ok');
 });
 
 test('ModelGateway reports a clear error when every token is rejected', async () => {
@@ -139,5 +152,36 @@ test('sends image messages as OpenAI multimodal content parts', async () => {
     ]);
   } finally {
     server.close();
+  }
+});
+
+test('OpenAICompatibleTransport reports token usage for stream and non-stream replies', async () => {
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += String(chunk); });
+    req.on('end', () => {
+      const parsed = JSON.parse(body) as { stream?: boolean; stream_options?: { include_usage?: boolean } };
+      if (parsed.stream) {
+        assert.equal(parsed.stream_options?.include_usage, true);
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: {"model":"m","choices":[{"delta":{"content":"hi"}}]}\n\n');
+        res.write('data: {"model":"m","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\n');
+        res.end('data: [DONE]\n\n');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ model: 'm', choices: [{ message: { content: 'hi' } }], usage: { prompt_tokens: 5, completion_tokens: 2 } }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const transport = new OpenAICompatibleTransport(`http://127.0.0.1:${port}/v1`);
+    const plain = await transport.complete({ prompt: 'x', model: 'm' }, 'token');
+    assert.deepEqual(plain.usage, { input_tokens: 5, output_tokens: 2 });
+    const streamed = await transport.complete({ prompt: 'x', model: 'm', onDelta: () => undefined }, 'token');
+    assert.deepEqual(streamed.usage, { input_tokens: 7, output_tokens: 3 });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

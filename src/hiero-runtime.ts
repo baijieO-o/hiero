@@ -32,6 +32,8 @@ function isModelSettingsSave(message: unknown): message is { type: 'settings_sav
   return candidate.type === 'settings_save' && typeof candidate.payload?.endpoint === 'string' && typeof candidate.payload?.model === 'string' && typeof candidate.payload?.tokens === 'string';
 }
 import { createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
+import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
+import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
@@ -55,6 +57,8 @@ export interface RuntimeChatRequest {
   permission?: string;
   workspace?: string;
   context_mode?: string;
+  /** Sub-agent preferences chosen in the settings page; normalised by the backend before use. */
+  subagent?: Partial<SubagentSettings>;
 }
 
 const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append only for rules that must always apply.';
@@ -109,7 +113,13 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
       parameters: { type: 'object', additionalProperties: false, properties: { content: { type: 'string' }, scope: { type: 'string', enum: ['global', 'project'] } }, required: ['content', 'scope'] },
     },
   },
+  DELEGATE_READ_TOOL_DEFINITION,
+  DELEGATE_WRITE_TOOL_DEFINITION,
 ];
+
+const READ_ONLY_SUBAGENT_TOOLS = new Set(['read_file', 'list_dir', 'memory_recall']);
+const WRITE_SUBAGENT_TOOLS = new Set(['read_file', 'list_dir', 'write_file', 'memory_recall']);
+const SUBAGENT_TOOL_NAMES = new Set(['delegate_read', 'delegate_write']);
 
 /**
  * Maps the workspace selected in the chat UI to a directory the read tool may use.
@@ -131,6 +141,12 @@ export function resolveChatWorkspace(workspace: string | undefined): string {
 
 function isChatRequest(message: unknown): message is RuntimeChatRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat';
+}
+
+interface ChatCancelRequest { type: 'chat_cancel'; request_id: string }
+
+function isChatCancelRequest(message: unknown): message is ChatCancelRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_cancel' && typeof (message as { request_id?: unknown }).request_id === 'string';
 }
 
 const MAX_CHAT_IMAGES = 4;
@@ -195,6 +211,7 @@ export class HieroRuntime {
   private readonly capabilityRouter = new CapabilityRouter();
   private readonly approvals: ApprovalBroker;
   private readonly writeSnapshots = new WriteSnapshotStore();
+  private readonly activeChats = new Map<string, AbortController>();
 
   public constructor(port = 8080) {
     this.runtime = new RuntimeWebSocketServer(this.machine, port);
@@ -205,6 +222,7 @@ export class HieroRuntime {
       if (isApprovalResponse(message)) this.approvals.respond(message.payload.approval_id, message.payload.approved);
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
+      else if (isChatCancelRequest(message)) this.cancelChat(message.request_id, client);
       else if (isSettingsRequest(message)) this.runtime.send({ type: 'SETTINGS', payload: this.readModelSettings() }, client);
       else if (isMcpConfigGet(message)) this.sendMcpConfig(client);
       else if (isMcpConfigSave(message)) await this.handleMcpConfigSave(message.payload, client);
@@ -267,7 +285,7 @@ export class HieroRuntime {
 
   private createGateway(): ModelGateway {
     const tokens = parseTokenList(process.env.HIERO_LLM_TOKENS);
-    if (tokens.length === 0) console.warn('[hiero] HIERO_LLM_TOKENS is empty; model calls will fail until a token is configured.');
+    if (tokens.length === 0) console.info('[hiero] HIERO_LLM_TOKENS is empty; using unauthenticated OpenAI-compatible endpoint (suitable for local Ollama/vLLM).');
     return new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? '')), tokens);
   }
 
@@ -342,25 +360,39 @@ export class HieroRuntime {
 
   public async handleChat(request: RuntimeChatRequest, client?: WebSocket): Promise<void> {
     const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna';
+    const controller = new AbortController();
+    this.activeChats.set(request.request_id, controller);
     try {
-      await this.runChat(request, model, client);
+      await this.runChat(request, model, client, controller.signal);
     } catch (cause) {
       const record = this.machine.toErrorRecord(cause);
       this.runtime.send({ type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } }, client);
+    } finally {
+      this.activeChats.delete(request.request_id);
     }
   }
 
-  private async runChat(request: RuntimeChatRequest, model: string, client?: WebSocket): Promise<void> {
+  /** Aborts an in-flight chat. The model call stops immediately and the client gets CHAT_CANCELLED. */
+  private cancelChat(requestId: string, client?: WebSocket): void {
+    const controller = this.activeChats.get(requestId);
+    if (!controller) return;
+    controller.abort();
+    this.runtime.send({ type: 'CHAT_CANCELLED', payload: { request_id: requestId } }, client);
+  }
+
+  private async runChat(request: RuntimeChatRequest, model: string, client: WebSocket | undefined, signal: AbortSignal): Promise<void> {
     const workspacePath = resolveChatWorkspace(request.workspace);
     const task: TaskContract = {
       task_id: randomUUID(),
       workspace_path: workspacePath,
       model_config: { preferred_model: model, fallback_chain: [] },
-      permission_mode: parsePermissionMode(request.permission, 'strict'),
+      permission_mode: parsePermissionMode(request.permission, 'standard'),
       context_mode: 'ephemeral',
       acceptance_criteria: [],
       budget_envelope: { max_tokens: 4000, max_time_ms: 120_000 },
     };
+    const subagent = normalizeSubagentSettings(request.subagent);
+    const toolDefinitions = subagent.enabled ? CHAT_TOOL_DEFINITIONS : CHAT_TOOL_DEFINITIONS.filter((tool) => !SUBAGENT_TOOL_NAMES.has(tool.function.name));
     const memory = await memoryContext(workspacePath);
     const lastUser = [...request.messages].reverse().find((item) => item.role === 'user')?.content ?? '';
     const recalled = await deepRecallContext(workspacePath, lastUser);
@@ -373,27 +405,65 @@ export class HieroRuntime {
         return { role: item.role, content: item.content, ...(images.length > 0 ? { images } : {}) };
       }),
     ];
+    const trace = new ChatTrace();
+    const sendTrace = () => this.runtime.send({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } }, client);
     try {
       const onDelta = (text: string) => this.runtime.send({ type: 'CHAT_DELTA', payload: { request_id: request.request_id, text } }, client);
       let response: ModelResponse | undefined;
+      const startedAt = Date.now();
+      const usage = { input_tokens: 0, output_tokens: 0, calls: 0, duration_ms: 0 };
+      const track = (item: ModelResponse) => {
+        usage.calls += 1;
+        usage.input_tokens += item.usage?.input_tokens ?? 0;
+        usage.output_tokens += item.usage?.output_tokens ?? 0;
+      };
+      let delegatedChatTotal = 0;
       for (let step = 0; step < CHAT_TOOL_ROUNDS; step += 1) {
-        response = await this.gateway.complete(task, { prompt: '', messages, tools: CHAT_TOOL_DEFINITIONS, onDelta });
+        const endModelCall = trace.begin('model_call', `模型调用 ${step + 1}`);
+        response = await this.gateway.complete(task, { prompt: '', messages, tools: toolDefinitions, onDelta, signal });
+        track(response);
+        endModelCall({ ok: true, detail: response.usage ? `输入 ${response.usage.input_tokens} / 输出 ${response.usage.output_tokens} tokens` : undefined });
         if (!response.tool_calls || response.tool_calls.length === 0) break;
         this.runtime.send({ type: 'CHAT_RESET', payload: { request_id: request.request_id } }, client);
         messages.push({ role: 'assistant', content: response.content, tool_calls: response.tool_calls });
+        let delegatedThisTurn = 0;
         for (const call of response.tool_calls) {
-          const result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode);
+          if (signal.aborted) return;
+          const isDelegate = SUBAGENT_TOOL_NAMES.has(call.function.name);
+          let result: string;
+          const endToolCall = trace.begin(isDelegate ? 'subagent_call' : 'tool_call', call.function.name, summarizeForTrace(call.function.arguments));
+          if (isDelegate && !canDelegate(subagent, delegatedThisTurn, delegatedChatTotal)) {
+            result = `子代理调用被限制：每轮最多 ${subagent.maxConcurrent} 个，每次聊天最多 ${subagent.maxPerChat} 个。请直接回答或减少委派。`;
+          } else if (isDelegate) {
+            delegatedThisTurn += 1;
+            delegatedChatTotal += 1;
+            result = await this.runDelegatedTask(call.function.name === 'delegate_write' ? 'write' : 'read', call.function.arguments, workspacePath, task, signal, subagent);
+          } else {
+            result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode);
+          }
+          endToolCall({ ok: !isToolErrorResult(result), detail: summarizeForTrace(result) });
+          sendTrace();
           messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: result });
           this.runtime.send({ type: 'CHAT_TOOL', payload: { request_id: request.request_id, name: call.function.name, arguments: call.function.arguments, result } }, client);
         }
         response = undefined;
       }
       if (!response) {
-        response = await this.gateway.complete(task, { prompt: '', messages, onDelta });
+        const endFinalCall = trace.begin('model_call', `模型调用 ${usage.calls + 1}`);
+        response = await this.gateway.complete(task, { prompt: '', messages, onDelta, signal });
+        track(response);
+        endFinalCall({ ok: true, detail: response.usage ? `输入 ${response.usage.input_tokens} / 输出 ${response.usage.output_tokens} tokens` : undefined });
       }
-      this.runtime.send({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model } }, client);
+      usage.duration_ms = Date.now() - startedAt;
+      trace.mark('reply', '完成回复', true, `共 ${usage.calls} 次模型调用，耗时 ${usage.duration_ms}ms`);
+      sendTrace();
+      this.runtime.send({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage } }, client);
     } catch (cause) {
+      if (signal.aborted) return;
       const record = this.machine.toErrorRecord(cause);
+      trace.closeOpen();
+      trace.mark('error', '请求失败', false, record.message);
+      sendTrace();
       this.runtime.send({ type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } }, client);
     }
   }
@@ -438,6 +508,29 @@ export class HieroRuntime {
     });
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
     return tools;
+  }
+
+  /**
+   * Runs a sub-agent with a fixed tool allowlist. It cannot delegate further, and it shares the parent's
+   * ToolGateway so write_file still goes through the approval policy. Write mode never widens the parent's permission.
+   */
+  private async runDelegatedTask(mode: 'read' | 'write', rawArguments: string, workspacePath: string, task: TaskContract, signal: AbortSignal, settings: SubagentSettings): Promise<string> {
+    try {
+      const args = JSON.parse(rawArguments) as { task?: unknown };
+      const goal = typeof args.task === 'string' ? args.task.trim() : '';
+      const toolName = mode === 'write' ? 'delegate_write' : 'delegate_read';
+      if (!goal) return JSON.stringify({ error: `${toolName} requires a non-empty task.` });
+      const toolGateway = this.createChatToolGateway(workspacePath);
+      const allowlist = mode === 'write' ? WRITE_SUBAGENT_TOOLS : READ_ONLY_SUBAGENT_TOOLS;
+      const allowedTools = CHAT_TOOL_DEFINITIONS.filter((tool) => allowlist.has(tool.function.name));
+      const systemPrompt = mode === 'write'
+        ? 'You are a file-editing sub-agent. Use the tools to make the requested workspace changes, then reply with a concise summary (under 300 words) of what you changed. You cannot change memory or delegate further.'
+        : undefined;
+      const summary = await runReadOnlySubagent({ modelGateway: this.gateway, toolGateway, allowedTools, task, goal, signal, maxTurns: settings.maxTurns, resultLimit: settings.resultLimit, ...(systemPrompt ? { systemPrompt } : {}) });
+      return JSON.stringify({ summary });
+    } catch (cause) {
+      return JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) });
+    }
   }
 
   private async runChatTool(name: string, rawArguments: string, workspacePath: string, mode: PermissionMode): Promise<string> {
@@ -491,3 +584,4 @@ export class HieroRuntime {
 
   public async close(): Promise<void> { await this.runtime.close(); await this.systemAgent.close(); }
 }
+

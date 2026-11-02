@@ -27,6 +27,13 @@ export interface ModelRequest {
   messages?: readonly ModelMessage[];
   tools?: readonly ModelToolDefinition[];
   onDelta?: (text: string) => void;
+  /** Aborts the in-flight request when the caller cancels (for example, the user pressed Stop). */
+  signal?: AbortSignal;
+}
+
+export interface ModelUsage {
+  input_tokens: number;
+  output_tokens: number;
 }
 
 export interface ModelResponse {
@@ -34,6 +41,15 @@ export interface ModelResponse {
   token_id: string;
   content: string;
   tool_calls?: readonly ModelToolCall[];
+  usage?: ModelUsage;
+}
+
+/** Reads OpenAI-style `usage` counts. Returns undefined when the provider omits them. */
+function parseUsage(raw: unknown): ModelUsage | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const value = raw as { prompt_tokens?: unknown; completion_tokens?: unknown };
+  if (typeof value.prompt_tokens !== 'number' || typeof value.completion_tokens !== 'number') return undefined;
+  return { input_tokens: value.prompt_tokens, output_tokens: value.completion_tokens };
 }
 
 export interface ModelTransport {
@@ -60,9 +76,14 @@ export class ModelGateway {
   }
 
   public async complete(task: TaskContract, request: Omit<ModelRequest, 'model'>): Promise<ModelResponse> {
+    if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
     const model = task.model_config.preferred_model;
     const models = [model, ...task.model_config.fallback_chain.filter((candidate) => candidate !== model)];
-    if (this.tokens.length === 0) throw error('MOD-003', 'blocker', 'Token pool is empty.', 'Configure at least one model token.');
+      const localModel = models[0];
+      if (this.tokens.length === 0 && localModel) {
+        return await this.transport.complete({ prompt: request.prompt, model: localModel, ...(request.messages ? { messages: request.messages } : {}), ...(request.tools ? { tools: request.tools } : {}), ...(request.onDelta ? { onDelta: request.onDelta } : {}), ...(request.signal ? { signal: request.signal } : {}) }, '');
+      }
+    if (this.tokens.length === 0) throw error('MOD-003', 'blocker', 'Token pool is empty.', 'Configure a model token or use a local OpenAI-compatible model that does not require authentication.');
 
     let attempted = 0;
     let lastRetryable = false;
@@ -73,9 +94,11 @@ export class ModelGateway {
       if (!selectedModel) throw error('MOD-001', 'blocker', 'No model is available for this request.', 'Configure a preferred model or fallback chain.');
       attempted += 1;
       try {
-        const modelRequest: ModelRequest = { prompt: request.prompt, model: selectedModel, ...(request.messages ? { messages: request.messages } : {}), ...(request.tools ? { tools: request.tools } : {}), ...(request.onDelta ? { onDelta: request.onDelta } : {}) };
+        const modelRequest: ModelRequest = { prompt: request.prompt, model: selectedModel, ...(request.messages ? { messages: request.messages } : {}), ...(request.tools ? { tools: request.tools } : {}), ...(request.onDelta ? { onDelta: request.onDelta } : {}), ...(request.signal ? { signal: request.signal } : {}) };
         return await this.transport.complete(modelRequest, tokenState.token);
       } catch (cause) {
+        if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
+        if (cause instanceof HieroError && cause.record.code === 'MOD-007') throw cause;
         const status = statusCode(cause);
         if (status === 429) {
           tokenState.cooldownUntil = this.now() + this.cooldownMs;
@@ -151,18 +174,23 @@ export class OpenAICompatibleTransport implements ModelTransport {
   public async complete(request: ModelRequest, token: string): Promise<ModelResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const onCancel = () => controller.abort();
+    if (request.signal?.aborted) controller.abort();
+    request.signal?.addEventListener('abort', onCancel, { once: true });
     try {
       const endpoint = this.endpoint;
       if (!endpoint) throw error('MOD-002', 'blocker', 'Model endpoint is not configured.', 'Set HIERO_LLM_ENDPOINT before starting the runtime.');
       const streaming = request.onDelta !== undefined;
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (token) headers.authorization = 'Bearer ' + token;
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+        headers,
         body: JSON.stringify({
           model: request.model,
           messages: (request.messages ?? [{ role: 'user', content: request.prompt }]).map(toWireMessage),
           ...(request.tools ? { tools: request.tools } : {}),
-          ...(streaming ? { stream: true } : {}),
+          ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}),
         }),
         signal: controller.signal,
       });
@@ -177,8 +205,12 @@ export class OpenAICompatibleTransport implements ModelTransport {
       }
       const payload: unknown = await response.json();
       return parseModelResponse(payload, request.model ?? 'unknown', token);
+    } catch (cause) {
+      if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
+      throw cause;
     } finally {
       clearTimeout(timeout);
+      request.signal?.removeEventListener('abort', onCancel);
     }
   }
 }
@@ -188,6 +220,7 @@ async function readStream(body: ReadableStream<Uint8Array>, model: string, token
   const reader = body.getReader();
   let buffer = '';
   let content = '';
+  let usage: ModelUsage | undefined;
   const toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string } }[] = [];
   const handleLine = (line: string) => {
     const trimmed = line.trim();
@@ -196,6 +229,7 @@ async function readStream(body: ReadableStream<Uint8Array>, model: string, token
     if (!data || data === '[DONE]') return;
     let chunk: unknown;
     try { chunk = JSON.parse(data); } catch { return; }
+    usage = parseUsage((chunk as { usage?: unknown }).usage) ?? usage;
     const delta = (chunk as { choices?: { delta?: { content?: unknown; tool_calls?: unknown } }[] }).choices?.[0]?.delta;
     const text = delta?.content;
     if (typeof text === 'string' && text.length > 0) {
@@ -225,7 +259,7 @@ async function readStream(body: ReadableStream<Uint8Array>, model: string, token
   }
   handleLine(buffer);
   const completed = toolCalls.filter((call) => call.function.name.length > 0);
-  return { model, token_id: token, content, ...(completed.length > 0 ? { tool_calls: completed } : {}) };
+  return { model, token_id: token, content, ...(completed.length > 0 ? { tool_calls: completed } : {}), ...(usage ? { usage } : {}) };
 }
 
 function parseModelResponse(payload: unknown, model: string, token: string): ModelResponse {
@@ -238,7 +272,8 @@ function parseModelResponse(payload: unknown, model: string, token: string): Mod
   if (content !== undefined && content !== null && typeof content !== 'string') throw error('MOD-004', 'blocker', 'Model response content is invalid.', 'Check the provider response schema.');
   if (toolCalls !== undefined && toolCalls !== null && !Array.isArray(toolCalls)) throw error('MOD-004', 'blocker', 'Model tool calls are invalid.', 'Check the provider response schema.');
   const parsedCalls = Array.isArray(toolCalls) ? toolCalls.map(parseToolCall) : undefined;
-  return { model, token_id: token, content: typeof content === 'string' ? content : '', ...(parsedCalls && parsedCalls.length > 0 ? { tool_calls: parsedCalls } : {}) };
+  const usage = parseUsage((payload as { usage?: unknown }).usage);
+  return { model, token_id: token, content: typeof content === 'string' ? content : '', ...(parsedCalls && parsedCalls.length > 0 ? { tool_calls: parsedCalls } : {}), ...(usage ? { usage } : {}) };
 }
 
 function parseToolCall(raw: unknown): ModelToolCall {

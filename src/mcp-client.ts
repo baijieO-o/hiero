@@ -1,21 +1,25 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { StdioClientTransport, type StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { error } from './contracts.js';
 import type { ModelToolDefinition } from './model-gateway.js';
 
 export interface McpServerConfig {
   name: string;
-  transport: 'stdio' | 'sse';
+  transport: 'stdio' | 'sse' | 'http';
   command?: string;
   args?: string[];
   cwd?: string;
   url?: string;
+  headers?: Record<string, string>;
   env?: Record<string, string>;
 }
 
-interface ConnectedMcpServer { config: McpServerConfig; client: Client; transport: StdioClientTransport | SSEClientTransport; tools: Tool[]; }
+type McpTransport = StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport;
+
+interface ConnectedMcpServer { config: McpServerConfig; client: Client; transport: McpTransport; tools: Tool[]; }
 
 export interface McpServerStatus { name: string; connected: boolean; tool_count: number; error?: string; }
 
@@ -27,9 +31,7 @@ export class McpToolClient {
   public async connect(config: McpServerConfig): Promise<void> {
     if (this.servers.has(config.name)) return;
     const client = new Client({ name: 'hiero', version: '0.1.0' });
-    const transport = config.transport === 'stdio'
-      ? new StdioClientTransport({ command: config.command ?? '', ...(config.args ? { args: config.args } : {}), ...(config.cwd ? { cwd: config.cwd } : {}), ...(config.env ? { env: config.env } : {}) })
-      : new SSEClientTransport(new URL(config.url ?? ''));
+    const transport = createTransport(config);
     try {
       await client.connect(transport);
       const { tools } = await client.listTools();
@@ -68,6 +70,16 @@ export class McpToolClient {
     this.servers.clear();
     this.failures.clear();
   }
+}
+
+function createTransport(config: McpServerConfig): McpTransport {
+  if (config.transport === 'stdio') {
+    return new StdioClientTransport({ command: config.command ?? '', ...(config.args ? { args: config.args } : {}), ...(config.cwd ? { cwd: config.cwd } : {}), ...(config.env ? { env: config.env } : {}) });
+  }
+  const url = new URL(config.url ?? '');
+  const requestInit = config.headers ? { headers: config.headers } : undefined;
+  if (config.transport === 'sse') return new SSEClientTransport(url, requestInit ? { requestInit } : undefined);
+  return new StreamableHTTPClientTransport(url, requestInit ? { requestInit } : undefined);
 }
 
 export function mcpToolDefinition(tool: Tool): ModelToolDefinition {

@@ -20,7 +20,18 @@ export interface PreferenceValues {
   backgroundOpacity: number;
   panelOpacity: number;
   textColor: string;
+  panelGradient: boolean;
+  panelBlur: number;
+  loaderStyle: LoaderStyle;
+  panelAnimation: PanelAnimation;
+  animationSpeed: number;
+  scrollbarVisibility: ScrollbarVisibility;
+  hotEdgeSidebar: boolean;
 }
+
+type LoaderStyle = 'dots' | 'spinner' | 'pulse' | 'none';
+type PanelAnimation = 'fade' | 'slide' | 'none';
+type ScrollbarVisibility = 'always' | 'hover' | 'hidden';
 
 const DEFAULT_ACCENT = '#a5ec68';
 
@@ -51,7 +62,14 @@ export const PREFERENCE_SCHEMA: PreferenceField[] = [
   { key: 'backgroundImage', domain: '外观', title: '背景图片', description: '图片地址（http(s):// 或 file 可访问的 URL），或上传本地图片；留空则不使用背景图', type: 'text', default: '' },
   { key: 'backgroundOpacity', domain: '外观', title: '背景透明度（%）', description: '背景图的不透明度，越小越淡', type: 'number', minimum: 5, maximum: 100, default: 35 },
   { key: 'panelOpacity', domain: '外观', title: '面板不透明度（%）', description: '面板、标签栏、导航和底部栏的不透明度，调低后可透出背景图', type: 'number', minimum: 0, maximum: 100, default: 0 },
-    { key: 'textColor', domain: '外观', title: '文字颜色', description: '界面主要文字颜色，恢复默认请点击「重置」', type: 'color', default: '' },
+  { key: 'textColor', domain: '外观', title: '文字颜色', description: '界面主要文字颜色，恢复默认请点击「重置」', type: 'color', default: '' },
+  { key: 'panelGradient', domain: '外观', title: '渐变透明', description: '面板背景从上到下渐变为透明（需要面板不透明度低于 100%）', type: 'boolean', default: false },
+  { key: 'panelBlur', domain: '外观', title: '高斯模糊强度（px）', description: '面板背景的模糊半径，0 表示关闭', type: 'number', minimum: 0, maximum: 40, default: 18 },
+  { key: 'loaderStyle', domain: '动效', title: '加载动画', description: '流式生成中「思考中」的指示器样式', type: 'enum', options: [{ value: 'dots', label: '三点跳动' }, { value: 'spinner', label: '旋转圈' }, { value: 'pulse', label: '脉冲条' }, { value: 'none', label: '无' }], default: 'dots' },
+  { key: 'panelAnimation', domain: '动效', title: '面板动画', description: '面板展开、收起与切换时的过渡效果', type: 'enum', options: [{ value: 'fade', label: '淡入淡出' }, { value: 'slide', label: '滑动' }, { value: 'none', label: '无' }], default: 'fade' },
+  { key: 'animationSpeed', domain: '动效', title: '动画速率（倍率）', description: '1 为默认，大于 1 更快，小于 1 更慢；0 表示关闭动画', type: 'number', minimum: 0, maximum: 3, default: 1 },
+  { key: 'scrollbarVisibility', domain: '交互', title: '滚动条显示', description: '始终显示、鼠标悬停时显示，或隐藏（仍可滚动）', type: 'enum', options: [{ value: 'always', label: '始终显示' }, { value: 'hover', label: '悬停时显示' }, { value: 'hidden', label: '隐藏' }], default: 'hover' },
+  { key: 'hotEdgeSidebar', domain: '交互', title: '热边：鼠标靠近左边缘展开侧栏', description: '鼠标移到窗口左边缘时自动展开聊天侧栏，离开后收起', type: 'boolean', default: true },
   ];
 
 const DEFAULT_PREFERENCES = Object.fromEntries(PREFERENCE_SCHEMA.map((field) => [field.key, field.default])) as unknown as PreferenceValues;
@@ -71,6 +89,34 @@ export const usePreferences = create<PreferenceState>()(persist((set) => ({
   merge: (persisted, current) => {
     const saved = (persisted as Partial<PreferenceState> | undefined)?.values;
     return { ...current, values: { ...DEFAULT_PREFERENCES, ...saved } };
+  },
+}));
+
+export interface SubagentPreferences {
+  enabled: boolean;
+  maxTurns: number;
+  resultLimit: number;
+  maxConcurrent: number;
+  maxPerChat: number;
+}
+
+export const SUBAGENT_DEFAULTS: SubagentPreferences = { enabled: true, maxTurns: 4, resultLimit: 4000, maxConcurrent: 2, maxPerChat: 6 };
+
+interface SubagentState {
+  values: SubagentPreferences;
+  update: <K extends keyof SubagentPreferences>(key: K, value: SubagentPreferences[K]) => void;
+  reset: () => void;
+}
+
+export const useSubagentPreferences = create<SubagentState>()(persist((set) => ({
+  values: SUBAGENT_DEFAULTS,
+  update: (key, value) => set((state) => ({ values: { ...state.values, [key]: value } })),
+  reset: () => set({ values: SUBAGENT_DEFAULTS }),
+}), {
+  name: 'hiero-subagent',
+  merge: (persisted, current) => {
+    const saved = (persisted as Partial<SubagentState> | undefined)?.values;
+    return { ...current, values: { ...SUBAGENT_DEFAULTS, ...saved } };
   },
 }));
 
@@ -104,7 +150,14 @@ export function applyPreferenceTheme(values: PreferenceValues): void {
     root.style.removeProperty('--text');
     root.style.removeProperty('--text-muted');
   }
-  root.dataset.motion = values.reduceMotion ? 'reduce' : 'full';
+  root.style.setProperty('--panel-blur', `${values.panelBlur}px`);
+  root.style.setProperty('--panel-gradient-mask', values.panelGradient ? 'linear-gradient(to bottom, #000 0%, transparent 100%)' : 'none');
+  root.style.setProperty('--anim-speed', String(values.animationSpeed));
+  root.dataset.motion = values.reduceMotion || values.animationSpeed === 0 ? 'reduce' : 'full';
+  root.dataset.loader = values.loaderStyle;
+  root.dataset.panelAnim = values.panelAnimation;
+  root.dataset.scrollbar = values.scrollbarVisibility;
+  root.dataset.hotEdge = values.hotEdgeSidebar ? 'on' : 'off';
 }
 
 const BACKGROUND_ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
@@ -239,12 +292,21 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave }: { modelSe
   </form>;
 }
 
-export type McpServerEntry = { name: string; transport: 'stdio'; command: string; args: string[]; cwd?: string; env?: Record<string, string>; enabled: boolean };
+export type McpServerEntry =
+  | { name: string; transport?: 'stdio'; command: string; args: string[]; cwd?: string; env?: Record<string, string>; enabled: boolean }
+  | { name: string; transport: 'sse' | 'http'; url: string; headers?: Record<string, string>; enabled: boolean };
 export type McpServerStatus = { name: string; connected: boolean; tool_count: number; error?: string };
 export type McpConfigState = { servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string };
 export type McpSaveState = { status: 'idle' } | { status: 'saving' } | { status: 'saved' } | { status: 'error'; message: string };
 
 const MCP_TEMPLATE = JSON.stringify({ servers: [{ name: 'filesystem', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '.'], enabled: true }] }, null, 2);
+
+// Presets are disabled by default. They read credentials from the runtime env, never from this file.
+const MCP_PRESETS: Array<{ label: string; server: McpServerEntry }> = [
+  { label: '文件系统', server: { name: 'filesystem', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '.'], enabled: false } },
+  { label: 'GitHub', server: { name: 'github', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}' }, enabled: false } },
+  { label: 'Postgres', server: { name: 'postgres', command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', '${POSTGRES_URL}'], enabled: false } },
+];
 
 export function McpServersForm({ config, saveState, onSave }: { config: McpConfigState | null; saveState: McpSaveState; onSave: (servers: McpServerEntry[]) => void }): ReactElement {
   const [text, setText] = useState('');
@@ -270,8 +332,21 @@ export function McpServersForm({ config, saveState, onSave }: { config: McpConfi
   const statusByName = new Map((config?.statuses ?? []).map((status) => [status.name, status]));
   const statusText = saveState.status === 'saving' ? '保存并连接中…' : saveState.status === 'saved' ? '已保存' : saveState.status === 'error' ? saveState.message : '';
 
+  const addPreset = (preset: McpServerEntry) => {
+    let current: { servers?: unknown } = {};
+    try { current = JSON.parse(text) as { servers?: unknown }; } catch { current = {}; }
+    const servers = Array.isArray(current.servers) ? (current.servers as McpServerEntry[]) : [];
+    if (servers.some((server) => server.name === preset.name)) return;
+    setText(JSON.stringify({ servers: [...servers, preset] }, null, 2));
+    setParseError('');
+    setDirty(true);
+  };
+
   return <form className="settings-mcp-form" onSubmit={submit}>
-    <p className="settings-mcp-hint">仅支持 stdio：Hiero 会在本地启动这些命令并通过标准输入输出通信。保存到 {config?.path ?? '.hiero/mcp.json'}。</p>
+    <p className="settings-mcp-hint">支持 stdio（本地命令）以及 sse / http（远程 URL）。保存到 {config?.path ?? '.hiero/mcp.json'}。预设默认禁用；启用前请确认命令来源可信，凭据请通过环境变量提供。</p>
+    <div className="settings-mcp-presets" aria-label="MCP 预设">
+      {MCP_PRESETS.map((preset) => <button type="button" key={preset.server.name} className="ghost-button" onClick={() => addPreset(preset.server)}>添加预设：{preset.label}</button>)}
+    </div>
     {config && config.statuses.length > 0 && <ul className="settings-mcp-status">
       {config.statuses.map((status) => <li key={status.name} className={status.connected ? 'mcp-connected' : 'mcp-failed'}>
         <strong>{status.name}</strong>：{status.connected ? `已连接，${status.tool_count} 个工具` : `未连接 — ${statusByName.get(status.name)?.error ?? '未知错误'}`}
@@ -295,6 +370,9 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, mcpConfig
   const values = usePreferences((state) => state.values);
   const update = usePreferences((state) => state.update);
   const reset = usePreferences((state) => state.reset);
+  const subagent = useSubagentPreferences((state) => state.values);
+  const updateSubagent = useSubagentPreferences((state) => state.update);
+  const resetSubagent = useSubagentPreferences((state) => state.reset);
   const [query, setQuery] = useState('');
 
   const fields = useMemo(() => PREFERENCE_SCHEMA.filter((field) => `${field.domain}${field.title}${field.description}`.toLowerCase().includes(query.trim().toLowerCase())), [query]);
@@ -312,6 +390,32 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, mcpConfig
         <PreferenceControl field={field} value={values[field.key]} onChange={(next) => update(field.key, next)} />
       </label>)}
     </div>)}
+    <div className="settings-domain">
+      <h3>子代理</h3>
+      <label className="settings-row">
+        <span><strong>启用只读子代理</strong><small>允许模型把调研任务交给只读子代理（只能读文件、列目录、查记忆）。关闭后模型不再看到 delegate_read 工具。</small></span>
+        <input type="checkbox" checked={subagent.enabled} onChange={(event) => updateSubagent('enabled', event.target.checked)} aria-label="启用只读子代理" />
+      </label>
+      <label className="settings-row">
+        <span><strong>最大轮数</strong><small>子代理最多调用模型几轮（1–10）。越大越能深入调研，耗时和成本也越高。</small></span>
+        <input type="number" value={subagent.maxTurns} min={1} max={10} onChange={(event) => updateSubagent('maxTurns', Number(event.target.value))} aria-label="子代理最大轮数" />
+      </label>
+      <label className="settings-row">
+        <span><strong>结果长度上限（字符）</strong><small>子代理返回给主对话的摘要最长字符数（500–20000）。</small></span>
+        <input type="number" value={subagent.resultLimit} min={500} max={20000} step={100} onChange={(event) => updateSubagent('resultLimit', Number(event.target.value))} aria-label="子代理结果长度上限" />
+      </label>
+      <label className="settings-row">
+        <span><strong>每轮最多子代理调用数</strong><small>模型一次回复中最多同时委派几个子代理（1–4），超出的调用会被拒绝。</small></span>
+        <input type="number" value={subagent.maxConcurrent} min={1} max={4} onChange={(event) => updateSubagent('maxConcurrent', Number(event.target.value))} aria-label="每轮最多子代理调用数" />
+      </label>
+      <label className="settings-row">
+        <span><strong>每次聊天最多子代理调用数</strong><small>一次对话请求中子代理总调用次数上限（1–20），防止失控委派。</small></span>
+        <input type="number" value={subagent.maxPerChat} min={1} max={20} onChange={(event) => updateSubagent('maxPerChat', Number(event.target.value))} aria-label="每次聊天最多子代理调用数" />
+      </label>
+      <div className="settings-form-actions">
+        <button type="button" className="ghost-button" onClick={resetSubagent}>恢复子代理默认值</button>
+      </div>
+    </div>
     <div className="settings-domain">
       <h3>模型与网关</h3>
       {modelSettings

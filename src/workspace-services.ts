@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
@@ -103,10 +104,18 @@ function decodeOutput(buffer: Buffer): string {
  */
 export function runCommand(root: string, command: string, cwd = '', timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CommandResult> {
   const directory = resolveWorkspacePath(root, cwd);
+  const relativeCwd = relative(root, directory).split(sep).join('/');
+  const containerCwd = relativeCwd ? `/workspace/${relativeCwd}` : '/workspace';
   return new Promise((resolvePromise) => {
     const chunks: Buffer[] = [];
     let timedOut = false;
-    const child = spawn(command, { cwd: directory, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('docker', [
+      'run', '--rm', '--network', 'none', '--read-only', '--cap-drop=ALL',
+      '--security-opt=no-new-privileges', '--pids-limit=128', '--memory=512m', '--cpus=1',
+      '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
+      '--mount', `type=bind,source=${realpathSync(root)},target=/workspace`,
+      '--workdir', containerCwd, 'node:22-alpine', 'sh', '-lc', command,
+    ], { cwd: directory, stdio: ['ignore', 'pipe', 'pipe'] });
     const append = (chunk: Buffer) => {
       chunks.push(chunk);
     };
@@ -118,17 +127,11 @@ export function runCommand(root: string, command: string, cwd = '', timeoutMs = 
     }, timeoutMs);
     child.on('close', (exitCode) => {
       clearTimeout(timer);
-      resolvePromise({
-        command,
-        cwd: relative(root, directory).split(sep).join('/'),
-        exitCode,
-        output: decodeOutput(Buffer.concat(chunks)).slice(0, MAX_OUTPUT_CHARS),
-        timedOut,
-      });
+      resolvePromise({ command, cwd: relativeCwd, exitCode, output: decodeOutput(Buffer.concat(chunks)).slice(0, MAX_OUTPUT_CHARS), timedOut });
     });
     child.on('error', (cause) => {
       clearTimeout(timer);
-      resolvePromise({ command, cwd: relative(root, directory).split(sep).join('/'), exitCode: null, output: cause.message, timedOut });
+      resolvePromise({ command, cwd: relativeCwd, exitCode: null, output: `Docker sandbox unavailable: ${cause.message}`, timedOut });
     });
   });
 }

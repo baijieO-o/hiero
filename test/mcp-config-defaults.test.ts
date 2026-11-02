@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { DEFAULT_MCP_CONFIG, mcpConfigPath, readMcpConfig, saveMcpConfig } from '../src/mcp-config.js';
+import { defaultMcpConfig, mcpConfigPath, readMcpConfig, saveMcpConfig } from '../src/mcp-config.js';
 
 function tempRoot(label: string): string {
   return mkdtempSync(join(tmpdir(), `hiero-mcp-${label}-`));
@@ -13,8 +13,10 @@ describe('default MCP servers', () => {
   it('injects the default server and writes it to disk when no config exists', () => {
     const root = tempRoot('fresh');
     try {
-      assert.deepEqual(readMcpConfig(root), DEFAULT_MCP_CONFIG);
-      assert.deepEqual(JSON.parse(readFileSync(mcpConfigPath(root), 'utf8')), DEFAULT_MCP_CONFIG);
+      assert.deepEqual(readMcpConfig(root), defaultMcpConfig(root));
+      assert.deepEqual(JSON.parse(readFileSync(mcpConfigPath(root), 'utf8')), defaultMcpConfig(root));
+      const [server] = defaultMcpConfig(root).servers;
+      assert.ok(server && 'args' in server && server.args.at(-1) === root, 'default filesystem root follows the workspace, not a hardcoded path');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
