@@ -469,3 +469,11 @@ button, textarea, select { font: inherit; }
   word-break: break-all;
   font-size: 11px;
 }
+
+.verify-result, .rewind-result { margin-top: 14px; padding: 10px 12px; border-radius: 4px; font-size: 11px; background: var(--surface-2); color: var(--text); }
+.verify-result.passed { border-left: 3px solid var(--accent); }
+.verify-result.failed { border-left: 3px solid #e5484d; }
+.verify-check { margin-top: 6px; color: var(--text-muted); }
+.verify-check span { display: inline-block; min-width: 56px; font-weight: 700; }
+.rewind-result { border-left: 3px solid #d59e2a; }
+

@@ -297,7 +297,14 @@ export class HieroRuntime {
     const tools = new ToolGateway();
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
-    return new AgentWorkflow(this.machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter), (to, verified) => this.runtime.transition(to, verified), (document) => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document }));
+    return new AgentWorkflow(this.machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter), (to, verified) => this.runtime.transition(to, verified), (document) => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document }), {
+      onVerification: (result) => this.runtime.broadcast({ type: 'VERIFY_RESULT', payload: result }),
+      rewind: async () => {
+        const result = await this.writeSnapshots.rollback();
+        if (result.skipped.length > 0) this.runtime.broadcast({ type: 'ERROR', payload: humanModifiedWarning(result.skipped).record });
+        this.runtime.broadcast({ type: 'REWIND_RESULT', payload: { restored: result.restored, skipped: result.skipped } });
+      },
+    });
   }
 
   /** Returns model settings for display. API tokens are never returned, only their count. */
@@ -568,6 +575,8 @@ export class HieroRuntime {
         this.runtime.completeState(AgentState.Handoff);
         return;
       }
+      this.machine.beginTask();
+      this.writeSnapshots.clear();
       const before = await snapshotTextFiles(task.workspace_path);
       const outcome = await this.createWorkflow(task.workspace_path).run(task, message.goal, [WRITE_FILE_TOOL_DEFINITION, ...(message.tools ?? [])]);
       if ('handoff' in outcome) {

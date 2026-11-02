@@ -8,7 +8,7 @@
 
 当前已完成并验证：
 
-- TypeScript 后端显式状态机：`Plan → Exec → Verify`，以及 `Handoff`、`Rewind`。
+- TypeScript 后端显式状态机：`Plan → Exec → Verify`，以及 `Handoff`、`Rewind`。Verify 由任务的 `cmd:` 验收标准驱动（在 Docker 沙箱中执行，退出码为 0 即通过）；失败或 Exec 出错时回滚并重新规划，最多重试 2 次，耗尽后交接给人工。严格模式下拒绝执行 `cmd:` 验收命令。
 - `TaskContract`、`HandoffDocument`、`ErrorRecord` 等核心契约。
 - OpenAI-compatible Model Gateway：令牌池、429 冷却、401 废弃、fallback 基础逻辑。
 - Tool Gateway：Zod 参数校验、权限检查、证据记录。
@@ -166,7 +166,7 @@ node .\dist\examples\real-test.js
 - MCP 运行时默认 Server 自动发现和严格 JSON Schema → Zod 转换尚未完整闭环。前端 MCP 预设（文件系统、GitHub、Postgres）默认禁用。
 - SystemAgent 是独立进程，不等同于安全沙箱；扩展依赖仍可能在宿主机执行。
 - 前端各面板尚未统一为单一、带重连的 WebSocket 事件总线。
-- 已有全局准则与项目记忆（第 0、1 层，聊天时注入）；第 2 层深层记忆已实现为本地关键词检索（无向量库），完整 Verify（编译/测试/格式化）闭环或自动 Git commit 审批流程。
+- 已有全局准则与项目记忆（第 0、1 层，聊天时注入）；第 2 层深层记忆已实现为本地关键词检索（无向量库），自动 Git commit 审批流程。（Verify 闭环已由 `cmd:` 验收标准实现，见上文。）
 - 根项目仍缺少真正的生产级权限审批、回退保护和人类修改检测。
 
 ## 核心目录

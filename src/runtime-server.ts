@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ErrorRecord, HandoffDocument } from './contracts.js';
 import { AgentStateMachine, type AgentState, type StateTransition } from './state-machine.js';
+import type { VerificationResult } from './verification.js';
 import type { ChatTraceEvent } from './chat-trace.js';
 import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
@@ -9,6 +10,8 @@ export type RuntimeEvent =
   | { type: 'STATE_CHANGE'; payload: { node: AgentState; status: 'running' | 'completed' } }
   | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
+  | { type: 'VERIFY_RESULT'; payload: VerificationResult }
+  | { type: 'REWIND_RESULT'; payload: { restored: string[]; skipped: string[] } }
   | { type: 'EXTENSION_READY'; payload: { request_id: string; plugin_path: string; mcp_config_path: string } }
   | { type: 'ERROR'; payload: ErrorRecord }
   | { type: 'CHAT_DELTA'; payload: { request_id: string; text: string } }

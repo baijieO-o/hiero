@@ -16,6 +16,9 @@ const transitions: Record<AgentState, readonly AgentState[]> = {
   [AgentState.Rewind]: [AgentState.Plan],
 };
 
+/** States after which a new task may start. Verify is only terminal once it has passed. */
+const TERMINAL_STATES: readonly AgentState[] = [AgentState.Verify, AgentState.Handoff];
+
 export interface StateTransition {
   from: AgentState;
   to: AgentState;
@@ -45,6 +48,18 @@ export class AgentStateMachine {
     this.current = to;
     this.history.push(transition);
     return transition;
+  }
+
+  /**
+   * Prepares the machine for a new task. A task that ended in Verify passed verification, so the
+   * machine may move to Plan; a task that ended in Handoff resumes from Plan. Other states are mid-task.
+   */
+  public beginTask(): StateTransition | undefined {
+    if (this.current === AgentState.Plan) return undefined;
+    if (!TERMINAL_STATES.includes(this.current)) {
+      throw error('ORG-003', 'blocker', `Cannot start a task while in ${this.current}.`, 'Wait for the current task to reach Verify or Handoff.');
+    }
+    return this.transition(AgentState.Plan, this.current === AgentState.Verify);
   }
 
   public assertHealthy(): void {

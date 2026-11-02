@@ -69,7 +69,7 @@ Hiero 是个人使用的、开源的、本地优先的 Agent 工作台。它是�
 - **三层记忆。** 第 0、1 层已实现（聊天与任务规划均注入）。
   - 第 0 层（全局准则）：跨项目常驻，类似 `CLAUDE.md`，有 Token 上限（MEM-001）。
   - 第 1 层（项目记忆）：工作区级，随项目加载。
-  - 第 2 层（深层记忆）：已实现为本地 JSONL + 关键词重合检索（`src/deep-memory.ts`），聊天与规划时注入相关条目；模型可通过 `memory_remember` / `memory_recall` 读写，`memory_append` 仅追加第 0/1 层。向量检索与 MCP 方向待定。
+  - 第 2 层（深层记忆）：已实现为本地 JSONL + 关键词重合检索（`src/deep-memory.ts`），聊天与规划时注入相关条目；模型可通过 `memory_remember` / `memory_recall` 读写，`memory_append` 仅追加第 0/1 层。向量检索为有意的范围外（不引入嵌入模型依赖），由 `test/deep-memory.test.ts` 覆盖关键词检索行为。
   - 记忆规则冲突时报 MEM-002。
 - **评估与回归。** 评估用例校验结果与预期错误码。所有变更须通过回归测试。
 

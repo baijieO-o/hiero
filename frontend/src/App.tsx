@@ -896,14 +896,18 @@ function DebugConsole(): ReactElement {
 
 function TodoList(): ReactElement {
   const [currentNode, setCurrentNode] = useState('Plan');
+  const [verify, setVerify] = useState<{ verified: boolean; checks: { criterion: string; status: string; reason?: string }[] } | null>(null);
+  const [rewind, setRewind] = useState<{ restored: string[]; skipped: string[] } | null>(null);
   useEffect(() => connectRuntime((message) => {
+    if (message.type === 'VERIFY_RESULT') { setVerify(message.payload as unknown as typeof verify); return; }
+    if (message.type === 'REWIND_RESULT') { setRewind(message.payload as unknown as typeof rewind); return; }
     if (message.type !== 'STATE_CHANGE') return;
     const node = typeof message.payload?.node === 'string' ? message.payload.node : undefined;
     const status = typeof message.payload?.status === 'string' ? message.payload.status : undefined;
     if (node && status) setCurrentNode(node);
   }), []);
   const statuses: TodoStatus[] = TODO_ITEMS.map((_, index) => index < Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'done' : index === Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'active' : 'pending');
-  return <section className="panel-content"><PanelHeader eyebrow="状态机" title="待办清单" /><div className="todo-list">{TODO_ITEMS.map((label, index) => <div className={`todo-item ${statuses[index]}`} key={label}><span className="todo-mark">{statuses[index] === 'done' ? '✓' : statuses[index] === 'active' ? '◌' : ''}</span><span>{label}</span></div>)}</div><p className="todo-note">仅根据状态机广播同步 · 当前节点：{currentNode}</p></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="状态机" title="待办清单" /><div className="todo-list">{TODO_ITEMS.map((label, index) => <div className={`todo-item ${statuses[index]}`} key={label}><span className="todo-mark">{statuses[index] === 'done' ? '✓' : statuses[index] === 'active' ? '◌' : ''}</span><span>{label}</span></div>)}</div><p className="todo-note">仅根据状态机广播同步 · 当前节点：{currentNode}</p>{verify && <div className={`verify-result ${verify.verified ? 'passed' : 'failed'}`}><strong>{verify.verified ? 'Verify passed' : 'Verify failed'}</strong>{verify.checks.map((check) => <div className="verify-check" key={check.criterion}><span>{check.status}</span> {check.criterion}{check.reason ? <em> ({check.reason})</em> : null}</div>)}</div>}{rewind && <div className="rewind-result"><strong>Rewind</strong> restored {rewind.restored.length} file(s){rewind.skipped.length > 0 ? `, skipped ${rewind.skipped.length} human-edited` : ''}</div>}</section>;
 }
 
 const DiffEditor = lazy(async () => {
