@@ -1,0 +1,93 @@
+import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { z } from 'zod';
+import type { RegisteredTool } from './tool-gateway.js';
+import type { WriteSnapshotStore } from './write-snapshots.js';
+
+export const writeFileInput = z.object({
+  path: z.string().min(1),
+  content: z.string(),
+});
+
+export const readFileInput = z.object({ path: z.string().min(1) });
+export const listDirInput = z.object({ path: z.string().default('.') });
+
+export function resolveWorkspacePath(workspacePath: string, path: string): string {
+  const target = resolve(workspacePath, path);
+  const workspace = resolve(workspacePath);
+  if (isAbsolute(path) || !isInside(workspace, target)) {
+    throw new Error('Path must stay inside the configured workspace.');
+  }
+  const realWorkspace = realpathSync(workspace);
+  const realTarget = realpathOfExisting(target);
+  if (!isInside(realWorkspace, realTarget)) {
+    throw new Error('Path must stay inside the configured workspace.');
+  }
+  return target;
+}
+
+function isInside(root: string, candidate: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}/`) || candidate.startsWith(`${root}\\`);
+}
+
+/** Resolves symlinks for the longest existing prefix of a path, so links cannot escape the workspace. */
+function realpathOfExisting(target: string): string {
+  let current = target;
+  const missing: string[] = [];
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    missing.unshift(basename(current));
+    current = parent;
+  }
+  return join(realpathSync(current), ...missing);
+}
+
+export function createReadFileTool(workspacePath: string): RegisteredTool<z.infer<typeof readFileInput>, { path: string; content: string }> {
+  return {
+    name: 'read_file',
+    inputSchema: readFileInput,
+    effect: 'read',
+    execute: async ({ path }) => {
+      const target = resolveWorkspacePath(workspacePath, path);
+      const info = await stat(target);
+      if (info.isDirectory()) throw new Error(`"${path}" is a directory; use list_dir to list its entries.`);
+      const content = await readFile(target, 'utf8');
+      return { path: target, content: content.slice(0, 20_000) };
+    },
+  };
+}
+
+export function createListDirTool(workspacePath: string): RegisteredTool<z.infer<typeof listDirInput>, { path: string; entries: { name: string; type: 'file' | 'directory' }[] }> {
+  return {
+    name: 'list_dir',
+    inputSchema: listDirInput,
+    effect: 'read',
+    execute: async ({ path }) => {
+      const target = resolveWorkspacePath(workspacePath, path);
+      const dirents = await readdir(target, { withFileTypes: true });
+      const entries = dirents
+        .slice(0, 500)
+        .map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' as const : 'file' as const }))
+        .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'directory' ? -1 : 1));
+      return { path: target, entries };
+    },
+  };
+}
+
+export function createWriteFileTool(workspacePath: string, snapshots?: WriteSnapshotStore): RegisteredTool<z.infer<typeof writeFileInput>, { path: string; bytes: number }> {
+  return {
+    name: 'write_file',
+    inputSchema: writeFileInput,
+    irreversible: true,
+    effect: 'workspace',
+    execute: async ({ path, content }) => {
+      const target = resolveWorkspacePath(workspacePath, path);
+      const { previous } = snapshots ? await snapshots.captureBeforeWrite(target) : { previous: null };
+      await writeFile(target, content, 'utf8');
+      snapshots?.recordWrite(target, previous, content);
+      return { path: target, bytes: Buffer.byteLength(content, 'utf8') };
+    },
+  };
+}
