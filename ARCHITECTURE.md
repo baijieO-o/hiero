@@ -236,7 +236,9 @@ interface ErrorRecord {
 **已核实的现状**
 
 - 权限已有三档 `strict` / `standard` / `auto`（`permission_mode`）。聊天发送前与 Mission Control 中提供 `PermissionModePicker`（`frontend/src/permission-mode.tsx`），逐档说明实际允许与需要确认的行为，选择后随任务下发。但没有“自动”档的二次确认，也不是“建议 / 确认后执行 / 自治”的三段式模式。终端命令（`term_exec`）仍固定为“标准”。
-- 预算已被执行器强制：`budget_envelope.max_time_ms` 超限触发 MOD-006，`max_tokens` 触发上下文交接（`src/agent-executor.ts`）。分析中“预算无硬约束”的说法不成立，但预算仅由后端写死的默认值（4000 token / 120 秒）提供，用户不可调。
+- 任务卡（`frontend/src/task-card.tsx`，模型见 `task-card-model.ts`）在 Mission Control 中展示目标、成功标准、权限、预算与确认点；预算仅在失焦时校验。
+- 澄清向导（`frontend/src/clarify-wizard.tsx`，模型见 `clarify-model.ts`）在目标过短时替代直接启动，仅收集成功标准与“可修改 / 只读”；“只读”映射为后端“严格”档，这是前端假设，后端没有独立的只读模式。
+- 审批弹窗（`frontend/src/approval-dialog.tsx`，模型见 `approval-model.ts`）承接 `APPROVAL_REQUIRED`，显示风险、120 秒自动拒绝倒计时、可撤销性，Esc 拒绝。已用注入的假 WebSocket 在浏览器验证渲染与回复；真实后端触发链路未在本次验证中走通。- 预算已被执行器强制：`budget_envelope.max_time_ms` 超限触发 MOD-006，`max_tokens` 触发上下文交接（`src/agent-executor.ts`）。分析中“预算无硬约束”的说法不成立，但预算仅由后端写死的默认值（4000 token / 120 秒）提供，用户不可调。
 - Token 计量为字符数近似值（README 已声明）。
 - 前端 Mission Control、TodoList、CodeReview、HandoffPanel 以观测为主，计划步骤不可编辑。
 - 记忆分层存在，但用户不能查看、编辑、删除，也没有写入前的确认流程。
