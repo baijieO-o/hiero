@@ -783,7 +783,7 @@ function ChatPanel(): ReactElement {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
               </button>
               <details className="chat-tool-details">
-                <summary className="chat-option chat-permission-chip" title="发送前选择权限模式">权限：{options.permission}</summary>
+                <summary className="chat-pill chat-pill-summary" title="发送前选择权限模式"><span className="chat-pill-label">权限</span><span className="chat-pill-value">{options.permission}</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></summary>
                 <div className="chat-tool-panel">
                   <PermissionModePicker value={isPermissionLabel(options.permission) ? options.permission : '标准'} disabled={pending} onChange={(value) => setOption('permission', value)} />
                 </div>
@@ -807,7 +807,12 @@ function ChatPanel(): ReactElement {
   </section>;
 }
 function ChatOptionSelect({ label, value, options, disabled, onChange }: { label: string; value: string; options: string[]; disabled: boolean; onChange: (value: string) => void }): ReactElement {
-  return <label className="chat-option"><span>{label}</span><select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>{options.map((option) => <option key={option}>{option}</option>)}</select></label>;
+  return <label className="chat-pill">
+    <span className="chat-pill-label">{label}</span>
+    <span className="chat-pill-value">{value}</span>
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+    <select className="chat-pill-select" aria-label={label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>{options.map((option) => <option key={option}>{option}</option>)}</select>
+  </label>;
 }
 
 function MissionControl(): ReactElement {
