@@ -68,9 +68,10 @@ interface WorkspaceState {
   screens: Record<string, unknown | null>;
   activeScreen: string;
   buffers: BufferEntry[];
+  roots: Record<string, string>;
   setSerializedLayout: (layout: unknown) => void;
   setActiveScreen: (name: string) => void;
-  addScreen: (name: string) => void;
+  addScreen: (name: string, root?: string) => void;
   resetLayout: () => void;
   addBuffer: (kind: PanelKind, workspaceId: string) => string;
   removeBuffer: (id: string) => void;
@@ -83,10 +84,15 @@ const useWorkspaceStore = create<WorkspaceState>()(persist((set) => ({
   screens: { [DEFAULT_SCREEN]: null },
   activeScreen: DEFAULT_SCREEN,
   buffers: [],
+  roots: {},
   browserUrls: {},
   setSerializedLayout: (layout) => set((state) => ({ screens: { ...state.screens, [state.activeScreen]: layout } })),
   setActiveScreen: (name) => set({ activeScreen: name }),
-  addScreen: (name) => set((state) => ({ screens: { ...state.screens, [name]: null }, activeScreen: name })),
+  addScreen: (name, root) => set((state) => ({
+    screens: { ...state.screens, [name]: null },
+    roots: root ? { ...state.roots, [name]: root } : state.roots,
+    activeScreen: name,
+  })),
   resetLayout: () => set((state) => ({ screens: { ...state.screens, [state.activeScreen]: null } })),
   addBuffer: (kind, workspaceId) => {
     const id = `buffer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -114,6 +120,12 @@ const useWorkspaceStore = create<WorkspaceState>()(persist((set) => ({
     return state as WorkspaceState;
   },
 }));
+
+// Root directory of the active workspace; undefined falls back to the backend default.
+function activeWorkspaceRoot(): string | undefined {
+  const state = useWorkspaceStore.getState();
+  return state.roots[state.activeScreen] || undefined;
+}
 
 const COMMAND_ALIASES: Record<string, PanelKind> = {
   CHAT: 'chat',
@@ -1167,7 +1179,7 @@ function requestWorkspace(body: WorkspaceRequestBody): Promise<Record<string, un
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const socket = new WebSocket(RUNTIME_WS_URL);
     const timer = window.setTimeout(() => { socket.close(); reject(new Error('请求超时，运行时无响应')); }, 60_000);
-    const workspace = useChatStore.getState().options.workspace;
+    const workspace = body.workspace ?? useChatStore.getState().options.workspace;
     socket.onopen = () => socket.send(JSON.stringify({ ...body, workspace, request_id: requestId }));
     socket.onerror = () => { window.clearTimeout(timer); reject(new Error('无法连接运行时 ' + RUNTIME_WS_URL)); };
     socket.onmessage = (event) => {
@@ -1567,7 +1579,7 @@ function FileManagerBuffer(): ReactElement {
     const requestId = ++listRequest.current;
     setError(null);
     setLoading(true);
-    requestWorkspace({ type: 'fs_list', path: nextPath })
+    requestWorkspace({ type: 'fs_list', path: nextPath, workspace: activeWorkspaceRoot() })
       .then((payload) => {
         if (requestId !== listRequest.current) return;
         const nextEntries = (payload.entries as WorkspaceEntry[]) ?? [];
@@ -1769,7 +1781,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
   const prompt = `PS ${root}>`;
   const workspace = useChatStore((state) => state.options.workspace);
   useEffect(() => {
-    requestWorkspace({ type: 'fs_list', path: '' }).then((payload) => { if (typeof payload.root === 'string') setRoot(payload.root); }).catch(() => undefined);
+    requestWorkspace({ type: 'fs_list', path: '', workspace: activeWorkspaceRoot() }).then((payload) => { if (typeof payload.root === 'string') setRoot(payload.root); }).catch(() => undefined);
   }, [workspace]);
   useEffect(() => { if (!hidden) inputRef.current?.focus(); }, [hidden]);
   const run = (event: ReactFormEvent) => {
@@ -1780,7 +1792,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
     setCommand('');
     setHistoryIndex(null);
     setCommandHistory((current) => [...current, text]);
-    requestWorkspace({ type: 'term_exec', command: text, permission: '标准' })
+    requestWorkspace({ type: 'term_exec', command: text, permission: '标准', workspace: activeWorkspaceRoot() })
       .then((payload) => {
         if (typeof payload.root === 'string') setRoot(payload.root);
         const body = String(payload.output ?? '').replace(/\s+$/, '');
@@ -1874,6 +1886,8 @@ function App(): ReactElement {
   const activeScreen = useWorkspaceStore((state) => state.activeScreen);
   const buffers = useWorkspaceStore((state) => state.buffers);
   const activeBuffers = buffers.filter((buffer) => buffer.workspaceId === activeScreen);
+  const roots = useWorkspaceStore((state) => state.roots);
+  const activeRoot = roots[activeScreen] ?? '';
   const setSerializedLayout = useWorkspaceStore((state) => state.setSerializedLayout);
   const setActiveScreen = useWorkspaceStore((state) => state.setActiveScreen);
   const addScreen = useWorkspaceStore((state) => state.addScreen);
@@ -1985,10 +1999,18 @@ function App(): ReactElement {
     loadLayout(api, null, activeScreen);
   };
 
-  const onCreateScreen = () => {
+  const onCreateScreen = async () => {
     const name = screenDraft.trim();
     if (!api || !name || screens[name] !== undefined) return;
-    addScreen(name);
+    let root = '';
+    try {
+      const result = await requestWorkspace({ type: 'folder_pick', initialPath: activeRoot });
+      root = typeof result.path === 'string' ? result.path : '';
+    } catch {
+      root = '';
+    }
+    if (!root) return;
+    addScreen(name, root);
     loadLayout(api, null, name);
     setScreenDraft('');
   };
