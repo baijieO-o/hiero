@@ -502,3 +502,23 @@ button, textarea, select { font: inherit; }
 .task-card-criteria { min-height: 72px; }
 .task-card-hint { margin: 0; font-size: 12px; color: #57606a; line-height: 1.5; }
 .task-card-confirm { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+
+/* 输入框：圆角一体容器，工具栏在底部 */
+.chat-composer .chat-input-box { gap: 0; padding: 10px 10px 8px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); }
+.chat-composer .chat-input-box:focus-within { border-color: var(--accent, #1f6feb); }
+.chat-composer .chat-input-box textarea { border: none; outline: none; background: transparent; box-shadow: none; padding: 4px 4px 8px; min-height: 48px; max-height: 220px; }
+.chat-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chat-toolbar .chat-option select { max-width: 150px; }
+.chat-toolbar-spacer { flex: 1; }
+.chat-tool-details { position: relative; }
+.chat-tool-details > summary { list-style: none; cursor: pointer; }
+.chat-tool-details > summary::-webkit-details-marker { display: none; }
+.chat-permission-chip { color: var(--text); }
+.chat-tool-panel { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 20; min-width: 320px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-1, var(--surface-2)); box-shadow: 0 8px 24px rgba(0, 0, 0, .2); }
+.chat-composer .chat-attach-button { width: 30px; height: 30px; border: none; border-radius: 50%; background: transparent; }
+.chat-send-round { flex: none; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: none; border-radius: 50%; background: var(--text-strong, #111); color: var(--surface-1, #fff); cursor: pointer; }
+.chat-send-round:disabled { opacity: .35; cursor: default; }
+.chat-stop-round { background: #d1242f; color: #fff; }
+.chat-workspace-row { display: flex; align-items: center; gap: 6px; padding: 0 4px; font-size: 11px; color: var(--text-muted); }
+.chat-workspace-row span { font-weight: 700; letter-spacing: .04em; }
+.chat-workspace-row input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--text); font-size: 11px; font-family: inherit; }

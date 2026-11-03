@@ -767,17 +767,7 @@ function ChatPanel(): ReactElement {
         </div>
         {error && <p className="chat-error">{error}</p>}
         {folderError && <p className="chat-error">{folderError}</p>}
-        <div className="chat-composer">
-          <details className="permission-details">
-            <summary>权限：{options.permission}（发送前请确认）</summary>
-            <PermissionModePicker value={isPermissionLabel(options.permission) ? options.permission : '标准'} disabled={pending} onChange={(value) => setOption('permission', value)} />
-          </details>
-          <div className="chat-options">
-            <ChatOptionSelect label="模型" value={options.model} options={CHAT_MODEL_OPTIONS} disabled={pending} onChange={(value) => setOption('model', value)} />
-            <label className="chat-option chat-option-wide"><span>工作区</span><input value={options.workspace} disabled={pending} placeholder="绝对路径" onChange={(event) => setOption('workspace', event.target.value)} /><button type="button" className="chat-folder-button" disabled={pending || folderPicking} onClick={() => { void pickWorkspaceFolder(); }} title="选择文件夹" aria-label="选择文件夹">…</button></label>
-            <ChatOptionSelect label="上下文" value={options.contextMode} options={CHAT_CONTEXT_OPTIONS} disabled={pending} onChange={(value) => setOption('contextMode', value)} />
-          </div>
-        <div className="chat-input-row" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={onDrop}>
+        <div className="chat-composer" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={onDrop}>
           <div className="chat-input-box">
             {(images.length > 0 || imageError) && <div className="chat-attachments">
               {images.map((src, index) => <div key={index} className="chat-attachment">
@@ -787,15 +777,30 @@ function ChatPanel(): ReactElement {
               {imageError && <span className="chat-attachment-error">{imageError}</span>}
             </div>}
             <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="发送消息给 Hiero……（可粘贴或拖入图片）" />
+            <div className="chat-toolbar">
+              <input ref={fileInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImageFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
+              <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              </button>
+              <details className="chat-tool-details">
+                <summary className="chat-option chat-permission-chip" title="发送前选择权限模式">权限：{options.permission}</summary>
+                <div className="chat-tool-panel">
+                  <PermissionModePicker value={isPermissionLabel(options.permission) ? options.permission : '标准'} disabled={pending} onChange={(value) => setOption('permission', value)} />
+                </div>
+              </details>
+              <ChatOptionSelect label="模型" value={options.model} options={CHAT_MODEL_OPTIONS} disabled={pending} onChange={(value) => setOption('model', value)} />
+              <ChatOptionSelect label="上下文" value={options.contextMode} options={CHAT_CONTEXT_OPTIONS} disabled={pending} onChange={(value) => setOption('contextMode', value)} />
+              <span className="chat-toolbar-spacer" />
+              {pending
+                ? <button className="chat-send-round chat-stop-round" type="button" onClick={cancel} title="停止生成" aria-label="停止生成">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
+                  </button>
+                : <button className="chat-send-round" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0} title={!draft.trim() && images.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+                  </button>}
+            </div>
           </div>
-          <input ref={fileInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImageFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
-          <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="M21 15l-5-5L5 21" /></svg>
-          </button>
-          {pending
-            ? <button className="primary-button" type="button" onClick={cancel} title="停止生成" aria-label="停止生成">停止</button>
-            : <button className="primary-button chat-send-button" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0} title={!draft.trim() && images.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">发送</button>}
-        </div>
+          <label className="chat-workspace-row"><span>工作区</span><input value={options.workspace} disabled={pending} placeholder="绝对路径" onChange={(event) => setOption('workspace', event.target.value)} /><button type="button" className="chat-folder-button" disabled={pending || folderPicking} onClick={() => { void pickWorkspaceFolder(); }} title="选择文件夹" aria-label="选择文件夹">…</button></label>
         </div>
       </div>
     </div>
