@@ -260,7 +260,7 @@ interface ErrorRecord {
 
 | # | 领域 | 缺口 | 现状证据 | 建议 |
 |---|---|---|---|---|
-| 1 | 停止生成 | 后端对未知 request_id 的 `chat_cancel` 静默忽略，前端只能本地兜底 | `cancelChat` 找不到控制器时直接返回 | 后端回一个 CHAT_CANCELLED 确认（已排期） |
+| 1 | 停止生成 | 后端对未知 request_id 的 `chat_cancel` 静默忽略，前端只能本地兜底 | `cancelChat` 找不到控制器时直接返回 | 后端回一个 CHAT_CANCELLED 确认（未排期） |
 | 2 | 审批 | 真实后端触发审批弹窗的端到端未测，只测了注入的假 WebSocket | 仅 `frontend-models` 单测与假 socket 验证 | 用可控的写文件任务做一次端到端 |
 | 3 | 记忆第 2 层 | 向量检索未对真实嵌入服务跑通，只测了降级到关键词 | `embedding.ts` 为单测和降级路径 | 配置真实 `/v1/embeddings` 验证 |
 | 4 | 验证 | Docker `cmd:` 验证路径未实测 | 代码存在，无端到端记录 | 在有 Docker 的环境跑一次 |
