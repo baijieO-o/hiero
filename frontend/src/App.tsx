@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewHeaderActionsProps } from 'dockview-react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
@@ -8,6 +8,9 @@ import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevt
 import { renderMarkdown } from './markdown';
 import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
 import { TaskCard } from './task-card';
+import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
+import { clarifyComplete, clarifyQuestions, type ClarifyAnswers } from './clarify-model';
+import { ClarifyWizard } from './clarify-wizard';
 import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
 import { RUNTIME_WS_URL } from './runtime-url';
 import { estimateCostUsd, formatCost } from './token-cost';
@@ -830,8 +833,12 @@ function MissionControl(): ReactElement {
   const [criteria, setCriteria] = useState('');
   const [budget, setBudget] = useState<TaskCardBudget>({ ...DEFAULT_BUDGET });
   const [confirmed, setConfirmed] = useState(false);
+  const [clarifyAnswers, setClarifyAnswers] = useState<ClarifyAnswers>({ allowWrites: null });
   const draft = { goal, criteria, budget };
   const validation = validateTaskCard(draft);
+  const questions = clarifyQuestions({ goal, criteria }, workspace);
+  const clarified = clarifyComplete(questions, criteria, clarifyAnswers, workspace);
+  const effectivePermission: PermissionLabel = clarifyAnswers.allowWrites === false ? '严格' : permission;
   const changeGoal = (value: string) => {
     setGoal(value);
     setConfirmed(false);
@@ -841,17 +848,17 @@ function MissionControl(): ReactElement {
     setConfirmed(false);
   };
   const launch = () => {
-    if (validation || !confirmed) return;
+    if (validation || !confirmed || !clarified) return;
     const nextGoal = goal.trim();
     setStarted(true);
     setConfirmed(false);
     const socket = new WebSocket(RUNTIME_WS_URL);
     socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: toPermissionMode(permission), context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral', ...toContractFields(draft) } }));
+      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: toPermissionMode(effectivePermission), context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral', ...toContractFields(draft) } }));
       window.setTimeout(() => socket.close(), 500);
     });
   };
-  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => changeGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={['gpt-5.6-luna', 'Claude Sonnet 4', 'GPT-5', '本地 Qwen']} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={changePermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><TaskCard summary={{ goal: goal.trim(), workspace, model, permissionLabel: permission, contextMode }} criteria={criteria} budget={budget} onCriteriaChange={setCriteria} onBudgetChange={setBudget} confirmed={confirmed} onConfirmedChange={setConfirmed} disabled={started} /><button className="primary-button" type="button" onClick={launch} disabled={started || !confirmed || validation !== null}>{started ? '任务已发送' : '启动任务'} <span>→</span></button>{validation && <p className="task-card-hint">{validation}</p>}<div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => changeGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={['gpt-5.6-luna', 'Claude Sonnet 4', 'GPT-5', '本地 Qwen']} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={changePermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><ClarifyWizard questions={questions} answers={clarifyAnswers} criteria={criteria} onCriteriaChange={setCriteria} onAnswersChange={setClarifyAnswers} complete={clarified} /><TaskCard summary={{ goal: goal.trim(), workspace, model, permissionLabel: effectivePermission, contextMode }} criteria={criteria} budget={budget} onCriteriaChange={setCriteria} onBudgetChange={setBudget} confirmed={confirmed} onConfirmedChange={setConfirmed} disabled={started} /><button className="primary-button" type="button" onClick={launch} disabled={started || !confirmed || !clarified || validation !== null}>{started ? '任务已发送' : '启动任务'} <span>→</span></button>{validation && <p className="task-card-hint">{validation}</p>}<div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
 }
 
 
@@ -1141,7 +1148,7 @@ function requestWorkspace(body: WorkspaceRequestBody): Promise<Record<string, un
   });
 }
 
-type ApprovalRequest = { approval_id: string; tool_name: string; summary: string; input: unknown };
+type ApprovalRequest = ApprovalDialogRequest;
 
 /** Listens for APPROVAL_REQUIRED on a persistent socket and answers with approval_response. */
 function ApprovalModal(): ReactElement | null {
@@ -1163,29 +1170,17 @@ function ApprovalModal(): ReactElement | null {
   }, []);
 
   const current = queue[0];
-  if (!current) return null;
-
-  const respond = (approved: boolean) => {
+  const approvalId = current?.approval_id;
+  const respond = useCallback((approved: boolean) => {
     const socket = socketRef.current;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'approval_response', payload: { approval_id: current.approval_id, approved } }));
+    if (socket && socket.readyState === WebSocket.OPEN && approvalId) {
+      socket.send(JSON.stringify({ type: 'approval_response', payload: { approval_id: approvalId, approved } }));
     }
     setQueue((rest) => rest.slice(1));
-  };
+  }, [approvalId]);
+  if (!current) return null;
 
-  return (
-    <div role="dialog" aria-modal="true" aria-label="操作审批" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-      <div style={{ background: '#1e1e1e', color: '#eee', padding: 20, borderRadius: 8, maxWidth: 560, width: '90%' }}>
-        <h3 style={{ marginTop: 0 }}>需要审批：{current.tool_name}</h3>
-        <p>{current.summary}</p>
-        <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto', background: '#111', padding: 8 }}>{JSON.stringify(current.input, null, 2)}</pre>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button type="button" onClick={() => respond(false)}>拒绝</button>
-          <button type="button" onClick={() => respond(true)}>同意</button>
-        </div>
-      </div>
-    </div>
-  );
+  return <ApprovalDialog key={current.approval_id} request={current} onRespond={respond} />;
 }
 
 type RollbackPayload = { ok: boolean; restored?: string[]; skipped?: string[]; warning?: { code: string; message: string }; message?: string };
