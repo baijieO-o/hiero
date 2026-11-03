@@ -227,7 +227,7 @@ interface ErrorRecord {
 1. 产品形态：网页版优先还是桌面版。见 [HANDOFF.md](./HANDOFF.md) 第 10 节。
 2. 设置域的实施顺序。
 3. 设置面板全局搜索的范围。
-4. 用户可感知的控制层：任务卡（执行前审阅契约）、模式选择（建议 / 确认后执行 / 自治）、控制面板最小版（预算上限、危险动作策略、记忆查看与删除）。见第 12 节。
+4. 用户可感知的控制层剩余部分：任务卡（执行前审阅契约）、控制面板最小版（预算上限、危险动作策略、记忆查看与删除）。权限模式的执行前选择与含义说明已实现，见第 12 节。
 
 ## 12. 用户主权与控制层（外部分析，待评估）
 
@@ -235,7 +235,7 @@ interface ErrorRecord {
 
 **已核实的现状**
 
-- 权限已有三档 `strict` / `standard` / `auto`（`permission_mode`），但这是系统配置，不是用户执行前可选的“建议 / 确认后执行 / 自治”模式。
+- 权限已有三档 `strict` / `standard` / `auto`（`permission_mode`）。聊天发送前与 Mission Control 中提供 `PermissionModePicker`（`frontend/src/permission-mode.tsx`），逐档说明实际允许与需要确认的行为，选择后随任务下发。但没有“自动”档的二次确认，也不是“建议 / 确认后执行 / 自治”的三段式模式。终端命令（`term_exec`）仍固定为“标准”。
 - 预算已被执行器强制：`budget_envelope.max_time_ms` 超限触发 MOD-006，`max_tokens` 触发上下文交接（`src/agent-executor.ts`）。分析中“预算无硬约束”的说法不成立，但预算仅由后端写死的默认值（4000 token / 120 秒）提供，用户不可调。
 - Token 计量为字符数近似值（README 已声明）。
 - 前端 Mission Control、TodoList、CodeReview、HandoffPanel 以观测为主，计划步骤不可编辑。
@@ -246,7 +246,7 @@ interface ErrorRecord {
 **建议的优先级（待决策）**
 
 1. 任务卡：把 `TaskContract` 变成执行前可审阅、可改目标与预算的确认界面。
-2. 模式选择：在任务级暴露 `strict` / `standard` / `auto` 的含义，并支持按任务选择。
+2. 模式选择：已部分完成（发送前可选并查看含义）。仍需：“自动”档执行前的二次确认，以及终端命令跟随所选模式。
 3. 控制面板最小版：预算上限可配、危险动作策略可见、记忆可查看与删除。
 
 **分析中不宜直接采纳的部分**

@@ -6,6 +6,7 @@ import type { ReactElement } from 'react';
 import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelSettings, type SaveState } from './settings';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { renderMarkdown } from './markdown';
+import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
 import { RUNTIME_WS_URL } from './runtime-url';
 import { estimateCostUsd, formatCost } from './token-cost';
 
@@ -190,13 +191,6 @@ export interface ChatOptions {
 }
 
 const CHAT_MODEL_OPTIONS = ['gpt-5.6-luna'];
-const CHAT_PERMISSION_OPTIONS = ['严格', '标准', '自动'];
-const PERMISSION_STORAGE_KEY = 'hiero-permission-mode';
-
-function readStoredPermission(): string {
-  const saved = localStorage.getItem(PERMISSION_STORAGE_KEY);
-  return saved && CHAT_PERMISSION_OPTIONS.includes(saved) ? saved : '标准';
-}
 const CHAT_CONTEXT_OPTIONS = ['临时会话', '持久化 Markdown'];
 // 热边：鼠标距窗口左边缘多少像素内触发展开；离开侧栏后延迟收起，避免抖动。
 const HOT_EDGE_PX = 8;
@@ -772,9 +766,12 @@ function ChatPanel(): ReactElement {
         {error && <p className="chat-error">{error}</p>}
         {folderError && <p className="chat-error">{folderError}</p>}
         <div className="chat-composer">
+          <details className="permission-details">
+            <summary>权限：{options.permission}（发送前请确认）</summary>
+            <PermissionModePicker value={isPermissionLabel(options.permission) ? options.permission : '标准'} disabled={pending} onChange={(value) => setOption('permission', value)} />
+          </details>
           <div className="chat-options">
             <ChatOptionSelect label="模型" value={options.model} options={CHAT_MODEL_OPTIONS} disabled={pending} onChange={(value) => setOption('model', value)} />
-            <ChatOptionSelect label="权限" value={options.permission} options={CHAT_PERMISSION_OPTIONS} disabled={pending} onChange={(value) => setOption('permission', value)} />
             <label className="chat-option chat-option-wide"><span>工作区</span><input value={options.workspace} disabled={pending} placeholder="绝对路径" onChange={(event) => setOption('workspace', event.target.value)} /><button type="button" className="chat-folder-button" disabled={pending || folderPicking} onClick={() => { void pickWorkspaceFolder(); }} title="选择文件夹" aria-label="选择文件夹">…</button></label>
             <ChatOptionSelect label="上下文" value={options.contextMode} options={CHAT_CONTEXT_OPTIONS} disabled={pending} onChange={(value) => setOption('contextMode', value)} />
           </div>
@@ -809,9 +806,9 @@ function ChatOptionSelect({ label, value, options, disabled, onChange }: { label
 function MissionControl(): ReactElement {
   const [goal, setGoal] = useState('');
   const [model, setModel] = useState('gpt-5.6-luna');
-  const [permission, setPermissionState] = useState(readStoredPermission);
-  const setPermission = (value: string) => {
-    localStorage.setItem(PERMISSION_STORAGE_KEY, value);
+  const [permission, setPermissionState] = useState<PermissionLabel>(readStoredPermission);
+  const setPermission = (value: PermissionLabel) => {
+    storePermission(value);
     setPermissionState(value);
   };
   const workspace = useChatStore((state) => state.options.workspace);
@@ -824,11 +821,11 @@ function MissionControl(): ReactElement {
     setStarted(true);
     const socket = new WebSocket(RUNTIME_WS_URL);
     socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: permission === '自动' ? 'auto' : permission === '标准' ? 'standard' : 'strict', context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral' } }));
+      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: toPermissionMode(permission), context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral' } }));
       window.setTimeout(() => socket.close(), 500);
     });
   };
-  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={['gpt-5.6-luna', 'Claude Sonnet 4', 'GPT-5', '本地 Qwen']} /><Select label="权限模式" value={permission} onChange={setPermission} options={['严格', '标准', '自动']} /><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><button className="primary-button" type="button" onClick={launch}>{started ? '任务已发送' : '启动任务'} <span>→</span></button><div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={['gpt-5.6-luna', 'Claude Sonnet 4', 'GPT-5', '本地 Qwen']} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={setPermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><button className="primary-button" type="button" onClick={launch}>{started ? '任务已发送' : '启动任务'} <span>→</span></button><div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
 }
 
 
