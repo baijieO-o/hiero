@@ -15,6 +15,8 @@ import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget
 import { RUNTIME_WS_URL } from './runtime-url';
 import { estimateCostUsd, formatCost } from './token-cost';
 import { TerminalView, type TerminalWriteLine } from './terminal-view';
+import { MAX_TEXT_PREVIEW_BYTES, classifyFile, folderNameFromEntry } from './dropped-files';
+import { FileRefChip, FilePreviewDialog, type DroppedFileRef } from './file-ref';
 
 type TodoStatus = 'done' | 'active' | 'pending';
 
@@ -725,17 +727,43 @@ function ChatPanel(): ReactElement {
       addImageFiles(files);
     }
   };
+  const [fileRefs, setFileRefs] = useState<DroppedFileRef[]>([]);
+  const [previewRef, setPreviewRef] = useState<DroppedFileRef | null>(null);
+  const addFileRefs = (files: File[]) => {
+    const refs = files.map((file): DroppedFileRef => {
+      const kind = classifyFile(file);
+      return { id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`, name: file.name, size: file.size, kind, file, url: null };
+    });
+    if (refs.length > 0) setFileRefs((current) => [...current, ...refs]);
+  };
   const onDrop = (event: ReactDragEvent<HTMLDivElement>) => {
     if (event.dataTransfer.files.length === 0) return;
     event.preventDefault();
-    addImageFiles(Array.from(event.dataTransfer.files));
+    const files = Array.from(event.dataTransfer.files);
+    const folders = Array.from(event.dataTransfer.items ?? [])
+      .map((item) => item.webkitGetAsEntry?.())
+      .filter((entry): entry is FileSystemEntry => !!entry && entry.isDirectory);
+    if (folders.length > 0) {
+      setFolderError(`检测到拖入的文件夹「${folderNameFromEntry(folders[0])}」。浏览器无法读取拖入文件夹的真实路径，请在工作区栏点「+」选择该文件夹；同一目录已存在工作区时会直接切换。`);
+    }
+    const imageFiles = files.filter((file) => classifyFile(file) === 'image');
+    const otherFiles = files.filter((file) => classifyFile(file) !== 'image' && !(file.size === 0 && file.type === ''));
+    addImageFiles(imageFiles);
+    addFileRefs(otherFiles);
   };
-  const submit = () => {
-    if (!draft.trim() && images.length === 0) return;
-    send(draft, images);
+  const submit = async () => {
+    if (!draft.trim() && images.length === 0 && fileRefs.length === 0) return;
+    const refBlocks = await Promise.all(fileRefs.map(async (ref) => {
+      if (ref.kind !== 'text') return `[附件: ${ref.name}（${ref.size} 字节）]`;
+      const content = await ref.file.slice(0, MAX_TEXT_PREVIEW_BYTES).text();
+      return `[附件: ${ref.name}]\n\`\`\`\n${content}\n\`\`\``;
+    }));
+    const text = [draft, ...refBlocks].filter((part) => part.trim()).join('\n\n');
+    send(text, images);
     setDraft('');
     setImages([]);
     setImageError(null);
+    setFileRefs([]);
   };
   const onKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
@@ -832,6 +860,10 @@ function ChatPanel(): ReactElement {
         {folderError && <p className="chat-error">{folderError}</p>}
         <div className="chat-composer" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={onDrop}>
           <div className="chat-input-box">
+            {fileRefs.length > 0 && <div className="chat-file-refs">
+              {fileRefs.map((item) => <FileRefChip key={item.id} item={item} onPreview={() => setPreviewRef(item)} onRemove={() => setFileRefs((current) => current.filter((ref) => ref.id !== item.id))} />)}
+            </div>}
+            {previewRef && <FilePreviewDialog item={previewRef} onClose={() => setPreviewRef(null)} />}
             {(images.length > 0 || imageError) && <div className="chat-attachments">
               {images.map((src, index) => <div key={index} className="chat-attachment">
                 <img src={src} alt={`待发送图片 ${index + 1}`} />
@@ -858,7 +890,7 @@ function ChatPanel(): ReactElement {
                 ? <button className="chat-send-round chat-stop-round" type="button" onClick={cancel} title="停止生成" aria-label="停止生成">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
                   </button>
-                : <button className="chat-send-round" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0} title={!draft.trim() && images.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">
+                : <button className="chat-send-round" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0 && fileRefs.length === 0} title={!draft.trim() && images.length === 0 && fileRefs.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
                   </button>}
             </div>
@@ -2026,6 +2058,13 @@ function App(): ReactElement {
       root = '';
     }
     if (!root) return;
+    const existing = Object.keys(roots).find((key) => roots[key] === root);
+    if (existing) {
+      setActiveScreen(existing);
+      loadLayout(api, screens[existing] ?? null, existing);
+      setScreenDraft('');
+      return;
+    }
     addScreen(name, root);
     loadLayout(api, null, name);
     setScreenDraft('');
