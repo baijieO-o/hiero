@@ -161,7 +161,6 @@ interface ErrorRecord {
 - Tile 上下文栏、关闭 Buffer
 
 **未实现**
-- 写文件与审批（`WaitApproval`）
 - 交接文档的自动生成与自动恢复
 - 沙箱与审批设置域
 - 共享浏览器、语音与视觉、澄清向导
@@ -169,8 +168,19 @@ interface ErrorRecord {
 - 系统代理的自动构建
 - 三层记忆
 - 子代理
-- 完整回退与人工修改保护
 - 桌面化形态
+
+**已补充验证（自动化测试）**
+
+- Verify 门禁与 Rewind 重规划（`test/verify-rewind.test.ts`）
+- 回退的真实文件写入、删除与 RBK-006 人工修改跳过（`test/rewind-integration.test.ts`）
+- MCP SSE / Streamable HTTP 本地服务器端到端（`test/mcp-remote.test.ts`）
+- 第 2 层记忆关键词检索（`test/deep-memory.test.ts`）
+
+**仍未验证**
+
+- Docker 支持的 `cmd:` 验证路径（需要 Docker 环境）
+- 真实 LLM 下的完整流程与浏览器中的视觉检查
 
 ## 8. 实施顺序
 
@@ -217,3 +227,29 @@ interface ErrorRecord {
 1. 产品形态：网页版优先还是桌面版。见 [HANDOFF.md](./HANDOFF.md) 第 10 节。
 2. 设置域的实施顺序。
 3. 设置面板全局搜索的范围。
+4. 用户可感知的控制层：任务卡（执行前审阅契约）、模式选择（建议 / 确认后执行 / 自治）、控制面板最小版（预算上限、危险动作策略、记忆查看与删除）。见第 12 节。
+
+## 12. 用户主权与控制层（外部分析，待评估）
+
+以下来自一篇关于 Agent 工作台的文章与对本仓库的对照分析。已核实事实与分析中的判断分开记录，判断需以产品决策为准。
+
+**已核实的现状**
+
+- 权限已有三档 `strict` / `standard` / `auto`（`permission_mode`），但这是系统配置，不是用户执行前可选的“建议 / 确认后执行 / 自治”模式。
+- 预算已被执行器强制：`budget_envelope.max_time_ms` 超限触发 MOD-006，`max_tokens` 触发上下文交接（`src/agent-executor.ts`）。分析中“预算无硬约束”的说法不成立，但预算仅由后端写死的默认值（4000 token / 120 秒）提供，用户不可调。
+- Token 计量为字符数近似值（README 已声明）。
+- 前端 Mission Control、TodoList、CodeReview、HandoffPanel 以观测为主，计划步骤不可编辑。
+- 记忆分层存在，但用户不能查看、编辑、删除，也没有写入前的确认流程。
+- 评估层缺失：没有轨迹回放、干预率、回滚成功率等指标。
+- 多 Agent 仅有子代理（`delegate_read` / `delegate_write`）与系统代理，没有内部角色分工。
+
+**建议的优先级（待决策）**
+
+1. 任务卡：把 `TaskContract` 变成执行前可审阅、可改目标与预算的确认界面。
+2. 模式选择：在任务级暴露 `strict` / `standard` / `auto` 的含义，并支持按任务选择。
+3. 控制面板最小版：预算上限可配、危险动作策略可见、记忆可查看与删除。
+
+**分析中不宜直接采纳的部分**
+
+- “Autopilot 找不到人的降级策略”：当前没有 Autopilot，先做前三项再谈。
+- 评估层五本账：规模较大，先定义两三个可从现有事件流直接计算的指标（如回滚次数、审批拒绝率）。
