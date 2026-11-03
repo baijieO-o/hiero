@@ -62,7 +62,8 @@ D:\hiero\launch-hiero.bat
 - 已知限制：`read_only` 只是模型自报，工具网关不强制，只读任务仍可能调用写工具，因此并行安全性依赖模型自律；verify 仍只在整体结束后执行一次；最终 `response` 取最后完成的任务。
 - 自我纠错（`src/error-parser.ts`，测试 `test/error-parser.test.ts`）：`summarizeErrors` 从验证输出中提取核心报错（TypeScript/tsc、Python Traceback、Rust、GCC/Clang 风格），其余输出截断保留首尾。失败的 `cmd:` 检查带上 `errorSummary`；重试时 Plan 的 goal 附带上一次失败的详情。此前重试只告知失败的命令名，模型看不到报错。
 - 限制：只在整个任务结束后的 Verify 才触发；解析器只提取信息，修复质量仍取决于模型；未覆盖的语言只能看到截断的原始输出。
-- 后续候选：① HITL 审批断点；② 上下文滚动摘要；③ 通用子代理（需审批机制配合，未确认）。
+- 通用子代理（`delegate_task`）：白名单为 `read_file` / `list_dir` / `write_file` / `memory_recall`，并可通过可选参数 `tools`（能力查询词）经 `CapabilityRouter` 发现并调用 MCP 外部工具。按用户决策，MCP 外部工具**不加审批**（与写子代理保持一致）。不允许嵌套，共享同一套轮数、并发与每次聊天上限。实现位于 `src/read-only-subagent.ts`（`DELEGATE_TASK_TOOL_DEFINITION`）与 `src/hiero-runtime.ts` 的 `runDelegatedTask`（`general` 模式）。测试：`test/read-only-subagent.test.ts`。
+- 后续候选：① HITL 审批断点；② 上下文滚动摘要。
 - 设置规格（决策）：子代理嵌套深度固定为 1（子代理不暴露 `delegate_*` 工具）；并发与总次数限制已在中心化第一步落地。热重载、日志与遥测、分层配置合并暂未实现，列为后续工作。
 - MCP 未完成项：启动连接后台进行，首条消息可能早于工具连接完成；SSE / HTTP 传输已由 `test/mcp-remote.test.ts` 用本地 SDK 服务器做端到端验证（发现工具并调用）；未验证第三方托管的远程服务器。
 - 来源未确认：Copilot 会话里的 `github-mcp-server-*` 工具并非由 Hiero 注入，本地 Copilot 配置中也未找到其定义。

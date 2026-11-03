@@ -4,7 +4,7 @@ import type { TaskContract } from '../src/contracts.js';
 import type { ModelGateway, ModelResponse, ModelToolDefinition } from '../src/model-gateway.js';
 import { ToolGateway } from '../src/tool-gateway.js';
 import { z } from 'zod';
-import { canDelegate, normalizeSubagentSettings, runReadOnlySubagent } from '../src/read-only-subagent.js';
+import { canDelegate, DELEGATE_TASK_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent } from '../src/read-only-subagent.js';
 
 const task: TaskContract = {
   task_id: 't',
@@ -91,6 +91,24 @@ test('normalizeSubagentSettings applies defaults and clamps out-of-range values'
   assert.deepEqual(normalizeSubagentSettings({ enabled: false, maxTurns: 99, resultLimit: 1, maxConcurrent: 0, maxPerChat: 99 }), { enabled: false, maxTurns: 10, resultLimit: 500, maxConcurrent: 1, maxPerChat: 20 });
   assert.deepEqual(normalizeSubagentSettings({ maxTurns: 0, resultLimit: 1_000_000 }), { enabled: true, maxTurns: 1, resultLimit: 20_000, maxConcurrent: 2, maxPerChat: 6 });
   assert.deepEqual(normalizeSubagentSettings({ max_turns: '6', result_limit: 'nope', max_concurrent: '4', max_per_chat: 3 }), { enabled: true, maxTurns: 6, resultLimit: 4000, maxConcurrent: 4, maxPerChat: 3 });
+});
+
+test('general sub-agent runs an external tool it was given through the gateway', async () => {
+  const gateway = new ToolGateway();
+  let calls = 0;
+  gateway.register({ name: 'mcp_search', inputSchema: z.object({}).passthrough(), effect: 'external', execute: () => { calls += 1; return { hits: 2 }; } });
+  const externalTool: ModelToolDefinition = { type: 'function', function: { name: 'mcp_search', parameters: {} } };
+  const model = scriptedModel([reply('', [{ id: '1', name: 'mcp_search', arguments: '{}' }]), reply('found 2')]);
+  const summary = await runReadOnlySubagent({ modelGateway: model, toolGateway: gateway, allowedTools: [externalTool], task, goal: 'g' });
+  assert.equal(summary, 'found 2');
+  assert.equal(calls, 1);
+});
+
+test('delegate_task is a distinct tool that accepts a task and an optional tools query', () => {
+  const properties = DELEGATE_TASK_TOOL_DEFINITION.function.parameters as { properties: Record<string, unknown>; required: string[] };
+  assert.deepEqual(Object.keys(properties.properties).sort(), ['task', 'tools']);
+  assert.deepEqual(properties.required, ['task']);
+  assert.equal(DELEGATE_TASK_TOOL_DEFINITION.function.name, 'delegate_task');
 });
 
 test('sub-agent aborts when the signal is already cancelled', async () => {

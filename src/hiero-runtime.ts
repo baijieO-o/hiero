@@ -37,7 +37,7 @@ function isModelSettingsSave(message: unknown): message is { type: 'settings_sav
 import { createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
-import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
+import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
@@ -130,11 +130,12 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
   },
   DELEGATE_READ_TOOL_DEFINITION,
   DELEGATE_WRITE_TOOL_DEFINITION,
+  DELEGATE_TASK_TOOL_DEFINITION,
 ];
 
 const READ_ONLY_SUBAGENT_TOOLS = new Set(['read_file', 'list_dir', 'memory_recall']);
 const WRITE_SUBAGENT_TOOLS = new Set(['read_file', 'list_dir', 'write_file', 'memory_recall']);
-const SUBAGENT_TOOL_NAMES = new Set(['delegate_read', 'delegate_write']);
+const SUBAGENT_TOOL_NAMES = new Set(['delegate_read', 'delegate_write', 'delegate_task']);
 
 /**
  * Maps the workspace selected in the chat UI to a directory the read tool may use.
@@ -608,7 +609,8 @@ export class HieroRuntime {
           } else if (isDelegate) {
             delegatedThisTurn += 1;
             delegatedChatTotal += 1;
-            result = await this.runDelegatedTask(call.function.name === 'delegate_write' ? 'write' : 'read', call.function.arguments, workspacePath, task, signal, subagent);
+            const mode = call.function.name === 'delegate_task' ? 'general' : call.function.name === 'delegate_write' ? 'write' : 'read';
+            result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent);
           } else {
             result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode);
           }
@@ -687,18 +689,21 @@ export class HieroRuntime {
    * Runs a sub-agent with a fixed tool allowlist. It cannot delegate further, and it shares the parent's
    * ToolGateway so write_file still goes through the approval policy. Write mode never widens the parent's permission.
    */
-  private async runDelegatedTask(mode: 'read' | 'write', rawArguments: string, workspacePath: string, task: TaskContract, signal: AbortSignal, settings: SubagentSettings): Promise<string> {
+  private async runDelegatedTask(mode: 'read' | 'write' | 'general', rawArguments: string, workspacePath: string, task: TaskContract, signal: AbortSignal, settings: SubagentSettings): Promise<string> {
     try {
-      const args = JSON.parse(rawArguments) as { task?: unknown };
+      const args = JSON.parse(rawArguments) as { task?: unknown; tools?: unknown };
       const goal = typeof args.task === 'string' ? args.task.trim() : '';
-      const toolName = mode === 'write' ? 'delegate_write' : 'delegate_read';
+      const toolName = mode === 'write' ? 'delegate_write' : mode === 'general' ? 'delegate_task' : 'delegate_read';
       if (!goal) return JSON.stringify({ error: `${toolName} requires a non-empty task.` });
       const toolGateway = this.createChatToolGateway(workspacePath);
-      const allowlist = mode === 'write' ? WRITE_SUBAGENT_TOOLS : READ_ONLY_SUBAGENT_TOOLS;
-      const allowedTools = CHAT_TOOL_DEFINITIONS.filter((tool) => allowlist.has(tool.function.name));
-      const systemPrompt = mode === 'write'
-        ? 'You are a file-editing sub-agent. Use the tools to make the requested workspace changes, then reply with a concise summary (under 300 words) of what you changed. You cannot change memory or delegate further.'
-        : undefined;
+      const allowlist = mode === 'write' || mode === 'general' ? WRITE_SUBAGENT_TOOLS : READ_ONLY_SUBAGENT_TOOLS;
+      const allowedTools: ModelToolDefinition[] = CHAT_TOOL_DEFINITIONS.filter((tool) => allowlist.has(tool.function.name));
+      if (mode === 'general' && typeof args.tools === 'string' && args.tools.trim()) {
+        allowedTools.push(...await this.capabilityRouter.registerTools(toolGateway, args.tools.trim()));
+      }
+      const systemPrompt = mode === 'read'
+        ? undefined
+        : 'You are a sub-agent. Use the tools to complete the task, then reply with a concise summary (under 300 words) of what you did. You cannot change memory or delegate further.';
       const summary = await runReadOnlySubagent({ modelGateway: this.gateway, toolGateway, allowedTools, task, goal, signal, maxTurns: settings.maxTurns, resultLimit: settings.resultLimit, ...(systemPrompt ? { systemPrompt } : {}) });
       return JSON.stringify({ summary });
     } catch (cause) {

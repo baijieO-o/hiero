@@ -65,6 +65,23 @@ export const DELEGATE_WRITE_TOOL_DEFINITION: ModelToolDefinition = {
   },
 };
 
+export const DELEGATE_TASK_TOOL_DEFINITION: ModelToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'delegate_task',
+    description: 'Hand a self-contained task to a general sub-agent. It can use workspace file tools plus external tools found by a capability query (for example "github issue" or "search web"). It returns a short summary and cannot delegate further.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        task: { type: 'string', description: 'The goal, self-contained, including any paths or identifiers it needs.' },
+        tools: { type: 'string', description: 'Optional capability query used to find external tools for the sub-agent. Omit it to use workspace tools only.' },
+      },
+      required: ['task'],
+    },
+  },
+};
+
 export interface ReadOnlySubagentOptions {
   modelGateway: ModelGateway;
   toolGateway: ToolGateway;
