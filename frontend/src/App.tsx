@@ -15,6 +15,7 @@ import { ClarifyWizard } from './clarify-wizard';
 import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
 import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog, storeModelCatalog } from './model-catalog-store';
 import { RUNTIME_WS_URL } from './runtime-url';
+import { SystemStatus } from './system-status';
 import { runtimeSocketFor, type RuntimeSocketMessage } from './runtime-socket';
 import { estimateCostUsd, formatCost } from './token-cost';
 import { TerminalView, type TerminalWriteLine } from './terminal-view';
@@ -2352,6 +2353,7 @@ function App(): ReactElement {
         {activeBuffers.map((buffer) => <span key={buffer.id} className="buffer-chip"><button type="button" onClick={() => focusBuffer(buffer.id)}>{PANEL_TITLES[buffer.kind]}</button><button type="button" className="buffer-close" onClick={() => closeBuffer(buffer.id)} aria-label={`关闭 ${PANEL_TITLES[buffer.kind]}`}>×</button></span>)}
       </div>
       {activeBuffers.length > 0 && <button type="button" className="buffer-clear" onClick={onClearBuffers}>清空缓存窗口</button>}
+      <SystemStatus />
     </footer>
   </main>;
 }

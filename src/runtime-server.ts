@@ -9,7 +9,9 @@ import type { ContextUsageBreakdown } from './context-usage.js';
 import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { isAllowedOrigin, isLoopbackAddress } from './ws-guard.js';
+import { SystemStatsSampler, type SystemStats } from './system-stats.js';
 export type RuntimeEvent =
+  | { type: 'SYSTEM_STATS'; payload: SystemStats & { timestamp: string } }
   | { type: 'STATE_CHANGE'; payload: { node: AgentState; status: 'running' | 'completed' } }
   | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
@@ -44,6 +46,8 @@ export class RuntimeWebSocketServer {
   private readonly server: WebSocketServer;
   private readonly clients = new Set<WebSocket>();
   private seq = 0;
+  private readonly statsSampler = new SystemStatsSampler();
+  private statsTimer: NodeJS.Timeout | undefined;
 
   public constructor(private readonly machine: AgentStateMachine, port = 8080) {
     this.server = new WebSocketServer({
@@ -59,7 +63,23 @@ export class RuntimeWebSocketServer {
       client.on('close', () => this.clients.delete(client));
       client.on('error', () => this.clients.delete(client));
       this.sendRaw({ type: 'SNAPSHOT', payload: { seq: this.seq, node: this.machine.state } }, client);
+      this.ensureStatsTimer();
     });
+  }
+
+  /** Samples system stats only while at least one client is connected. */
+  private ensureStatsTimer(): void {
+    if (this.statsTimer) return;
+    this.statsTimer = setInterval(() => {
+      if (this.clients.size === 0) {
+        clearInterval(this.statsTimer);
+        this.statsTimer = undefined;
+        return;
+      }
+      void this.statsSampler.sample().then((stats) => {
+        this.broadcast({ type: 'SYSTEM_STATS', payload: { ...stats, timestamp: new Date().toISOString() } });
+      });
+    }, 2000);
   }
 
   public onMessage(handler: (message: unknown, client: WebSocket) => void | Promise<void>): void {
@@ -116,6 +136,8 @@ export class RuntimeWebSocketServer {
   }
 
   public async close(): Promise<void> {
+    clearInterval(this.statsTimer);
+    this.statsTimer = undefined;
     for (const client of this.clients) client.close();
     await new Promise<void>((resolve, reject) => this.server.close((cause) => cause ? reject(cause) : resolve()));
   }
