@@ -14,6 +14,7 @@ import { ClarifyWizard } from './clarify-wizard';
 import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
 import { RUNTIME_WS_URL } from './runtime-url';
 import { estimateCostUsd, formatCost } from './token-cost';
+import { TerminalView, type TerminalWriteLine } from './terminal-view';
 
 type TodoStatus = 'done' | 'active' | 'pending';
 
@@ -60,6 +61,7 @@ const DEFAULT_SCREEN = '默认';
 interface BufferEntry {
   id: string;
   kind: PanelKind;
+  workspaceId: string;
 }
 
 interface WorkspaceState {
@@ -70,9 +72,9 @@ interface WorkspaceState {
   setActiveScreen: (name: string) => void;
   addScreen: (name: string) => void;
   resetLayout: () => void;
-  addBuffer: (kind: PanelKind) => string;
+  addBuffer: (kind: PanelKind, workspaceId: string) => string;
   removeBuffer: (id: string) => void;
-  clearBuffers: () => void;
+  clearBuffers: (workspaceId: string) => void;
   browserUrls: Record<string, string>;
   setBrowserUrl: (id: string, url: string) => void;
 }
@@ -86,18 +88,32 @@ const useWorkspaceStore = create<WorkspaceState>()(persist((set) => ({
   setActiveScreen: (name) => set({ activeScreen: name }),
   addScreen: (name) => set((state) => ({ screens: { ...state.screens, [name]: null }, activeScreen: name })),
   resetLayout: () => set((state) => ({ screens: { ...state.screens, [state.activeScreen]: null } })),
-  addBuffer: (kind) => {
+  addBuffer: (kind, workspaceId) => {
     const id = `buffer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    set((state) => ({ buffers: [...state.buffers, { id, kind }] }));
+    set((state) => ({ buffers: [...state.buffers, { id, kind, workspaceId }] }));
     return id;
   },
   removeBuffer: (id) => set((state) => {
     const { [id]: _removed, ...browserUrls } = state.browserUrls;
     return { buffers: state.buffers.filter((buffer) => buffer.id !== id), browserUrls };
   }),
-  clearBuffers: () => set({ buffers: [], browserUrls: {} }),
+  clearBuffers: (workspaceId) => set((state) => {
+    const owned = new Set(state.buffers.filter((buffer) => buffer.workspaceId === workspaceId).map((buffer) => buffer.id));
+    const browserUrls = Object.fromEntries(Object.entries(state.browserUrls).filter(([id]) => !owned.has(id)));
+    return { buffers: state.buffers.filter((buffer) => !owned.has(buffer.id)), browserUrls };
+  }),
   setBrowserUrl: (id, url) => set((state) => ({ browserUrls: { ...state.browserUrls, [id]: url } })),
-}), { name: 'hiero-workspace' }));
+}), {
+  name: 'hiero-workspace',
+  version: 1,
+  migrate: (persisted, version) => {
+    const state = persisted as Partial<WorkspaceState>;
+    if (version < 1 && state.buffers) {
+      return { ...state, buffers: state.buffers.map((buffer) => ({ ...buffer, workspaceId: DEFAULT_SCREEN })) } as WorkspaceState;
+    }
+    return state as WorkspaceState;
+  },
+}));
 
 const COMMAND_ALIASES: Record<string, PanelKind> = {
   CHAT: 'chat',
@@ -1693,7 +1709,7 @@ function FileManagerBuffer(): ReactElement {
   </section>;
 }
 
-type TerminalLine = { kind: 'command'; prompt: string; text: string } | { kind: 'output'; text: string; failed: boolean };
+type TerminalLine = TerminalWriteLine;
 
 type TerminalTab = { id: number; title: string };
 
@@ -1744,12 +1760,11 @@ function TerminalBuffer(): ReactElement {
 
 function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
   const [command, setCommand] = useState('');
-  const [lines, setLines] = useState<TerminalLine[]>([]);
+  const [lines, setLines] = useState<TerminalLine[]>([{ kind: 'banner', text: 'Windows PowerShell\n命令在工作区根目录一次性执行（非交互式）。' }]);
   const [running, setRunning] = useState(false);
   const [root, setRoot] = useState('');
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
-  const outputRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const prompt = `PS ${root}>`;
   const workspace = useChatStore((state) => state.options.workspace);
@@ -1757,7 +1772,6 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
     requestWorkspace({ type: 'fs_list', path: '' }).then((payload) => { if (typeof payload.root === 'string') setRoot(payload.root); }).catch(() => undefined);
   }, [workspace]);
   useEffect(() => { if (!hidden) inputRef.current?.focus(); }, [hidden]);
-  useEffect(() => { outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight }); }, [lines]);
   const run = (event: ReactFormEvent) => {
     event.preventDefault();
     const text = command.trim();
@@ -1789,12 +1803,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
     setCommand(next === null ? '' : commandHistory[next] ?? '');
   };
   return <div className="terminal-session" hidden={hidden}>
-    <div className="terminal-output" ref={outputRef} aria-live="polite" onClick={() => { if (window.getSelection()?.toString()) return; inputRef.current?.focus(); }}>
-      <p className="wt-banner">Windows PowerShell{'\n'}命令在工作区根目录一次性执行（非交互式）。</p>
-      {lines.map((line, index) => line.kind === 'command'
-        ? <pre key={index} className="wt-command"><span className="wt-prompt">{line.prompt}</span> {line.text}</pre>
-        : <pre key={index} className={line.failed ? 'wt-error' : 'wt-output'}>{line.text}</pre>)}
-    </div>
+    <TerminalView lines={lines} hidden={hidden} onActivate={() => inputRef.current?.focus()} />
     <form className="terminal-input" onSubmit={run}>
       <span className="wt-prompt">{running ? '' : prompt}</span>
       <input ref={inputRef} value={command} onChange={(event) => { setCommand(event.target.value); setHistoryIndex(null); }} onKeyDown={recall} placeholder={running ? '执行中……' : ''} aria-label="终端命令" disabled={running} autoComplete="off" spellCheck={false} />
@@ -1804,10 +1813,32 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
 
 const panelComponents = { chat: ChatPanel, mission: MissionControl, debug: DebugConsole, todo: TodoList, review: CodeReview, handoff: HandoffPanel, settings: SettingsBuffer, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, blank: BlankBuffer };
 
-function FloatingCloseAction({ group, containerApi }: IDockviewHeaderActionsProps): ReactElement | null {
-  if (group.model.location.type !== 'floating') return null;
-  const close = () => group.panels.forEach((panel) => containerApi.removePanel(panel));
-  return <button type="button" className="floating-close" onClick={close} aria-label="关闭窗口" title="关闭">×</button>;
+function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
+  const [maximized, setMaximized] = useState(() => api.isMaximized());
+  const anchor = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    setMaximized(api.isMaximized());
+    const subscription = containerApi.onDidMaximizedGroupChange(() => setMaximized(api.isMaximized()));
+    return () => subscription.dispose();
+  }, [api, containerApi]);
+  useEffect(() => {
+    const header = anchor.current?.closest<HTMLElement>('.dv-tabs-and-actions-container');
+    if (!header) return;
+    const onDoubleClick = (event: MouseEvent) => {
+      if ((event.target as HTMLElement).closest('.dv-tab, button')) return;
+      if (group.model.location.type !== 'grid') return;
+      if (api.isMaximized()) api.exitMaximized();
+      else api.maximize();
+    };
+    header.addEventListener('dblclick', onDoubleClick);
+    return () => header.removeEventListener('dblclick', onDoubleClick);
+  }, [api, group]);
+  if (group.model.location.type === 'floating') {
+    const close = () => group.panels.forEach((panel) => containerApi.removePanel(panel));
+    return <span ref={anchor} style={{ display: 'contents' }}><button type="button" className="floating-close" onClick={close} aria-label="关闭窗口" title="关闭">×</button></span>;
+  }
+  const toggle = () => (maximized ? api.exitMaximized() : api.maximize());
+  return <span ref={anchor} style={{ display: 'contents' }}>{(group.model.location.type === 'grid' || maximized) && <button type="button" className="group-maximize" onClick={toggle} aria-label={maximized ? '还原窗口' : '最大化窗口'} title={maximized ? '还原' : '最大化'}>{maximized ? '❐' : '□'}</button>}</span>;
 }
 
 function buildDefaultLayout(api: DockviewApi): void {
@@ -1842,6 +1873,7 @@ function App(): ReactElement {
   const screens = useWorkspaceStore((state) => state.screens);
   const activeScreen = useWorkspaceStore((state) => state.activeScreen);
   const buffers = useWorkspaceStore((state) => state.buffers);
+  const activeBuffers = buffers.filter((buffer) => buffer.workspaceId === activeScreen);
   const setSerializedLayout = useWorkspaceStore((state) => state.setSerializedLayout);
   const setActiveScreen = useWorkspaceStore((state) => state.setActiveScreen);
   const addScreen = useWorkspaceStore((state) => state.addScreen);
@@ -1888,7 +1920,7 @@ function App(): ReactElement {
 
   const openBuffer = (kind: PanelKind) => {
     if (!api) return;
-    const id = addBuffer(kind);
+    const id = addBuffer(kind, useWorkspaceStore.getState().activeScreen);
     addBufferPanel(api, id, kind);
   };
 
@@ -1912,10 +1944,11 @@ function App(): ReactElement {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [api]);
 
-  // Buffers are global across screens: suppress removal bookkeeping while the layout is rebuilt.
+  // Suppress removal bookkeeping while the layout is rebuilt.
   const loadingRef = useRef(false);
 
-  const loadLayout = (target: DockviewApi, layout: unknown) => {
+  // Only buffers owned by the given workspace are added to the dockview layout.
+  const loadLayout = (target: DockviewApi, layout: unknown, workspaceId: string) => {
     loadingRef.current = true;
     target.clear();
     let restored = false;
@@ -1924,14 +1957,16 @@ function App(): ReactElement {
     }
     if (!restored) buildDefaultLayout(target);
     target.panels.filter((panel) => panel.id.startsWith('buffer-')).forEach((panel) => target.removePanel(panel));
-    useWorkspaceStore.getState().buffers.forEach((buffer) => addBufferPanel(target, buffer.id, buffer.kind));
+    useWorkspaceStore.getState().buffers
+      .filter((buffer) => buffer.workspaceId === workspaceId)
+      .forEach((buffer) => addBufferPanel(target, buffer.id, buffer.kind));
     loadingRef.current = false;
   };
 
   const onReady = (event: DockviewReadyEvent) => {
     setApi(event.api);
     const state = useWorkspaceStore.getState();
-    loadLayout(event.api, state.screens[state.activeScreen]);
+    loadLayout(event.api, state.screens[state.activeScreen], state.activeScreen);
     event.api.onDidLayoutChange(() => { if (!loadingRef.current) setSerializedLayout(event.api.toJSON()); });
     event.api.onDidRemovePanel((panel) => { if (!loadingRef.current && panel.id.startsWith('buffer-')) removeBuffer(panel.id); });
   };
@@ -1939,22 +1974,22 @@ function App(): ReactElement {
   const switchScreen = (name: string) => {
     if (!api || name === activeScreen) return;
     setActiveScreen(name);
-    loadLayout(api, useWorkspaceStore.getState().screens[name]);
+    loadLayout(api, useWorkspaceStore.getState().screens[name], name);
   };
 
   const onResetLayout = () => {
     if (!api) return;
-    buffers.forEach((buffer) => { const panel = api.getPanel(buffer.id); if (panel) api.removePanel(panel); });
-    clearBuffers();
+    activeBuffers.forEach((buffer) => { const panel = api.getPanel(buffer.id); if (panel) api.removePanel(panel); });
+    clearBuffers(activeScreen);
     resetLayout();
-    loadLayout(api, null);
+    loadLayout(api, null, activeScreen);
   };
 
   const onCreateScreen = () => {
     const name = screenDraft.trim();
     if (!api || !name || screens[name] !== undefined) return;
     addScreen(name);
-    loadLayout(api, null);
+    loadLayout(api, null, name);
     setScreenDraft('');
   };
 
@@ -1968,8 +2003,8 @@ function App(): ReactElement {
 
   const onClearBuffers = () => {
     if (!api) return;
-    buffers.forEach((buffer) => { const panel = api.getPanel(buffer.id); if (panel) api.removePanel(panel); });
-    clearBuffers();
+    activeBuffers.forEach((buffer) => { const panel = api.getPanel(buffer.id); if (panel) api.removePanel(panel); });
+    clearBuffers(activeScreen);
   };
 
   return <main className="app-shell">
@@ -1988,15 +2023,15 @@ function App(): ReactElement {
         {railOpen && RAIL_KINDS.map((kind) => <button key={kind} type="button" className="rail-item" onClick={() => openBuffer(kind)}><span>{kind.toUpperCase().slice(0, 3)}</span>{PANEL_TITLES[kind]}</button>)}
       </aside>
       <div className="workspace">
-        <div className="dockview-host"><DockviewReact components={panelComponents} rightHeaderActionsComponent={FloatingCloseAction} onReady={onReady} className="dockview-theme-abyss" /></div>
+        <div className="dockview-host"><DockviewReact components={panelComponents} rightHeaderActionsComponent={GroupHeaderActions} onReady={onReady} className="dockview-theme-abyss" /></div>
       </div>
     </div>
     <footer className="buffer-bar">
       <CommandBar onRun={openBuffer} />
       <div className="buffer-list" aria-label="已打开的缓存窗口">
-        {buffers.map((buffer) => <span key={buffer.id} className="buffer-chip"><button type="button" onClick={() => focusBuffer(buffer.id)}>{PANEL_TITLES[buffer.kind]}</button><button type="button" className="buffer-close" onClick={() => closeBuffer(buffer.id)} aria-label={`关闭 ${PANEL_TITLES[buffer.kind]}`}>×</button></span>)}
+        {activeBuffers.map((buffer) => <span key={buffer.id} className="buffer-chip"><button type="button" onClick={() => focusBuffer(buffer.id)}>{PANEL_TITLES[buffer.kind]}</button><button type="button" className="buffer-close" onClick={() => closeBuffer(buffer.id)} aria-label={`关闭 ${PANEL_TITLES[buffer.kind]}`}>×</button></span>)}
       </div>
-      {buffers.length > 0 && <button type="button" className="buffer-clear" onClick={onClearBuffers}>清空缓存窗口</button>}
+      {activeBuffers.length > 0 && <button type="button" className="buffer-clear" onClick={onClearBuffers}>清空缓存窗口</button>}
     </footer>
   </main>;
 }

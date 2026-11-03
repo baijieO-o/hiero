@@ -18,6 +18,8 @@
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.3.3",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "dockview": "^8.8.3",
     "dockview-react": "^8.8.3",
     "dompurify": "^3.4.17",
