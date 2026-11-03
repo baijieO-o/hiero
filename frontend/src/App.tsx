@@ -7,6 +7,8 @@ import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, 
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { renderMarkdown } from './markdown';
 import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
+import { TaskCard } from './task-card';
+import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
 import { RUNTIME_WS_URL } from './runtime-url';
 import { estimateCostUsd, formatCost } from './token-cost';
 
@@ -815,17 +817,31 @@ function MissionControl(): ReactElement {
   const setWorkspace = (value: string) => useChatStore.getState().setOption('workspace', value);
   const [contextMode, setContextMode] = useState('临时会话');
   const [started, setStarted] = useState(false);
+  const [criteria, setCriteria] = useState('');
+  const [budget, setBudget] = useState<TaskCardBudget>({ ...DEFAULT_BUDGET });
+  const [confirmed, setConfirmed] = useState(false);
+  const draft = { goal, criteria, budget };
+  const validation = validateTaskCard(draft);
+  const changeGoal = (value: string) => {
+    setGoal(value);
+    setConfirmed(false);
+  };
+  const changePermission = (value: PermissionLabel) => {
+    setPermission(value);
+    setConfirmed(false);
+  };
   const launch = () => {
-    const nextGoal = goal.trim() || '新的 Hiero 任务';
-    setGoal(nextGoal);
+    if (validation || !confirmed) return;
+    const nextGoal = goal.trim();
     setStarted(true);
+    setConfirmed(false);
     const socket = new WebSocket(RUNTIME_WS_URL);
     socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: toPermissionMode(permission), context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral' } }));
+      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: toPermissionMode(permission), context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral', ...toContractFields(draft) } }));
       window.setTimeout(() => socket.close(), 500);
     });
   };
-  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={['gpt-5.6-luna', 'Claude Sonnet 4', 'GPT-5', '本地 Qwen']} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={setPermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><button className="primary-button" type="button" onClick={launch}>{started ? '任务已发送' : '启动任务'} <span>→</span></button><div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => changeGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={['gpt-5.6-luna', 'Claude Sonnet 4', 'GPT-5', '本地 Qwen']} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={changePermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><TaskCard summary={{ goal: goal.trim(), workspace, model, permissionLabel: permission, contextMode }} criteria={criteria} budget={budget} onCriteriaChange={setCriteria} onBudgetChange={setBudget} confirmed={confirmed} onConfirmedChange={setConfirmed} disabled={started} /><button className="primary-button" type="button" onClick={launch} disabled={started || !confirmed || validation !== null}>{started ? '任务已发送' : '启动任务'} <span>→</span></button>{validation && <p className="task-card-hint">{validation}</p>}<div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
 }
 
 
