@@ -3,6 +3,7 @@ import type { ErrorRecord, HandoffDocument } from './contracts.js';
 import { AgentStateMachine, type AgentState, type StateTransition } from './state-machine.js';
 import type { VerificationResult } from './verification.js';
 import type { ChatTraceEvent } from './chat-trace.js';
+import type { StoredChatTrace } from './trace-store.js';
 import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { isAllowedOrigin, isLoopbackAddress } from './ws-guard.js';
@@ -20,6 +21,7 @@ export type RuntimeEvent =
   | { type: 'CHAT_REPLY'; payload: { request_id: string; content: string; model: string; usage?: { input_tokens: number; output_tokens: number; calls: number; duration_ms: number } } }
   | { type: 'CHAT_ERROR'; payload: { request_id: string; code: string; message: string } }
   | { type: 'CHAT_TRACE'; payload: { request_id: string; events: ChatTraceEvent[] } }
+  | { type: 'CHAT_TRACE_HISTORY'; payload: { workspace: string; traces: StoredChatTrace[] } }
   | { type: 'CHAT_CANCELLED'; payload: { request_id: string } }
   | { type: 'SETTINGS'; payload: { endpoint: string; model: string; token_count: number } }
   | { type: 'SETTINGS_SAVE_RESULT'; payload: { ok: true; settings: { endpoint: string; model: string; token_count: number } } | { ok: false; message: string } }

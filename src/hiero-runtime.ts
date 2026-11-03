@@ -33,6 +33,7 @@ function isModelSettingsSave(message: unknown): message is { type: 'settings_sav
 }
 import { createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
+import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
@@ -144,6 +145,12 @@ function isChatRequest(message: unknown): message is RuntimeChatRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat';
 }
 
+interface ChatTraceHistoryRequest { type: 'chat_trace_history'; workspace?: string }
+
+function isChatTraceHistoryRequest(message: unknown): message is ChatTraceHistoryRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_trace_history';
+}
+
 interface ChatCancelRequest { type: 'chat_cancel'; request_id: string }
 
 function isChatCancelRequest(message: unknown): message is ChatCancelRequest {
@@ -224,6 +231,7 @@ export class HieroRuntime {
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) this.cancelChat(message.request_id, client);
+      else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: resolveChatWorkspace(message.workspace), traces: await listChatTraces(resolveChatWorkspace(message.workspace)) } }, client);
       else if (isSettingsRequest(message)) this.runtime.send({ type: 'SETTINGS', payload: this.readModelSettings() }, client);
       else if (isMcpConfigGet(message)) this.sendMcpConfig(client);
       else if (isMcpConfigSave(message)) await this.handleMcpConfigSave(message.payload, client);
@@ -467,6 +475,7 @@ export class HieroRuntime {
       usage.duration_ms = Date.now() - startedAt;
       trace.mark('reply', '完成回复', true, `共 ${usage.calls} 次模型调用，耗时 ${usage.duration_ms}ms`);
       sendTrace();
+      await appendChatTrace(workspacePath, request.request_id, trace.snapshot()).catch(() => undefined);
       this.runtime.send({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage } }, client);
     } catch (cause) {
       if (signal.aborted) return;
@@ -474,6 +483,7 @@ export class HieroRuntime {
       trace.closeOpen();
       trace.mark('error', '请求失败', false, record.message);
       sendTrace();
+      await appendChatTrace(workspacePath, request.request_id, trace.snapshot()).catch(() => undefined);
       this.runtime.send({ type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } }, client);
     }
   }

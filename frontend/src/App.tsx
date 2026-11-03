@@ -198,6 +198,7 @@ interface ChatMessage {
   usage?: ChatUsage;
   model?: string;
   trace?: TraceEvent[];
+  requestId?: string;
   completedAt?: number;
 }
 
@@ -319,10 +320,11 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         const usage = parseChatUsage(message.payload?.usage);
         const model = typeof message.payload?.model === 'string' ? message.payload.model : undefined;
         const trace = pendingTrace;
+        const requestId = activeRequest.requestId;
         pendingFiles = [];
         pendingSteps = [];
         pendingTrace = undefined;
-        updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content, files, steps, usage, model, trace, completedAt: Date.now() }], updatedAt: Date.now() }));
+        updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content, files, steps, usage, model, trace, requestId, completedAt: Date.now() }], updatedAt: Date.now() }));
         activeRequest = null;
         set({ pending: false, streamingText: '', streamingSteps: [], error: null });
       } else if (message.type === 'CHAT_CANCELLED') {
@@ -453,6 +455,37 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
   name: 'hiero-chat',
   partialize: (state) => ({ conversations: state.conversations, activeId: state.activeId, options: state.options }),
 }));
+
+/** Fills in traces that exist only on the backend (for example after browser storage was cleared). */
+function restoreServerTraces(): void {
+  const socket = new WebSocket(RUNTIME_WS_URL);
+  socket.onopen = () => socket.send(JSON.stringify({ type: 'chat_trace_history' }));
+  socket.onmessage = (event) => {
+    let message: RuntimeMessage;
+    try { message = JSON.parse(String(event.data)) as RuntimeMessage; } catch { return; }
+    if (message.type !== 'CHAT_TRACE_HISTORY') return;
+    socket.close();
+    const stored = new Map<string, TraceEvent[]>();
+    const traces = Array.isArray(message.payload?.traces) ? message.payload.traces as Array<{ request_id?: unknown; events?: unknown }> : [];
+    for (const item of traces) {
+      if (typeof item.request_id !== 'string') continue;
+      const events = parseTraceEvents(item.events);
+      if (events) stored.set(item.request_id, events);
+    }
+    if (stored.size === 0) return;
+    useChatStore.setState((state) => ({
+      conversations: state.conversations.map((conv) => ({
+        ...conv,
+        messages: conv.messages.map((msg) => {
+          if (msg.role !== 'assistant' || msg.trace || !msg.requestId) return msg;
+          const trace = stored.get(msg.requestId);
+          return trace ? { ...msg, trace } : msg;
+        }),
+      })),
+    }));
+  };
+}
+restoreServerTraces();
 
 function PencilIcon(): ReactElement {
   return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>;

@@ -43,7 +43,7 @@ D:\hiero\launch-hiero.bat
 ## 4. 未完成 / 待确认
 
 - 最近提出、尚未实现的功能：
-  1. Trace/Timeline（已实现基础版）：每次 Chat 请求在后端记录模型调用、工具调用、子代理调用、完成回复与错误（序号、类型、名称、起止耗时、成功/失败、结果摘要），通过 `CHAT_TRACE` 消息发给前端，挂在对应助手消息下的"执行时间线"中可折叠查看。trace 只保存在内存与当前页面状态中，不落盘，刷新或重启后丢失；错误时 trace 不保存为消息（仅显示错误提示）。未做：Plan/Exec 工作流的 trace、持久化、任务回放（逐帧）、按 token 的细粒度统计。
+  1. Trace/Timeline（已实现基础版）：每次 Chat 请求在后端记录模型调用、工具调用、子代理调用、完成回复与错误（序号、类型、名称、起止耗时、成功/失败、结果摘要），通过 `CHAT_TRACE` 消息发给前端，挂在对应助手消息下的"执行时间线"中可折叠查看。trace 持久化：前端 `hiero-chat` 的 localStorage 中保存每条助手消息的 trace，同时后端在每次成功回复后把 trace 追加到工作区 `.hiero/traces.jsonl`（每行 `{request_id, saved_at, events}`，最多读取最近 50 条）。页面加载时通过 `chat_trace_history` 请求回取，给缺少 trace 的助手消息补回（按 `requestId` 匹配）。错误时 trace 不保存为消息（仅显示错误提示）。未做：Plan/Exec 工作流的 trace、任务回放（逐帧）、按 token 的细粒度统计。
   2. Session Token 成本统计（已实现基础版）：每条助手回复显示估算成本，会话标题下显示累计 token 与成本。价格从 LiteLLM 公共价格表（`model_prices_and_context_window.json`）自动拉取，启动时加载，本地缓存 24 小时；拉取失败时回退到 `frontend/src/token-cost.ts` 内置的 4 个模型价格。按模型名最长前缀匹配，裸模型名优先于带 provider 前缀的条目。未知模型显示"未知"且不计入估算，人民币按固定汇率 7.2 换算。token 数来自模型 usage 字段，未做本地计数。未做：按天/按模型统计、实时流式成本。
   3. MCP Server 市场/管理 UI：一键配置 filesystem、GitHub、Postgres 等服务器；需处理官方包名、凭据、安全确认和 transport 支持。
 - 已完成：标准模式下 git 只读子命令禁止写文件/执行外部程序的参数，路径参数禁止指向工作区之外（保守检查：绝对路径、盘符、`~`、`..`）。
