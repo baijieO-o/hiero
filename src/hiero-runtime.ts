@@ -37,7 +37,8 @@ import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINIT
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
-import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory } from './deep-memory.js';
+import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder } from './deep-memory.js';
+import { createEmbedder, embeddingConfigFromEnv } from './embedding.js';
 import type { ExtensionReady, SystemAgentError } from './system_agent.js';
 import type { WebSocket } from 'ws';
 
@@ -266,7 +267,7 @@ export class HieroRuntime {
       else if (request.type === 'skill_delete') { await deleteSkill(root, request.scope, request.name); reply({ ok: true }); }
       else if (request.type === 'memory_read') reply({ ok: true, memory: await readMemory(root, request.scope) });
       else if (request.type === 'memory_save') reply({ ok: true, memory: await saveMemory(root, request.scope, request.content) });
-      else if (request.type === 'deep_memory_list') reply({ ok: true, entries: await listDeepMemory(root) });
+      else if (request.type === 'deep_memory_list') reply({ ok: true, entries: (await listDeepMemory(root)).map(({ embedding: _vector, ...entry }) => entry) });
       else if (request.type === 'deep_memory_delete') { await deleteDeepMemory(root, request.scope, request.id); reply({ ok: true }); }
       else {
         const mode = parsePermissionMode(request.permission, 'standard');
@@ -286,6 +287,8 @@ export class HieroRuntime {
   private createGateway(): ModelGateway {
     const tokens = parseTokenList(process.env.HIERO_LLM_TOKENS);
     if (tokens.length === 0) console.info('[hiero] HIERO_LLM_TOKENS is empty; using unauthenticated OpenAI-compatible endpoint (suitable for local Ollama/vLLM).');
+    const embeddingConfig = embeddingConfigFromEnv();
+    setDeepMemoryEmbedder(embeddingConfig ? createEmbedder(embeddingConfig) : undefined);
     return new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? '')), tokens);
   }
 

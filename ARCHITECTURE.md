@@ -69,7 +69,7 @@ Hiero 是个人使用的、开源的、本地优先的 Agent 工作台。它是�
 - **三层记忆。** 第 0、1 层已实现（聊天与任务规划均注入）。
   - 第 0 层（全局准则）：跨项目常驻，类似 `CLAUDE.md`，有 Token 上限（MEM-001）。
   - 第 1 层（项目记忆）：工作区级，随项目加载。
-  - 第 2 层（深层记忆）：已实现为本地 JSONL + 关键词重合检索（`src/deep-memory.ts`），聊天与规划时注入相关条目；模型可通过 `memory_remember` / `memory_recall` 读写，`memory_append` 仅追加第 0/1 层。向量检索为有意的范围外（不引入嵌入模型依赖），由 `test/deep-memory.test.ts` 覆盖关键词检索行为。
+  - 第 2 层（深层记忆）：本地 JSONL（`src/deep-memory.ts`），聊天与规划时注入相关条目；模型可通过 `memory_remember` / `memory_recall` 读写，`memory_append` 仅追加第 0/1 层。检索为混合模式：关键词重合始终生效；配置 `HIERO_EMBED_ENDPOINT` + `HIERO_EMBED_MODEL`（OpenAI 兼容 `/v1/embeddings`，可选 `HIERO_EMBED_TOKENS`）后，新条目写入时保存向量，检索时以余弦相似度（阈值 0.5）补充召回。未配置或嵌入调用失败时自动退回纯关键词，旧条目无向量时仍可按关键词命中。向量不发送给前端。由 `test/deep-memory.test.ts` 覆盖。
   - 记忆规则冲突时报 MEM-002。
 - **评估与回归。** 评估用例校验结果与预期错误码。所有变更须通过回归测试。
 
@@ -175,7 +175,7 @@ interface ErrorRecord {
 - Verify 门禁与 Rewind 重规划（`test/verify-rewind.test.ts`）
 - 回退的真实文件写入、删除与 RBK-006 人工修改跳过（`test/rewind-integration.test.ts`）
 - MCP SSE / Streamable HTTP 本地服务器端到端（`test/mcp-remote.test.ts`）
-- 第 2 层记忆关键词检索（`test/deep-memory.test.ts`）
+- 第 2 层记忆混合检索（关键词 + 可选向量，`test/deep-memory.test.ts`）
 
 **仍未验证**
 

@@ -3,9 +3,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { MemoryScope } from './memory-store.js';
+import { cosineSimilarity, type Embedder } from './embedding.js';
 
 export const DEEP_MEMORY_ENTRY_LIMIT_CHARS = 500;
 export const DEEP_RECALL_MIN_SCORE = 0.15;
+export const DEEP_VECTOR_MIN_SIMILARITY = 0.5;
 const DEEP_FILE = 'deep-memory.jsonl';
 
 export interface DeepMemoryEntry {
@@ -14,10 +16,20 @@ export interface DeepMemoryEntry {
   content: string;
   tags: string[];
   created_at: string;
+  embedding?: number[];
 }
 
 export interface DeepMemoryHit extends DeepMemoryEntry {
   score: number;
+  keyword_score: number;
+  vector_score?: number;
+}
+
+let activeEmbedder: Embedder | undefined;
+
+/** Enables vector recall for later reads and writes. Pass undefined to fall back to keyword-only recall. */
+export function setDeepMemoryEmbedder(embedder: Embedder | undefined): void {
+  activeEmbedder = embedder;
 }
 
 export function deepMemoryPath(scope: MemoryScope, workspacePath: string): string {
@@ -51,6 +63,8 @@ export async function addDeepMemory(workspacePath: string, scope: MemoryScope, c
   if (!text) throw new Error('记忆内容不能为空。');
   if (text.length > DEEP_MEMORY_ENTRY_LIMIT_CHARS) throw new Error(`单条记忆超过上限 ${DEEP_MEMORY_ENTRY_LIMIT_CHARS} 字符（MEM-001）。`);
   const entry: DeepMemoryEntry = { id: randomUUID(), scope, content: text, tags: tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 8), created_at: new Date().toISOString() };
+  const vector = await embedSafely([entryText(entry)]);
+  if (vector?.[0]) entry.embedding = vector[0];
   const entries = await readEntries(scope, workspacePath);
   await writeEntries(scope, workspacePath, [...entries, entry]);
   return entry;
@@ -77,15 +91,34 @@ export async function deepRecallContext(workspacePath: string, query: string): P
   return hits.map((hit) => `- [${hit.scope === 'global' ? '全局' : '项目'}] ${hit.content}`).join('\n');
 }
 
+function entryText(entry: Pick<DeepMemoryEntry, 'content' | 'tags'>): string {
+  return `${entry.content} ${entry.tags.join(' ')}`;
+}
+
+async function embedSafely(texts: string[]): Promise<number[][] | undefined> {
+  if (!activeEmbedder) return undefined;
+  try {
+    return await activeEmbedder(texts);
+  } catch (cause) {
+    console.warn('[hiero] Vector recall unavailable, using keyword recall:', cause instanceof Error ? cause.message : cause);
+    return undefined;
+  }
+}
+
+/** Hybrid recall: keyword overlap always applies; when an embedder is configured, cosine similarity can also surface an entry. */
 export async function searchDeepMemory(workspacePath: string, query: string, limit = 5): Promise<DeepMemoryHit[]> {
   const queryTokens = [...tokenize(query)];
   if (queryTokens.length === 0) return [];
   const entries = await listDeepMemory(workspacePath);
+  const queryVector = entries.some((entry) => entry.embedding) ? (await embedSafely([query]))?.[0] : undefined;
   return entries
     .map((entry) => {
-      const entryTokens = tokenize(`${entry.content} ${entry.tags.join(' ')}`);
+      const entryTokens = tokenize(entryText(entry));
       const matched = queryTokens.filter((token) => entryTokens.has(token)).length;
-      return { ...entry, score: matched / queryTokens.length };
+      const keywordScore = matched / queryTokens.length;
+      const vectorScore = queryVector && entry.embedding ? cosineSimilarity(queryVector, entry.embedding) : undefined;
+      const score = Math.max(keywordScore, vectorScore !== undefined && vectorScore >= DEEP_VECTOR_MIN_SIMILARITY ? vectorScore : 0);
+      return { ...entry, score, keyword_score: keywordScore, ...(vectorScore !== undefined ? { vector_score: vectorScore } : {}) };
     })
     .filter((hit) => hit.score >= DEEP_RECALL_MIN_SCORE)
     .sort((a, b) => b.score - a.score)
