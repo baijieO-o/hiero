@@ -383,11 +383,25 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     },
     cancel: () => {
       const request = activeRequest;
-      if (!request || !get().pending) return;
+      if (!request) {
+        if (get().pending) set({ pending: false, streamingText: '', streamingSteps: [], error: null });
+        return;
+      }
       const target = ensureSocket();
       const payload = JSON.stringify({ type: 'chat_cancel', request_id: request.requestId });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
+      const partial = get().streamingText.trim();
+      const steps = pendingSteps.length > 0 ? pendingSteps : undefined;
+      const files = pendingFiles.length > 0 ? [...new Set(pendingFiles)] : undefined;
+      pendingFiles = [];
+      pendingSteps = [];
+      pendingTrace = undefined;
+      activeRequest = null;
+      if (partial || steps) {
+        updateConversation(request.conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content: partial, files, steps, completedAt: Date.now() }], updatedAt: Date.now() }));
+      }
+      set({ pending: false, streamingText: '', streamingSteps: [], error: null });
     },
   };
 }, {
