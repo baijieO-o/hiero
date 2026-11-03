@@ -2,8 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { AgentExecutor } from './agent-executor.js';
+import { COMPACT_SUMMARY_PREFIX, ContextCompactor } from './context-compactor.js';
+import { breakdownContextUsage, type ContextUsageBreakdown } from './context-usage.js';
 import { AgentWorkflow } from './agent-workflow.js';
 import { AgentStateMachine, AgentState } from './state-machine.js';
+import { StateStore } from './state-store.js';
 import { ModelGateway, OpenAICompatibleTransport, parseTokenList } from './model-gateway.js';
 import { ToolGateway } from './tool-gateway.js';
 import { CapabilityRouter } from './capability-router.js';
@@ -16,7 +19,7 @@ import { z } from 'zod';
 import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
 import { diffSnapshots, snapshotTextFiles } from './workspace-diff.js';
-import { normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+import { modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
 import { ApprovalBroker } from './approval-broker.js';
 
@@ -55,6 +58,8 @@ export interface RuntimeChatRequest {
   type: 'chat';
   request_id: string;
   messages: { role: 'user' | 'assistant'; content: string; images?: string[] }[];
+  /** Summary of earlier history produced by a manual or automatic compaction. Messages it covers are not sent. */
+  compacted_summary?: string;
   model?: string;
   permission?: string;
   workspace?: string;
@@ -63,8 +68,16 @@ export interface RuntimeChatRequest {
   subagent?: Partial<SubagentSettings>;
 }
 
-const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append only for rules that must always apply.';
+const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative.';
 const CHAT_TOOL_ROUNDS = 5;
+/** Chat has no per-task token cap, so compaction triggers at a fixed estimated size. */
+const CHAT_COMPACT_TOKENS = 24_000;
+
+/** Rough token estimate (about 4 characters per token), matching the agent executor. */
+function estimateTokens(messages: readonly ModelMessage[], tools: readonly ModelToolDefinition[]): number {
+  const text = messages.map((item) => `${item.role}${item.content}`).join('') + JSON.stringify(tools);
+  return Math.ceil(text.length / 4);
+}
 const WRITE_FILE_TOOL_DEFINITION: ModelToolDefinition = {
   type: 'function',
   function: {
@@ -111,7 +124,7 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     type: 'function',
     function: {
       name: 'memory_append',
-      description: 'Append a line to the always-injected memory file (layer 0 global rules or layer 1 project memory). Append only; existing content cannot be rewritten or removed.',
+      description: 'Append a line to the always-injected memory file (layer 0 global rules or layer 1 project memory). Only call this when the user explicitly asks to save a rule; never on your own initiative. Append only; existing content cannot be rewritten or removed.',
       parameters: { type: 'object', additionalProperties: false, properties: { content: { type: 'string' }, scope: { type: 'string', enum: ['global', 'project'] } }, required: ['content', 'scope'] },
     },
   },
@@ -141,6 +154,31 @@ export function resolveChatWorkspace(workspace: string | undefined): string {
   return candidate;
 }
 
+function chatToolDefinitions(subagent: SubagentSettings): ModelToolDefinition[] {
+  return subagent.enabled ? CHAT_TOOL_DEFINITIONS : CHAT_TOOL_DEFINITIONS.filter((tool) => !SUBAGENT_TOOL_NAMES.has(tool.function.name));
+}
+
+/**
+ * Builds the model messages for a chat turn. When the client has compacted earlier history, the summary is placed
+ * before the messages the client kept verbatim.
+ */
+async function buildChatMessages(workspacePath: string, history: RuntimeChatRequest['messages'], compactedSummary?: string): Promise<ModelMessage[]> {
+  const memory = await memoryContext(workspacePath);
+  const lastUser = [...history].reverse().find((item) => item.role === 'user')?.content ?? '';
+  const recalled = await deepRecallContext(workspacePath, lastUser);
+  const memorySections = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : ''].filter(Boolean);
+  const systemContent = [CHAT_SYSTEM_PROMPT, ...memorySections].join('\n\n');
+  const summary = typeof compactedSummary === 'string' && compactedSummary.trim() ? [{ role: 'user' as const, content: `${COMPACT_SUMMARY_PREFIX}\n${compactedSummary.trim()}` }] : [];
+  return [
+    { role: 'system', content: systemContent },
+    ...summary,
+    ...history.map((item) => {
+      const images = sanitizeChatImages(item.images);
+      return { role: item.role, content: item.content, ...(images.length > 0 ? { images } : {}) };
+    }),
+  ];
+}
+
 function isChatRequest(message: unknown): message is RuntimeChatRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat';
 }
@@ -151,10 +189,26 @@ function isChatTraceHistoryRequest(message: unknown): message is ChatTraceHistor
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_trace_history';
 }
 
+function isTaskHistoryRequest(message: unknown): boolean {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'task_history';
+}
+
 interface ChatCancelRequest { type: 'chat_cancel'; request_id: string }
 
 function isChatCancelRequest(message: unknown): message is ChatCancelRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_cancel' && typeof (message as { request_id?: unknown }).request_id === 'string';
+}
+
+interface ChatUsageRequest { type: 'chat_usage'; request_id: string; messages: RuntimeChatRequest['messages']; workspace?: string; subagent?: Partial<SubagentSettings>; compacted_summary?: string }
+
+function isChatUsageRequest(message: unknown): message is ChatUsageRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_usage' && typeof (message as { request_id?: unknown }).request_id === 'string';
+}
+
+interface ChatCompactRequest { type: 'chat_compact'; request_id: string; messages: RuntimeChatRequest['messages']; workspace?: string; model?: string; compacted_summary?: string }
+
+function isChatCompactRequest(message: unknown): message is ChatCompactRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_compact' && typeof (message as { request_id?: unknown }).request_id === 'string';
 }
 
 const MAX_CHAT_IMAGES = 4;
@@ -179,6 +233,26 @@ function isWriteRollbackRequest(message: unknown): boolean {
 
 function isSettingsRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'settings_get';
+}
+
+function isModelListRequest(message: unknown): message is { type: 'model_list'; request_id: string; payload?: Partial<ModelSettingsInput> } {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'model_list';
+}
+
+/**
+ * Asks the OpenAI-compatible provider for its model catalog via GET {base}/models.
+ * Uses the endpoint and key from the request when given, otherwise the saved ones.
+ */
+export async function fetchModelCatalog(endpointRaw: string, tokensRaw: string, fetchImpl: typeof fetch = fetch): Promise<string[]> {
+  const url = modelsEndpoint(endpointRaw);
+  if (!url) throw new Error('未设置 Base URL。');
+  const token = parseTokenList(tokensRaw)[0];
+  if (!token) throw new Error('未设置 API Key。');
+  const response = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`上游返回 HTTP ${response.status}。`);
+  const body = (await response.json()) as { data?: { id?: unknown }[] };
+  const ids = (body.data ?? []).map((item) => item.id).filter((id): id is string => typeof id === 'string');
+  return [...new Set(ids)].sort();
 }
 
 function isMcpConfigGet(message: unknown): boolean {
@@ -220,9 +294,14 @@ export class HieroRuntime {
   private readonly approvals: ApprovalBroker;
   private readonly writeSnapshots = new WriteSnapshotStore();
   private readonly activeChats = new Map<string, AbortController>();
+  private readonly stateStore: StateStore;
+  private currentTaskId: string | undefined;
 
-  public constructor(port = 8080) {
+  public constructor(port = 8080, storePath?: string) {
+    this.stateStore = new StateStore(storePath);
+    this.stateStore.markRunningAsInterrupted();
     this.runtime = new RuntimeWebSocketServer(this.machine, port);
+    this.runtime.onTransition = (transition) => this.currentTaskId && this.stateStore.recordTransition(this.currentTaskId, transition.from, transition.to);
     this.approvals = new ApprovalBroker((request) => this.runtime.broadcast({ type: 'APPROVAL_REQUIRED', payload: request }));
     this.gateway = this.createGateway();
     this.workflow = this.createWorkflow();
@@ -231,8 +310,12 @@ export class HieroRuntime {
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) this.cancelChat(message.request_id, client);
+      else if (isChatUsageRequest(message)) await this.handleChatUsage(message, client);
+      else if (isChatCompactRequest(message)) await this.handleChatCompact(message, client);
+      else if (isTaskHistoryRequest(message)) this.runtime.send({ type: 'TASK_HISTORY', payload: { tasks: this.stateStore.listTasks() } }, client);
       else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: resolveChatWorkspace(message.workspace), traces: await listChatTraces(resolveChatWorkspace(message.workspace)) } }, client);
       else if (isSettingsRequest(message)) this.runtime.send({ type: 'SETTINGS', payload: this.readModelSettings() }, client);
+      else if (isModelListRequest(message)) await this.handleModelList(message, client);
       else if (isMcpConfigGet(message)) this.sendMcpConfig(client);
       else if (isMcpConfigSave(message)) await this.handleMcpConfigSave(message.payload, client);
       else if (isWorkspaceRequest(message)) await this.handleWorkspaceRequest(message, client);
@@ -271,8 +354,14 @@ export class HieroRuntime {
       else if (request.type === 'fs_read') reply({ ok: true, ...(await readTextFile(root, request.path)) });
       else if (request.type === 'skill_list') reply({ ok: true, skills: await listSkills(root, { dedupe: true }) });
       else if (request.type === 'skill_read') reply({ ok: true, ...(await readSkill(root, request.scope, request.name)) });
-      else if (request.type === 'skill_save') reply({ ok: true, skill: await saveSkill(root, request.scope, request.name, request.content) });
-      else if (request.type === 'skill_delete') { await deleteSkill(root, request.scope, request.name); reply({ ok: true }); }
+      else if (request.type === 'skill_save') {
+        await this.requireSkillApproval('skill_save', `保存技能：${request.scope}/${request.name}`, request);
+        reply({ ok: true, skill: await saveSkill(root, request.scope, request.name, request.content) });
+      } else if (request.type === 'skill_delete') {
+        await this.requireSkillApproval('skill_delete', `删除技能：${request.scope}/${request.name}`, request);
+        await deleteSkill(root, request.scope, request.name);
+        reply({ ok: true });
+      }
       else if (request.type === 'memory_read') reply({ ok: true, memory: await readMemory(root, request.scope) });
       else if (request.type === 'memory_save') reply({ ok: true, memory: await saveMemory(root, request.scope, request.content) });
       else if (request.type === 'deep_memory_list') reply({ ok: true, entries: (await listDeepMemory(root)).map(({ embedding: _vector, ...entry }) => entry) });
@@ -300,15 +389,84 @@ export class HieroRuntime {
     return new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? '')), tokens);
   }
 
+  /** Summarizes older history with HIERO_COMPACT_MODEL (a cheap or local model) when set, otherwise the main model. */
+  private createCompactor(keepRecent = 6): ContextCompactor {
+    const compactModel = process.env.HIERO_COMPACT_MODEL || undefined;
+    return new ContextCompactor(async (task, transcript) => {
+      const summaryTask: TaskContract = { ...task, model_config: { preferred_model: compactModel ?? task.model_config.preferred_model, fallback_chain: [] } };
+      const response = await this.gateway.complete(summaryTask, { prompt: transcript });
+      return response.content;
+    }, keepRecent);
+  }
+
+  /** Replies with the provider's model IDs. Errors are returned as text so the form can show them. */
+  private async handleModelList(request: { request_id: string; payload?: Partial<ModelSettingsInput> }, client: WebSocket | undefined): Promise<void> {
+    const endpoint = request.payload?.endpoint || process.env.HIERO_LLM_ENDPOINT || '';
+    const tokens = request.payload?.tokens || process.env.HIERO_LLM_TOKENS || '';
+    try {
+      const models = await fetchModelCatalog(endpoint, tokens);
+      this.runtime.send({ type: 'MODEL_LIST', payload: { request_id: request.request_id, models } }, client);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      this.runtime.send({ type: 'MODEL_LIST', payload: { request_id: request.request_id, models: [], error: message } }, client);
+    }
+  }
+
+  private async handleChatUsage(request: ChatUsageRequest, client: WebSocket | undefined): Promise<void> {
+   const workspacePath = resolveChatWorkspace(request.workspace);
+   const subagent = normalizeSubagentSettings(request.subagent);
+   const tools = chatToolDefinitions(subagent);
+   const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
+   this.runtime.send({ type: 'CHAT_USAGE', payload: { request_id: request.request_id, usage: breakdownContextUsage(messages, tools) } }, client);
+  }
+
+  /** Summarizes older history on demand. The client keeps the returned summary and drops the messages it covers. */
+  private async handleChatCompact(request: ChatCompactRequest, client: WebSocket | undefined): Promise<void> {
+   const workspacePath = resolveChatWorkspace(request.workspace);
+   const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna';
+   const task: TaskContract = {
+     task_id: randomUUID(),
+     workspace_path: workspacePath,
+     model_config: { preferred_model: model, fallback_chain: [] },
+     permission_mode: 'standard',
+     context_mode: 'ephemeral',
+     acceptance_criteria: [],
+     budget_envelope: { max_tokens: 4000, max_time_ms: 120_000 },
+   };
+   try {
+     const tools = chatToolDefinitions(normalizeSubagentSettings(undefined));
+     const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
+     const beforeTokens = estimateTokens(messages, tools);
+     const compacted = await this.createCompactor(1).compact(task, messages);
+     const summaryMessage = compacted[1];
+     if (compacted.length === messages.length || summaryMessage?.role !== 'user' || !summaryMessage.content.startsWith(COMPACT_SUMMARY_PREFIX)) {
+       throw new Error('历史太短，没有可压缩的内容。');
+     }
+     const summary = summaryMessage.content.slice(COMPACT_SUMMARY_PREFIX.length).trim();
+     this.runtime.send({
+       type: 'CHAT_COMPACTED',
+       payload: { request_id: request.request_id, summary, before_tokens: beforeTokens, after_tokens: estimateTokens(compacted, tools), kept_messages: compacted.length - 2 },
+     }, client);
+   } catch (cause) {
+     this.runtime.send({ type: 'CHAT_COMPACTED', payload: { request_id: request.request_id, ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
+   }
+  }
+
   private requestToolApproval(toolName: string, input: unknown): Promise<{ approved: boolean }> {
     return this.approvals.request(toolName, `执行不可逆工具：${toolName}`, input);
+  }
+
+  /** Skill edits always need the operator's approval, even in auto mode. */
+  private async requireSkillApproval(toolName: string, summary: string, input: unknown): Promise<void> {
+    const decision = await this.approvals.request(toolName, summary, input);
+    if (!decision.approved) throw new Error('操作员拒绝了该技能修改，或审批已超时。');
   }
 
   private createWorkflow(workspacePath: string = process.cwd()): AgentWorkflow {
     const tools = new ToolGateway();
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
-    return new AgentWorkflow(this.machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter), (to, verified) => this.runtime.transition(to, verified), (document) => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document }), {
+    return new AgentWorkflow(this.machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter, 0.8, this.createCompactor()), (to, verified) => this.runtime.transition(to, verified), (document) => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document }), {
       onVerification: (result) => this.runtime.broadcast({ type: 'VERIFY_RESULT', payload: result }),
       rewind: async () => {
         const result = await this.writeSnapshots.rollback();
@@ -410,19 +568,8 @@ export class HieroRuntime {
       budget_envelope: { max_tokens: 4000, max_time_ms: 120_000 },
     };
     const subagent = normalizeSubagentSettings(request.subagent);
-    const toolDefinitions = subagent.enabled ? CHAT_TOOL_DEFINITIONS : CHAT_TOOL_DEFINITIONS.filter((tool) => !SUBAGENT_TOOL_NAMES.has(tool.function.name));
-    const memory = await memoryContext(workspacePath);
-    const lastUser = [...request.messages].reverse().find((item) => item.role === 'user')?.content ?? '';
-    const recalled = await deepRecallContext(workspacePath, lastUser);
-    const memorySections = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : ''].filter(Boolean);
-    const systemContent = [CHAT_SYSTEM_PROMPT, ...memorySections].join('\n\n');
-    const messages: ModelMessage[] = [
-      { role: 'system', content: systemContent },
-      ...request.messages.map((item) => {
-        const images = sanitizeChatImages(item.images);
-        return { role: item.role, content: item.content, ...(images.length > 0 ? { images } : {}) };
-      }),
-    ];
+    const toolDefinitions = chatToolDefinitions(subagent);
+    const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
     const trace = new ChatTrace();
     const sendTrace = () => this.runtime.send({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } }, client);
     try {
@@ -436,7 +583,12 @@ export class HieroRuntime {
         usage.output_tokens += item.usage?.output_tokens ?? 0;
       };
       let delegatedChatTotal = 0;
+      const compactor = this.createCompactor();
       for (let step = 0; step < CHAT_TOOL_ROUNDS; step += 1) {
+        if (estimateTokens(messages, toolDefinitions) > CHAT_COMPACT_TOKENS) {
+          const compacted = await compactor.compact(task, messages);
+          messages.splice(0, messages.length, ...compacted);
+        }
         const endModelCall = trace.begin('model_call', `模型调用 ${step + 1}`);
         response = await this.gateway.complete(task, { prompt: '', messages, tools: toolDefinitions, onDelta, signal });
         track(response);
@@ -590,20 +742,31 @@ export class HieroRuntime {
       }
       this.machine.beginTask();
       this.writeSnapshots.clear();
+      this.currentTaskId = task.task_id;
+      this.stateStore.startTask(task.task_id, task.workspace_path, message.goal);
       const before = await snapshotTextFiles(task.workspace_path);
       const outcome = await this.createWorkflow(task.workspace_path).run(task, message.goal, [WRITE_FILE_TOOL_DEFINITION, ...(message.tools ?? [])]);
       if ('handoff' in outcome) {
         this.runtime.completeState(AgentState.Handoff);
+        this.stateStore.finishTask(task.task_id, 'completed');
         return;
       }
       const after = await snapshotTextFiles(task.workspace_path);
       for (const diff of await diffSnapshots(before, after)) this.runtime.broadcast({ type: 'FILE_DIFF', payload: diff });
       this.runtime.completeState(AgentState.Verify);
+      this.stateStore.finishTask(task.task_id, 'completed');
     } catch (cause) {
+      if (this.currentTaskId) this.stateStore.finishTask(this.currentTaskId, 'failed');
       this.runtime.reportError(cause);
+    } finally {
+      this.currentTaskId = undefined;
     }
   }
 
-  public async close(): Promise<void> { await this.runtime.close(); await this.systemAgent.close(); }
+  public async close(): Promise<void> {
+    await this.runtime.close();
+    await this.systemAgent.close();
+    this.stateStore.close();
+  }
 }
 

@@ -1,4 +1,5 @@
 import type { PermissionMode } from './contracts.js';
+import { summarizeErrors } from './error-parser.js';
 import { runCommand, type CommandResult } from './workspace-services.js';
 
 /** Acceptance criteria prefixed with this marker are executed as shell commands during Verify. */
@@ -10,6 +11,8 @@ export interface VerificationCheck {
   command?: string;
   exitCode?: number | null;
   output?: string;
+  /** Core diagnostics extracted from `output`, for retry prompts. */
+  errorSummary?: string;
   reason?: string;
 }
 
@@ -53,6 +56,7 @@ export async function runVerification(options: VerificationOptions): Promise<Ver
       command,
       exitCode: result.exitCode,
       output: result.output,
+      ...(passed ? {} : { errorSummary: summarizeErrors(result.output ?? '').text }),
       ...(result.timedOut ? { reason: 'Verification command timed out.' } : {}),
     });
   }

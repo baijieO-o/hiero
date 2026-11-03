@@ -17,6 +17,13 @@ test('explainApproval marks write_file as reversible medium risk', () => {
   assert.match(explanation.effect, /src\/a\.ts/);
 });
 
+test('explainApproval describes skill edits as medium-risk and not auto-reversible', () => {
+  const save = explainApproval('skill_save', { scope: 'project', name: 'demo' });
+  assert.equal(save.title, '保存技能');
+  assert.equal(save.reversible, false);
+  assert.equal(explainApproval('skill_delete', {}).title, '删除技能');
+});
+
 test('explainApproval falls back to a high-risk irreversible warning for unknown tools', () => {
   const explanation = explainApproval('mystery_tool', null);
   assert.equal(explanation.risk, 'high');

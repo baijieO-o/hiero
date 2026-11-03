@@ -37,6 +37,14 @@ export function explainApproval(toolName: string, input: unknown): ApprovalExpla
         risk: 'medium',
         reversible: false,
       };
+    case 'skill_save':
+    case 'skill_delete':
+      return {
+        title: toolName === 'skill_delete' ? '删除技能' : '保存技能',
+        effect: '将修改技能目录中的 SKILL.md，之后的对话可能会加载它',
+        risk: 'medium',
+        reversible: false,
+      };
     default:
       return {
         title: `执行不可逆工具：${toolName}`,

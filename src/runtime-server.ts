@@ -4,6 +4,8 @@ import { AgentStateMachine, type AgentState, type StateTransition } from './stat
 import type { VerificationResult } from './verification.js';
 import type { ChatTraceEvent } from './chat-trace.js';
 import type { StoredChatTrace } from './trace-store.js';
+import type { TaskRecord } from './state-store.js';
+import type { ContextUsageBreakdown } from './context-usage.js';
 import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { isAllowedOrigin, isLoopbackAddress } from './ws-guard.js';
@@ -22,7 +24,11 @@ export type RuntimeEvent =
   | { type: 'CHAT_ERROR'; payload: { request_id: string; code: string; message: string } }
   | { type: 'CHAT_TRACE'; payload: { request_id: string; events: ChatTraceEvent[] } }
   | { type: 'CHAT_TRACE_HISTORY'; payload: { workspace: string; traces: StoredChatTrace[] } }
+  | { type: 'TASK_HISTORY'; payload: { tasks: TaskRecord[] } }
   | { type: 'CHAT_CANCELLED'; payload: { request_id: string } }
+  | { type: 'CHAT_USAGE'; payload: { request_id: string; usage: ContextUsageBreakdown } }
+  | { type: 'MODEL_LIST'; payload: { request_id: string; models: string[]; error?: string } }
+  | { type: 'CHAT_COMPACTED'; payload: { request_id: string; summary: string; before_tokens: number; after_tokens: number; kept_messages: number } | { request_id: string; ok: false; message: string } }
   | { type: 'SETTINGS'; payload: { endpoint: string; model: string; token_count: number } }
   | { type: 'SETTINGS_SAVE_RESULT'; payload: { ok: true; settings: { endpoint: string; model: string; token_count: number } } | { ok: false; message: string } }
   | { type: 'MCP_CONFIG'; payload: { servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } }
@@ -31,9 +37,13 @@ export type RuntimeEvent =
   | { type: 'APPROVAL_REQUIRED'; payload: { approval_id: string; tool_name: string; summary: string; input: unknown } }
   | { type: 'ROLLBACK_RESULT'; payload: { ok: true; restored: string[]; skipped: string[]; warning?: unknown } | { ok: false; message: string } };
 
+/** Sent once on connect. Lets a (re)connected panel rebuild its state node instead of waiting for the next transition. */
+export type RuntimeSnapshotEvent = { type: 'SNAPSHOT'; payload: { seq: number; node: AgentState } };
+
 export class RuntimeWebSocketServer {
   private readonly server: WebSocketServer;
   private readonly clients = new Set<WebSocket>();
+  private seq = 0;
 
   public constructor(private readonly machine: AgentStateMachine, port = 8080) {
     this.server = new WebSocketServer({
@@ -48,6 +58,7 @@ export class RuntimeWebSocketServer {
       this.clients.add(client);
       client.on('close', () => this.clients.delete(client));
       client.on('error', () => this.clients.delete(client));
+      this.sendRaw({ type: 'SNAPSHOT', payload: { seq: this.seq, node: this.machine.state } }, client);
     });
   }
 
@@ -65,22 +76,34 @@ export class RuntimeWebSocketServer {
   }
 
   public broadcast(event: RuntimeEvent): void {
-    for (const client of this.clients) this.send(event, client);
+    this.seq += 1;
+    const message = JSON.stringify({ ...event, seq: this.seq });
+    for (const client of this.clients) this.sendMessage(message, client);
   }
 
   public send(event: RuntimeEvent, client?: WebSocket): void {
     const message = JSON.stringify(event);
     const targets = client ? [client] : this.clients;
-    for (const target of targets) {
-      if (target.readyState === WebSocket.OPEN) target.send(message);
-    }
+    for (const target of targets) this.sendMessage(message, target);
+  }
+
+  private sendRaw(event: RuntimeSnapshotEvent, client: WebSocket): void {
+    this.sendMessage(JSON.stringify(event), client);
+  }
+
+  private sendMessage(message: string, target: WebSocket): void {
+    if (target.readyState === WebSocket.OPEN) target.send(message);
   }
 
   public transition(to: AgentState, verified = false): StateTransition {
     const transition = this.machine.transition(to, verified);
+    this.onTransition?.(transition);
     this.broadcast({ type: 'STATE_CHANGE', payload: { node: transition.to, status: 'running' } });
     return transition;
   }
+
+  /** Hook for persisting each state change. */
+  public onTransition?: (transition: StateTransition) => void;
 
   public completeState(node: AgentState): void {
     this.broadcast({ type: 'STATE_CHANGE', payload: { node, status: 'completed' } });

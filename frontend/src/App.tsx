@@ -3,37 +3,39 @@ import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockvie
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ReactElement } from 'react';
-import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelSettings, type SaveState } from './settings';
+import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState } from './settings';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
-import { renderMarkdown } from './markdown';
+import { handleCodeCopy, renderMarkdown } from './markdown';
+import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
 import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
 import { TaskCard } from './task-card';
 import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
 import { clarifyComplete, clarifyQuestions, type ClarifyAnswers } from './clarify-model';
 import { ClarifyWizard } from './clarify-wizard';
 import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
+import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog, storeModelCatalog } from './model-catalog-store';
 import { RUNTIME_WS_URL } from './runtime-url';
+import { runtimeSocketFor, type RuntimeSocketMessage } from './runtime-socket';
 import { estimateCostUsd, formatCost } from './token-cost';
 import { TerminalView, type TerminalWriteLine } from './terminal-view';
 import { MAX_TEXT_PREVIEW_BYTES, classifyFile, folderNameFromEntry } from './dropped-files';
 import { FileRefChip, FilePreviewDialog, type DroppedFileRef } from './file-ref';
+import { compactionBoundary, insertDivider, sendableMessages } from './compaction';
 
 type TodoStatus = 'done' | 'active' | 'pending';
 
-type RuntimeMessage = {
-  type?: string;
-  payload?: Record<string, unknown>;
-};
+type RuntimeMessage = RuntimeSocketMessage;
 
 const TODO_ITEMS = ['定义任务契约', '运行执行网关', '验证工具证据', '准备交接文档'];
 
+/** Read-only panels subscribe to every broadcast through one shared, reconnecting socket. */
 function connectRuntime(onMessage: (message: RuntimeMessage) => void): () => void {
-  const socket = new WebSocket(RUNTIME_WS_URL);
-  socket.onmessage = (event) => {
-    try { onMessage(JSON.parse(String(event.data)) as RuntimeMessage); } catch { /* Ignore non-JSON runtime messages. */ }
-  };
-  return () => socket.close();
+  const socket = runtimeSocketFor(RUNTIME_WS_URL);
+  const unsubscribers = BROADCAST_TYPES.map((type) => socket.subscribe(type, onMessage));
+  return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
 }
+
+const BROADCAST_TYPES = ['SNAPSHOT', 'STATE_CHANGE', 'VERIFY_RESULT', 'REWIND_RESULT', 'FILE_DIFF', 'HANDOFF_TRIGGERED'];
 
 type PanelKind = 'chat' | 'mission' | 'debug' | 'todo' | 'review' | 'handoff' | 'settings' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'blank';
 
@@ -200,6 +202,8 @@ interface ChatMessage {
   trace?: TraceEvent[];
   requestId?: string;
   completedAt?: number;
+  /** Marks a divider inserted where a manual compaction happened. */
+  compactedMarker?: boolean;
 }
 
 interface ChatUsage { input_tokens: number; output_tokens: number; calls: number; duration_ms: number }
@@ -232,6 +236,18 @@ interface Conversation {
   title: string;
   messages: ChatMessage[];
   updatedAt: number;
+  /** Summary of messages[0..compactedUpTo); later requests send the summary plus the messages after it. */
+  compactedSummary?: string;
+  compactedUpTo?: number;
+}
+
+interface ContextUsageView { window: number; total: number; system: number; tools: number; tool_results: number; messages: number }
+
+function parseContextUsage(raw: unknown): ContextUsageView | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const item = raw as Record<string, unknown>;
+  const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  return { window: num(item.window), total: num(item.total), system: num(item.system), tools: num(item.tools), tool_results: num(item.tool_results), messages: num(item.messages) };
 }
 
 export interface ChatOptions {
@@ -241,7 +257,6 @@ export interface ChatOptions {
   contextMode: string;
 }
 
-const CHAT_MODEL_OPTIONS = ['gpt-5.6-luna'];
 const CHAT_CONTEXT_OPTIONS = ['临时会话', '持久化 Markdown'];
 // 热边：鼠标距窗口左边缘多少像素内触发展开；离开侧栏后延迟收起，避免抖动。
 const HOT_EDGE_PX = 8;
@@ -255,6 +270,11 @@ interface ChatState {
   streamingText: string;
   streamingSteps: ToolStep[];
   error: string | null;
+  compacting: boolean;
+  /** Latest context usage per conversation id, requested when the session info panel opens. */
+  contextUsage: Record<string, ContextUsageView>;
+  requestContextUsage: (conversationId: string) => void;
+  compactConversation: (conversationId: string) => void;
   options: ChatOptions;
   setOption: <K extends keyof ChatOptions>(key: K, value: ChatOptions[K]) => void;
   newConversation: () => void;
@@ -275,6 +295,11 @@ function readPathArgument(rawArguments: string): string {
   }
 }
 
+/** Messages to send to the backend: the summary covers the older part, so only the messages after it are sent. Divider rows are never sent. */
+function sendableHistory(conversation: Conversation, extra: ChatMessage[] = []): ChatMessage[] {
+  return sendableMessages(conversation, extra);
+}
+
 function createConversation(): Conversation {
   return { id: `conv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, title: '新对话', messages: [], updatedAt: Date.now() };
 }
@@ -285,14 +310,46 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
   let pendingFiles: string[] = [];
   let pendingSteps: ToolStep[] = [];
   let pendingTrace: TraceEvent[] | undefined;
+  /** Usage and compaction requests are independent of chat turns, so they are matched by request id here. */
+  const sideRequests = new Map<string, { kind: 'usage' | 'compact'; conversationId: string }>();
   const updateConversation = (id: string, change: (conv: Conversation) => Conversation) =>
     set((state) => ({ conversations: state.conversations.map((conv) => (conv.id === id ? change(conv) : conv)) }));
+  const handleSideChannel = (message: RuntimeMessage) => {
+    const requestId = typeof message.payload?.request_id === 'string' ? message.payload.request_id : '';
+    const pending = sideRequests.get(requestId);
+    if (!pending) return;
+    sideRequests.delete(requestId);
+    if (message.type === 'CHAT_USAGE') {
+      const usage = parseContextUsage(message.payload?.usage);
+      if (usage) set((state) => ({ contextUsage: { ...state.contextUsage, [pending.conversationId]: usage } }));
+      return;
+    }
+    set({ compacting: false });
+    if (message.payload?.ok === false) {
+      set({ error: typeof message.payload?.message === 'string' ? message.payload.message : '压缩失败' });
+      return;
+    }
+    const summary = typeof message.payload?.summary === 'string' ? message.payload.summary : '';
+    if (!summary) return;
+    updateConversation(pending.conversationId, (conv) => {
+      // The summary replaces everything up to the current end of the visible history; the divider marks where it happened.
+      // Manual /compact keeps only the latest message unsummarized (backend createCompactor(1)); automatic compaction keeps 6.
+      const upTo = compactionBoundary(conv.messages);
+      const divider: ChatMessage = { role: 'assistant', content: '', compactedMarker: true, completedAt: Date.now() };
+      return { ...conv, compactedSummary: summary, compactedUpTo: upTo, messages: insertDivider(conv.messages, upTo, divider), updatedAt: Date.now() };
+    });
+    set({ error: null });
+  };
   const ensureSocket = (): WebSocket => {
     if (socket && socket.readyState <= WebSocket.OPEN) return socket;
     const next = new WebSocket(RUNTIME_WS_URL);
     next.onmessage = (event) => {
       let message: RuntimeMessage;
       try { message = JSON.parse(String(event.data)) as RuntimeMessage; } catch { return; }
+      if (message.type === 'CHAT_USAGE' || message.type === 'CHAT_COMPACTED') {
+        handleSideChannel(message);
+        return;
+      }
       const requestId = typeof message.payload?.request_id === 'string' ? message.payload.request_id : '';
       if (!activeRequest || activeRequest.requestId !== requestId) return;
       const conversationId = activeRequest.conversationId;
@@ -370,7 +427,35 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     streamingText: '',
     streamingSteps: [],
     error: null,
-    options: { model: 'gpt-5.6-luna', permission: readStoredPermission(), workspace: 'D:\\hiero', contextMode: '临时会话' },
+    compacting: false,
+    contextUsage: {},
+    requestContextUsage: (conversationId) => {
+      const conversation = get().conversations.find((conv) => conv.id === conversationId);
+      if (!conversation) return;
+      const requestId = `usage-${Date.now()}`;
+      sideRequests.set(requestId, { kind: 'usage', conversationId });
+      const { workspace } = get().options;
+      const subagent = useSubagentPreferences.getState().values;
+      const payload = JSON.stringify({ type: 'chat_usage', request_id: requestId, messages: sendableHistory(conversation), workspace, subagent, compacted_summary: conversation.compactedSummary });
+      const target = ensureSocket();
+      if (target.readyState === WebSocket.OPEN) target.send(payload);
+      else target.addEventListener('open', () => target.send(payload), { once: true });
+    },
+    compactConversation: (conversationId) => {
+      const state = get();
+      if (state.pending || state.compacting) return;
+      const conversation = state.conversations.find((conv) => conv.id === conversationId);
+      if (!conversation) return;
+      const requestId = `compact-${Date.now()}`;
+      sideRequests.set(requestId, { kind: 'compact', conversationId });
+      set({ compacting: true, error: null });
+      const { model, workspace } = state.options;
+      const payload = JSON.stringify({ type: 'chat_compact', request_id: requestId, messages: sendableHistory(conversation), workspace, model, compacted_summary: conversation.compactedSummary });
+      const target = ensureSocket();
+      if (target.readyState === WebSocket.OPEN) target.send(payload);
+      else target.addEventListener('open', () => target.send(payload), { once: true });
+    },
+    options: { model: readStoredDefaultModel(), permission: readStoredPermission(), workspace: 'D:\\hiero', contextMode: '临时会话' },
     setOption: (key, value) => set((state) => ({ options: { ...state.options, [key]: value } })),
     newConversation: () => {
       if (get().pending) return;
@@ -399,7 +484,16 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const state = get();
       const conversation = state.conversations.find((conv) => conv.id === state.activeId);
       if (!conversation || messageIndex < 0 || messageIndex >= conversation.messages.length) return;
-      updateConversation(conversation.id, (conv) => ({ ...conv, messages: conv.messages.slice(0, messageIndex), updatedAt: Date.now() }));
+      updateConversation(conversation.id, (conv) => {
+        // Rewinding into the summarized range invalidates the summary, because it describes messages that no longer exist.
+        const keepSummary = conv.compactedUpTo !== undefined && messageIndex >= conv.compactedUpTo;
+        return {
+          ...conv,
+          messages: conv.messages.slice(0, messageIndex),
+          updatedAt: Date.now(),
+          ...(keepSummary ? {} : { compactedSummary: undefined, compactedUpTo: undefined }),
+        };
+      });
       set({ error: null });
     },
     send: (text, images = []) => {
@@ -409,12 +503,11 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const conversation = state.conversations.find((conv) => conv.id === state.activeId);
       if (!conversation) return;
       const message: ChatMessage = { role: 'user', content: trimmed, ...(images.length > 0 ? { images } : {}) };
-      const history = [...conversation.messages, message];
       const requestId = `chat-${Date.now()}`;
       activeRequest = { conversationId: conversation.id, requestId };
       updateConversation(conversation.id, (conv) => ({
         ...conv,
-        messages: history,
+        messages: [...conv.messages, message],
         title: conv.messages.length === 0 ? (trimmed || '图片消息').slice(0, 20) : conv.title,
         updatedAt: Date.now(),
       }));
@@ -424,7 +517,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const target = ensureSocket();
       const { model, permission, workspace, contextMode } = state.options;
       const subagent = useSubagentPreferences.getState().values;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: history, model, permission, workspace, context_mode: contextMode, subagent });
+      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
@@ -574,6 +667,19 @@ function summarizeSessionUsage(messages: ChatMessage[]): { calls: number; input_
   return total;
 }
 
+function MarkdownBody({ content }: { content: string }): ReactElement {
+  const ref = useRef<HTMLDivElement>(null);
+  const html = useMemo(() => renderMarkdown(content), [content]);
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const instances = renderMarkmaps(root);
+    void renderMermaidBlocks(root);
+    return () => instances.forEach((instance) => instance.destroy?.());
+  }, [html]);
+  return <div ref={ref} className="chat-markdown" onClick={(event) => { handleCodeCopy(event.target); }} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
 function ChatMessageView({ role, content, images, files, steps, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
   const [copied, setCopied] = useState(false);
   const [timeVisible, setTimeVisible] = useState(false);
@@ -603,7 +709,7 @@ function ChatMessageView({ role, content, images, files, steps, usage, model, tr
     {images && images.length > 0 && <div className="chat-images">
       {images.map((src, index) => <img key={index} src={src} alt={`上传的图片 ${index + 1}`} />)}
     </div>}
-    {content && <div className="chat-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />}
+    {content && <MarkdownBody content={content} />}
     {files && files.length > 0 && <div className="chat-files">
       {files.map((file) => <button type="button" key={file} className="chat-file" onClick={() => requestOpenFile(file)} title={`在文件管理器中打开 ${file}`}>📄 {file}</button>)}
     </div>}
@@ -669,8 +775,9 @@ function TraceTimeline({ events }: { events: TraceEvent[] }): ReactElement {
 }
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, streamingText, streamingSteps, error, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore();
+  const { conversations, activeId, pending, streamingText, streamingSteps, error, compacting, contextUsage, requestContextUsage, compactConversation, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore();
   const [draft, setDraft] = useState('');
+  const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
   const [folderPicking, setFolderPicking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
   const pickWorkspaceFolder = async (): Promise<void> => {
@@ -726,6 +833,7 @@ function ChatPanel(): ReactElement {
   }, [autoScroll, messages.length, streamingText]);
   const [jumpOpen, setJumpOpen] = useState(false);
   useEffect(() => { setJumpOpen(false); }, [activeId]);
+  useEffect(() => { if (sessionInfoOpen && active && !pending) requestContextUsage(active.id); }, [sessionInfoOpen, activeId, messages.length, pending]);
   useEffect(() => {
     if (!jumpOpen) return;
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setJumpOpen(false); };
@@ -786,6 +894,11 @@ function ChatPanel(): ReactElement {
   };
   const submit = async () => {
     if (!draft.trim() && images.length === 0 && fileRefs.length === 0) return;
+    if (images.length === 0 && fileRefs.length === 0 && draft.trim() === '/compact') {
+      setDraft('');
+      if (activeId) compactConversation(activeId);
+      return;
+    }
     const refBlocks = await Promise.all(fileRefs.map(async (ref) => {
       if (ref.kind !== 'text') return `[附件: ${ref.name}（${ref.size} 字节）]`;
       const content = await ref.file.slice(0, MAX_TEXT_PREVIEW_BYTES).text();
@@ -885,12 +998,22 @@ function ChatPanel(): ReactElement {
         </div>}
         <div className="chat-log" ref={logRef}>
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
-          {messages.map((message, index) => <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
+          {messages.map((message, index) => message.compactedMarker
+            ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
+            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
           {pending && (streamingText || streamingSteps.length > 0) && <ChatMessageView role="assistant" content={streamingText} steps={streamingSteps} />}
           {pending && !streamingText && <div className="chat-loader" role="status" aria-label="思考中"><span /><span /><span /></div>}
         </div>
         {error && <p className="chat-error">{error}</p>}
         {folderError && <p className="chat-error">{folderError}</p>}
+        {sessionInfoOpen && active && <SessionInfoPanel
+          usage={contextUsage[active.id]}
+          compacting={compacting}
+          hasCompacted={active.compactedSummary !== undefined}
+          canCompact={messages.filter((m) => !m.compactedMarker).length > 2 && !pending}
+          onCompact={() => compactConversation(active.id)}
+          onClose={() => setSessionInfoOpen(false)}
+        />}
         <div className="chat-composer" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={onDrop}>
           <div className="chat-input-box">
             {fileRefs.length > 0 && <div className="chat-file-refs">
@@ -916,9 +1039,13 @@ function ChatPanel(): ReactElement {
                   <PermissionModePicker value={isPermissionLabel(options.permission) ? options.permission : '标准'} disabled={pending} onChange={(value) => setOption('permission', value)} />
                 </div>
               </details>
-              <ChatOptionSelect label="模型" value={options.model} options={CHAT_MODEL_OPTIONS} disabled={pending} onChange={(value) => setOption('model', value)} />
+              <ChatOptionSelect label="模型" value={options.model} options={chatModelOptions(readStoredModelCatalog(), options.model)} disabled={pending} onChange={(value) => setOption('model', value)} />
               <ChatOptionSelect label="上下文" value={options.contextMode} options={CHAT_CONTEXT_OPTIONS} disabled={pending} onChange={(value) => setOption('contextMode', value)} />
               <span className="chat-toolbar-spacer" />
+              <ContextUsageRing usage={activeId ? contextUsage[activeId] : undefined} open={sessionInfoOpen} onToggle={() => {
+                if (!sessionInfoOpen && activeId) requestContextUsage(activeId);
+                setSessionInfoOpen((open) => !open);
+              }} />
               {pending
                 ? <button className="chat-send-round chat-stop-round" type="button" onClick={cancel} title="停止生成" aria-label="停止生成">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
@@ -934,6 +1061,59 @@ function ChatPanel(): ReactElement {
     </div>
   </section>;
 }
+const USAGE_CATEGORIES: Array<{ key: 'system' | 'tools' | 'tool_results' | 'messages'; label: string; color: string }> = [
+  { key: 'system', label: '系统提示词', color: '#8b8fa3' },
+  { key: 'tools', label: '工具定义', color: '#6aa9ff' },
+  { key: 'tool_results', label: '工具结果', color: '#f5b453' },
+  { key: 'messages', label: '消息', color: '#4cc38a' },
+];
+
+function formatTokens(value: number): string {
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
+}
+
+function ContextUsageRing({ usage, open, onToggle }: { usage: ContextUsageView | undefined; open: boolean; onToggle: () => void }): ReactElement {
+  const percent = usage && usage.window > 0 ? Math.min(100, (usage.total / usage.window) * 100) : 0;
+  const radius = 7;
+  const circumference = 2 * Math.PI * radius;
+  return <button type="button" className="chat-usage-ring" onClick={onToggle} aria-expanded={open} aria-label="会话信息" title="会话信息与上下文用量">
+    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2.5" />
+      <circle cx="10" cy="10" r={radius} fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeDasharray={`${(percent / 100) * circumference} ${circumference}`} transform="rotate(-90 10 10)" />
+    </svg>
+  </button>;
+}
+
+function SessionInfoPanel({ usage, compacting, hasCompacted, canCompact, onCompact, onClose }: { usage: ContextUsageView | undefined; compacting: boolean; hasCompacted: boolean; canCompact: boolean; onCompact: () => void; onClose: () => void }): ReactElement {
+  const percent = usage && usage.window > 0 ? (usage.total / usage.window) * 100 : 0;
+  return <div className="chat-session-info" role="dialog" aria-label="会话信息">
+    <div className="chat-session-info-head">
+      <strong>会话信息</strong>
+      <button type="button" className="chat-icon-button" aria-label="关闭" onClick={onClose}>✕</button>
+    </div>
+    <div className="chat-session-info-section">
+      <div className="chat-session-info-row"><span>上下文窗口</span><span>{usage ? `${formatTokens(usage.total)} / ${formatTokens(usage.window)} (${percent.toFixed(1)}%)` : '计算中…'}</span></div>
+      <div className="chat-usage-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}>
+        {usage && USAGE_CATEGORIES.map((item) => <span key={item.key} style={{ width: `${usage.window > 0 ? (usage[item.key] / usage.window) * 100 : 0}%`, background: item.color }} title={item.label} />)}
+      </div>
+      <ul className="chat-usage-list">
+        {USAGE_CATEGORIES.map((item) => <li key={item.key}>
+          <span className="chat-usage-dot" style={{ background: item.color }} />
+          <span className="chat-usage-label">{item.label}</span>
+          <span className="chat-usage-value">{usage ? `${formatTokens(usage[item.key])} tokens` : '—'}</span>
+        </li>)}
+      </ul>
+      <p className="chat-session-info-hint">估算值（约 4 字符 / token），上限按 128K 计算。</p>
+    </div>
+    <div className="chat-session-info-foot">
+      <button type="button" className="chat-compact-button" onClick={onCompact} disabled={!canCompact || compacting} title={canCompact ? '把较早的对话压缩成摘要，之后的请求只发送摘要和新消息' : '历史太短，暂时无法压缩'}>
+        {compacting ? '压缩中…' : '压缩对话'}
+      </button>
+      <span className="chat-session-info-hint">{hasCompacted ? '已压缩：之前的内容以摘要形式参与后续请求。' : '也可以在输入框中发送 /compact。'}</span>
+    </div>
+  </div>;
+}
+
 function ChatOptionSelect({ label, value, options, disabled, onChange }: { label: string; value: string; options: string[]; disabled: boolean; onChange: (value: string) => void }): ReactElement {
   return <label className="chat-pill">
     <span className="chat-pill-label">{label}</span>
@@ -945,7 +1125,7 @@ function ChatOptionSelect({ label, value, options, disabled, onChange }: { label
 
 function MissionControl(): ReactElement {
   const [goal, setGoal] = useState('');
-  const [model, setModel] = useState('gpt-5.6-luna');
+  const [model, setModel] = useState(readStoredDefaultModel);
   const [permission, setPermissionState] = useState<PermissionLabel>(readStoredPermission);
   const setPermission = (value: PermissionLabel) => {
     storePermission(value);
@@ -983,7 +1163,7 @@ function MissionControl(): ReactElement {
       window.setTimeout(() => socket.close(), 500);
     });
   };
-  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => changeGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={['gpt-5.6-luna', 'Claude Sonnet 4', 'GPT-5', '本地 Qwen']} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={changePermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><ClarifyWizard questions={questions} answers={clarifyAnswers} criteria={criteria} onCriteriaChange={setCriteria} onAnswersChange={setClarifyAnswers} complete={clarified} /><TaskCard summary={{ goal: goal.trim(), workspace, model, permissionLabel: effectivePermission, contextMode }} criteria={criteria} budget={budget} onCriteriaChange={setCriteria} onBudgetChange={setBudget} confirmed={confirmed} onConfirmedChange={setConfirmed} disabled={started} /><button className="primary-button" type="button" onClick={launch} disabled={started || !confirmed || !clarified || validation !== null}>{started ? '任务已发送' : '启动任务'} <span>→</span></button>{validation && <p className="task-card-hint">{validation}</p>}<div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => changeGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={chatModelOptions(readStoredModelCatalog(), model)} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={changePermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><ClarifyWizard questions={questions} answers={clarifyAnswers} criteria={criteria} onCriteriaChange={setCriteria} onAnswersChange={setClarifyAnswers} complete={clarified} /><TaskCard summary={{ goal: goal.trim(), workspace, model, permissionLabel: effectivePermission, contextMode }} criteria={criteria} budget={budget} onCriteriaChange={setCriteria} onBudgetChange={setBudget} confirmed={confirmed} onConfirmedChange={setConfirmed} disabled={started} /><button className="primary-button" type="button" onClick={launch} disabled={started || !confirmed || !clarified || validation !== null}>{started ? '任务已发送' : '启动任务'} <span>→</span></button>{validation && <p className="task-card-hint">{validation}</p>}<div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
 }
 
 
@@ -1056,10 +1236,12 @@ function TodoList(): ReactElement {
   useEffect(() => connectRuntime((message) => {
     if (message.type === 'VERIFY_RESULT') { setVerify(message.payload as unknown as typeof verify); return; }
     if (message.type === 'REWIND_RESULT') { setRewind(message.payload as unknown as typeof rewind); return; }
-    if (message.type !== 'STATE_CHANGE') return;
+    if (message.type !== 'STATE_CHANGE' && message.type !== 'SNAPSHOT') return;
     const node = typeof message.payload?.node === 'string' ? message.payload.node : undefined;
     const status = typeof message.payload?.status === 'string' ? message.payload.status : undefined;
-    if (node && status) setCurrentNode(node);
+    // SNAPSHOT carries only the node, so resync from it on every (re)connect.
+    if (message.type === 'SNAPSHOT' && node) setCurrentNode(node);
+    else if (node && status) setCurrentNode(node);
   }), []);
   const statuses: TodoStatus[] = TODO_ITEMS.map((_, index) => index < Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'done' : index === Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'active' : 'pending');
   return <section className="panel-content"><PanelHeader eyebrow="状态机" title="待办清单" /><div className="todo-list">{TODO_ITEMS.map((label, index) => <div className={`todo-item ${statuses[index]}`} key={label}><span className="todo-mark">{statuses[index] === 'done' ? '✓' : statuses[index] === 'active' ? '◌' : ''}</span><span>{label}</span></div>)}</div><p className="todo-note">仅根据状态机广播同步 · 当前节点：{currentNode}</p>{verify && <div className={`verify-result ${verify.verified ? 'passed' : 'failed'}`}><strong>{verify.verified ? 'Verify passed' : 'Verify failed'}</strong>{verify.checks.map((check) => <div className="verify-check" key={check.criterion}><span>{check.status}</span> {check.criterion}{check.reason ? <em> ({check.reason})</em> : null}</div>)}</div>}{rewind && <div className="rewind-result"><strong>Rewind</strong> restored {rewind.restored.length} file(s){rewind.skipped.length > 0 ? `, skipped ${rewind.skipped.length} human-edited` : ''}</div>}</section>;
@@ -1112,7 +1294,17 @@ function SettingsBuffer(): ReactElement {
   const [saveState, setSaveState] = useState<SaveState>({ status: 'idle' });
   const [mcpConfig, setMcpConfig] = useState<McpConfigState | null>(null);
   const [mcpSaveState, setMcpSaveState] = useState<McpSaveState>({ status: 'idle' });
+  const [modelList, setModelList] = useState<ModelListState>({ status: 'idle' });
   const socketRef = useRef<WebSocket | null>(null);
+  const fetchModels = (input: { endpoint: string; tokens: string }) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setModelList({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端。' });
+      return;
+    }
+    setModelList({ status: 'loading' });
+    socket.send(JSON.stringify({ type: 'model_list', request_id: 'model-list', payload: input }));
+  };
   const saveModel = (input: { endpoint: string; model: string; tokens: string }) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -1145,6 +1337,11 @@ function SettingsBuffer(): ReactElement {
       try {
         const message = JSON.parse(String(event.data)) as RuntimeMessage;
         if (message.type === 'SETTINGS') setSettings(message.payload as unknown as ModelSettings);
+        if (message.type === 'MODEL_LIST') {
+          const result = message.payload as unknown as { models: string[]; error?: string };
+          setModelList(result.error ? { status: 'error', message: result.error } : { status: 'ready', models: result.models });
+          if (!result.error) storeModelCatalog(result.models);
+        }
         if (message.type === 'MCP_CONFIG') setMcpConfig(message.payload as unknown as McpConfigState);
         if (message.type === 'MCP_CONFIG_SAVE_RESULT') {
           const result = message.payload as unknown as { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string };
@@ -1173,7 +1370,7 @@ function SettingsBuffer(): ReactElement {
       socket.close();
     };
   }, []);
-  return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} mcpConfig={mcpConfig} mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} modelList={modelList} onFetchModels={fetchModels} mcpConfig={mcpConfig} mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
 }
 
 function normalizeBrowserUrl(input: string): string | null {

@@ -11,6 +11,12 @@ export function normalizeEndpoint(raw: string): string {
   return trimmed.endsWith('/chat/completions') ? trimmed : `${trimmed}/chat/completions`;
 }
 
+/** Turns a chat-completions endpoint or a bare base URL into the matching `/models` URL. */
+export function modelsEndpoint(raw: string): string {
+  const base = normalizeEndpoint(raw).replace(/\/chat\/completions$/, '');
+  return base ? `${base}/models` : '';
+}
+
 /**
  * Rewrites HIERO_LLM_* lines in .env, keeping every other line untouched.
  * .env is gitignored, so tokens stay out of version control.

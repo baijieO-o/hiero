@@ -6,10 +6,12 @@ import type { ModelGateway, ModelMessage, ModelResponse, ModelToolDefinition } f
 import type { ToolGateway } from './tool-gateway.js';
 import { ContextManager } from './context-manager.js';
 import type { CapabilityRouter } from './capability-router.js';
+import type { ContextCompactor } from './context-compactor.js';
 
 const searchToolsDefinition: ModelToolDefinition = { type: 'function', function: { name: 'search_tools', description: 'Find available tools by capability. Full schemas are returned only for matching tools.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } };
 export interface ReActResult { response: ModelResponse; evidence: EvidenceRecord[]; messages: ModelMessage[]; }
 export interface PlanResult { response: ModelResponse; tools: readonly ModelToolDefinition[]; }
+export const DAG_PLAN_INSTRUCTION = 'Reply with only a JSON object of the form {"tasks":[{"id":"short-id","goal":"what to do","depends_on":["ids of prerequisite tasks"],"read_only":true|false}]}. Set read_only to true only for tasks that never write files. Keep independent tasks free of depends_on so they can run in parallel.';
 export class HandoffRequiredError extends Error {
   public constructor(public readonly usedTokens: number) { super(`Context reached the handoff threshold at ${usedTokens} tokens.`); this.name = 'HandoffRequiredError'; }
 }
@@ -17,32 +19,36 @@ function estimateTokenCount(text: string): number { return Math.ceil(text.length
 const MAX_REPEATED_CALLS = 3;
 
 export class AgentExecutor {
-  public constructor(private readonly modelGateway: ModelGateway, private readonly toolGateway: ToolGateway, private readonly maxTurns = 8, private readonly capabilityRouter?: CapabilityRouter, private readonly contextThreshold = 0.8) {
+  public constructor(private readonly modelGateway: ModelGateway, private readonly toolGateway: ToolGateway, private readonly maxTurns = 8, private readonly capabilityRouter?: CapabilityRouter, private readonly contextThreshold = 0.8, private readonly compactor?: ContextCompactor) {
     if (contextThreshold <= 0 || contextThreshold > 1) throw error('CTX-003', 'blocker', 'Invalid context threshold.', 'Use a threshold in the range (0, 1].');
   }
+  private usedTokens(messages: readonly ModelMessage[], prompt: string, tools: readonly ModelToolDefinition[]): number {
+    return estimateTokenCount(`${prompt}\n${messages.map((message) => `${message.role}: ${message.content}`).join('\n')}\n${JSON.stringify(tools)}`);
+  }
+  private overBudget(task: TaskContract, messages: readonly ModelMessage[], prompt: string, tools: readonly ModelToolDefinition[]): boolean {
+    return new ContextManager(task.workspace_path, this.contextThreshold).shouldHandoff(this.usedTokens(messages, prompt, tools), task.budget_envelope.max_tokens);
+  }
   private assertWithinContextBudget(task: TaskContract, messages: readonly ModelMessage[], prompt: string, tools: readonly ModelToolDefinition[] = []): void {
-    const serialized = `${prompt}\n${messages.map((message) => `${message.role}: ${message.content}`).join('\n')}\n${JSON.stringify(tools)}`;
-    const usedTokens = estimateTokenCount(serialized);
-    const contextManager = new ContextManager(task.workspace_path, this.contextThreshold);
-    if (contextManager.shouldHandoff(usedTokens, task.budget_envelope.max_tokens)) throw new HandoffRequiredError(usedTokens);
+    if (this.overBudget(task, messages, prompt, tools)) throw new HandoffRequiredError(this.usedTokens(messages, prompt, tools));
   }
   public async plan(task: TaskContract, goal: string, tools: readonly ModelToolDefinition[] = []): Promise<ModelResponse> { return (await this.planWithCapabilities(task, goal, tools)).response; }
-  public async planWithCapabilities(task: TaskContract, goal: string, tools: readonly ModelToolDefinition[] = []): Promise<PlanResult> {
+  public async planWithCapabilities(task: TaskContract, goal: string, tools: readonly ModelToolDefinition[] = [], options: { dag?: boolean } = {}): Promise<PlanResult> {
+    const planGoal = options.dag ? `${goal}\n\n${DAG_PLAN_INSTRUCTION}` : goal;
     if (!this.capabilityRouter) {
-      const prompt = `Create an execution plan for: ${goal}`;
+      const prompt = `Create an execution plan for: ${planGoal}`;
       const memory = await memoryContext(task.workspace_path);
       const recalled = await deepRecallContext(task.workspace_path, goal);
       const memoryText = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : ''].filter(Boolean).join('\n\n');
-      const messages: ModelMessage[] = [...(memoryText ? [{ role: 'system' as const, content: memoryText }] : []), { role: 'user', content: goal }];
+      const messages: ModelMessage[] = [...(memoryText ? [{ role: 'system' as const, content: memoryText }] : []), { role: 'user', content: planGoal }];
       this.assertWithinContextBudget(task, messages, prompt, tools);
       return { response: await this.modelGateway.complete(task, { prompt, messages, tools }), tools };
     }
     const metadata = this.capabilityRouter.systemPromptMetadata();
-    const prompt = `Create an execution plan for: ${goal}`;
+    const prompt = `Create an execution plan for: ${planGoal}`;
     const memory = await memoryContext(task.workspace_path);
     const recalled = await deepRecallContext(task.workspace_path, goal);
     const systemParts = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : '', `Available skills (load on demand):\n${metadata}`].filter(Boolean);
-    const messages: ModelMessage[] = [{ role: 'system', content: systemParts.join('\n\n') }, { role: 'user', content: goal }];
+    const messages: ModelMessage[] = [{ role: 'system', content: systemParts.join('\n\n') }, { role: 'user', content: planGoal }];
     this.assertWithinContextBudget(task, messages, prompt, [searchToolsDefinition]);
     const response = await this.modelGateway.complete(task, { prompt, messages, tools: [searchToolsDefinition, ...tools] });
     const searchCall = response.tool_calls?.find((call) => call.function.name === 'search_tools');
@@ -62,6 +68,10 @@ export class AgentExecutor {
     for (let turn = 0; turn < this.maxTurns; turn += 1) {
       if (Date.now() - startedAt > task.budget_envelope.max_time_ms) {
         throw error('MOD-006', 'blocker', 'Task exceeded its time budget.', 'Narrow the goal or raise budget_envelope.max_time_ms.');
+      }
+      if (this.compactor && this.overBudget(task, messages, goal, tools)) {
+        const compacted = await this.compactor.compact(task, messages);
+        messages.splice(0, messages.length, ...compacted);
       }
       this.assertWithinContextBudget(task, messages, goal, tools);
       const response = await this.modelGateway.complete(task, { prompt: goal, messages, tools });

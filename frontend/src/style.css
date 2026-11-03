@@ -298,6 +298,12 @@ button, textarea, select { font: inherit; }
 .chat-markdown, .chat-log { font-size: var(--chat-font-size); }
 
 .settings-gateway-form { display: grid; gap: 12px; }
+.model-config { gap: 16px; }
+.model-config-block { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border, #3333); border-radius: 8px; }
+.model-config-block h4 { margin: 0; }
+.model-config-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.model-config-table th, .model-config-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border, #3333); vertical-align: top; word-break: break-all; }
+.model-config-table code { font-size: 12px; }
 .settings-field { display: grid; grid-template-columns: 1fr minmax(180px, 280px); gap: 12px; align-items: center; }
 .settings-field input { width: 100%; }
 .settings-form-actions { display: flex; justify-content: flex-end; }
@@ -313,6 +319,16 @@ button, textarea, select { font: inherit; }
 .settings-mcp-status { list-style: none; padding: 0; display: grid; gap: 4px; }
 .settings-mcp-status .mcp-connected { color: #2e8b57; }
 .settings-mcp-status .mcp-failed { color: #c0392b; }
+.settings-mcp-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.settings-mcp-item { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--border, #333); border-radius: 6px; }
+.settings-mcp-item-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.settings-mcp-desc { font-size: 12px; color: var(--muted, #888); word-break: break-all; }
+.settings-mcp-empty { font-size: 12px; color: var(--muted, #888); }
+.settings-mcp-custom { display: grid; gap: 8px; border: 1px solid var(--border, #333); border-radius: 6px; padding: 10px; }
+.settings-mcp-custom input, .settings-mcp-custom select, .settings-mcp-custom textarea { width: 100%; }
+.settings-mcp-confirm { display: grid; gap: 6px; border: 1px solid #c0392b; border-radius: 6px; padding: 10px; }
+.settings-mcp-confirm p { margin: 0; font-size: 13px; }
+.settings-mcp-advanced summary { cursor: pointer; font-size: 13px; }
 
 .files-panel, .terminal-panel { display: flex; flex-direction: column; gap: 10px; padding: 14px; height: 100%; box-sizing: border-box; }
 .files-toolbar, .terminal-input { display: flex; align-items: center; gap: 8px; }
@@ -535,6 +551,23 @@ button, textarea, select { font: inherit; }
 .chat-composer .chat-input-box:focus-within { border-color: var(--accent, #1f6feb); }
 .chat-composer .chat-input-box textarea { border: none; outline: none; background: transparent; box-shadow: none; padding: 4px 4px 8px; min-height: 48px; max-height: 220px; }
 .chat-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chat-usage-ring { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: none; border-radius: 50%; background: transparent; color: var(--text-muted); cursor: pointer; }
+.chat-usage-ring:hover, .chat-usage-ring[aria-expanded="true"] { background: var(--surface-2); color: var(--text); }
+.chat-session-info { margin: 0 12px 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); display: grid; gap: 10px; }
+.chat-session-info-head { display: flex; align-items: center; justify-content: space-between; }
+.chat-session-info-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+.chat-session-info-hint { margin: 0; color: var(--text-muted); font-size: 12px; }
+.chat-usage-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--surface-2); }
+.chat-usage-bar span { display: block; height: 100%; min-width: 0; }
+.chat-usage-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.chat-usage-list li { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; }
+.chat-usage-dot { width: 8px; height: 8px; border-radius: 50%; }
+.chat-usage-value { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.chat-session-info-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.chat-compact-button { padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text); cursor: pointer; }
+.chat-compact-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-compacted-divider { display: flex; align-items: center; gap: 10px; margin: 12px 0; color: var(--text-muted); font-size: 12px; }
+.chat-compacted-divider::before, .chat-compacted-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .chat-toolbar-spacer { flex: 1 1 0; min-width: 0; }
 .chat-input-box { container-type: inline-size; }
 @container (max-width: 420px) {
@@ -595,3 +628,26 @@ button, textarea, select { font: inherit; }
 .clarify-choice { height: 32px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
 .clarify-choice.active { background: var(--accent); color: var(--accent-contrast); border-color: transparent; font-weight: 700; }
 .clarify-pending { margin: 10px 0 0; font-size: 12px; color: #9a6700; }
+
+.markmap-block { margin: 6px 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); }
+.markmap-svg { width: 100%; height: 320px; display: block; }
+.markmap-svg text { fill: var(--text); }
+
+.diagram-block {
+  margin: 10px 0;
+  overflow-x: auto;
+}
+.mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+}
+.diagram-error {
+  border: 1px solid var(--danger, #e5484d);
+}
+
+.code-block { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--input-bg); }
+.code-block pre { margin: 0; border: none; border-radius: 0; }
+.code-block-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 11px; }
+.code-block-lang { font-family: 'JetBrains Mono', Consolas, monospace; text-transform: lowercase; }
+.code-copy { border: 1px solid var(--border); border-radius: 4px; background: transparent; color: inherit; font-size: 11px; padding: 2px 8px; cursor: pointer; }
+.code-copy:hover { color: var(--text-strong); }

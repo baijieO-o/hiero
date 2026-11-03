@@ -1,4 +1,5 @@
 import { RUNTIME_WS_URL } from './runtime-url';
+import { runtimeSocketFor } from './runtime-socket';
 export type LogLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
 
 export type ConsoleEntry = { id: number; time: number; level: LogLevel; text: string; source: 'console' | 'uncaught' | 'eval' };
@@ -109,14 +110,8 @@ export function installDevtools(): void {
     }
   };
 
-  const socket = new WebSocket(RUNTIME_URL);
-  socket.onmessage = (event) => {
-    try {
-      const message = JSON.parse(String(event.data)) as { type?: string; payload?: unknown };
-      const detail = JSON.stringify(message.payload ?? {});
-      recordRuntime(message.type ?? 'UNKNOWN', detail.length > 300 ? `${detail.slice(0, 300)}…` : detail);
-    } catch {
-      recordRuntime('NON_JSON', String(event.data).slice(0, 300));
-    }
-  };
+  runtimeSocketFor(RUNTIME_URL).subscribe('*', (message) => {
+    const detail = JSON.stringify(message.payload ?? {});
+    recordRuntime(message.type ?? 'UNKNOWN', detail.length > 300 ? `${detail.slice(0, 300)}…` : detail);
+  });
 }

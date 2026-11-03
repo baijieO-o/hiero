@@ -165,7 +165,7 @@ node .\dist\examples\real-test.js
 - Token 计量目前是字符数近似值，不是模型专用 tokenizer。
 - MCP 运行时默认 Server 自动发现和严格 JSON Schema → Zod 转换尚未完整闭环。前端 MCP 预设（文件系统、GitHub、Postgres）默认禁用。
 - SystemAgent 是独立进程，不等同于安全沙箱；扩展依赖仍可能在宿主机执行。
-- 前端各面板尚未统一为单一、带重连的 WebSocket 事件总线。
+- 前端事件总线已统一为共享的带重连 WebSocket（`frontend/src/runtime-socket.ts`），但断线期间错过的事件不会回放；重连后仅通过 SNAPSHOT 重新对齐当前节点。聊天、设置、审批等请求/响应流仍使用各自的连接。
 - 已有全局准则与项目记忆（第 0、1 层，聊天时注入）；第 2 层深层记忆为本地 JSONL，检索为关键词 + 可选向量（配置 `HIERO_EMBED_*` 后启用，未配置时仅关键词），自动 Git commit 审批流程。（Verify 闭环已由 `cmd:` 验收标准实现，见上文。）
 - 根项目仍缺少真正的生产级权限审批、回退保护和人类修改检测。
 

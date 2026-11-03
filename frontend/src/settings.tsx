@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactElement } from 'react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { storeDefaultModel } from './model-catalog-store';
+import { buildCustomServer, describeServer, needsEnableConfirmation, type CustomServerInput, type McpServerDraft, type McpTransport } from './mcp-model';
 
 type Theme = 'dark' | 'light' | 'system';
 type SendKey = 'enter' | 'mod-enter';
@@ -240,7 +242,9 @@ function PreferenceControl({ field, value, onChange }: { field: PreferenceField;
   return <input type="number" value={Number(value)} min={field.minimum} max={field.maximum} onChange={(event) => onChange(Number(event.target.value))} aria-label={field.title} />;
 }
 
-export function ModelGatewayForm({ modelSettings, saveState, onSave }: { modelSettings: ModelSettings | null; saveState: SaveState; onSave: (input: { endpoint: string; model: string; tokens: string }) => void }): ReactElement {
+export type ModelListState = { status: 'idle' } | { status: 'loading' } | { status: 'ready'; models: string[] } | { status: 'error'; message: string };
+
+export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, onFetchModels }: { modelSettings: ModelSettings | null; saveState: SaveState; onSave: (input: { endpoint: string; model: string; tokens: string }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void }): ReactElement {
   const [endpoint, setEndpoint] = useState('');
   const [model, setModel] = useState('');
   const [tokens, setTokens] = useState('');
@@ -272,21 +276,63 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave }: { modelSe
         ? `保存失败：${saveState.message}`
         : dirty ? '有未保存的修改。' : '';
 
-  return <form className="settings-gateway-form" onSubmit={submit}>
-    <label className="settings-field">
-      <span><strong>API 端点</strong><small>OpenAI 兼容地址，例如 https://example.com/v1（会自动补全 /chat/completions）</small></span>
-      <input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setDirty(true); }} placeholder="https://..." aria-label="API 端点" />
-    </label>
-    <label className="settings-field">
-      <span><strong>默认模型</strong><small>例如 gpt-5.6-luna</small></span>
-      <input value={model} onChange={(event) => { setModel(event.target.value); setDirty(true); }} placeholder="gpt-5.6-luna" aria-label="默认模型" />
-    </label>
-    <label className="settings-field">
-      <span><strong>API 密钥（令牌）</strong><small>多个用逗号分隔，用于轮换。已保存 {modelSettings?.token_count ?? 0} 个；留空则保留原有密钥。保存在本地 .env，不会回显。</small></span>
-      <input type="password" value={tokens} onChange={(event) => { setTokens(event.target.value); setDirty(true); }} placeholder={modelSettings?.token_count ? '••••••（已保存，留空保留）' : 'sk-...'} aria-label="API 密钥" autoComplete="off" />
-    </label>
+  return <form className="settings-gateway-form model-config" onSubmit={submit}>
+    <section className="model-config-block">
+      <h4>全局配置</h4>
+      <label className="settings-field">
+        <span><strong>Global Base URL</strong><small>OpenAI 兼容接口的基础地址，例如 https://example.com/v1（会自动补全 /chat/completions）</small></span>
+        <input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setDirty(true); }} placeholder="https://..." aria-label="Global Base URL" />
+      </label>
+      <label className="settings-field">
+        <span><strong>Global API Key</strong><small>多个用逗号分隔，用于轮换。已保存 {modelSettings?.token_count ?? 0} 个；留空则保留原有密钥。保存在本地 .env，不会回显。</small></span>
+        <input type="password" value={tokens} onChange={(event) => { setTokens(event.target.value); setDirty(true); }} placeholder={modelSettings?.token_count ? '••••••（已保存，留空保留）' : 'sk-...'} aria-label="Global API Key" autoComplete="off" />
+      </label>
+    </section>
+
+    <section className="model-config-block">
+      <h4>提供商管理</h4>
+      <p className="settings-mcp-hint">当前只支持一个 OpenAI 兼容提供商，由上面的全局配置提供。</p>
+      <table className="model-config-table">
+        <thead><tr><th>Provider ID</th><th>Base URL</th><th>API Key</th><th>API Mode</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>openai-compatible</code></td>
+            <td><code>{endpoint || '未设置'}</code></td>
+            <td>{modelSettings?.token_count ?? 0} 个</td>
+            <td title="后端目前只支持 OpenAI 兼容模式">OpenAI（唯一模式）</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section className="model-config-block">
+      <h4>模型管理</h4>
+      <label className="settings-field">
+        <span><strong>Model ID</strong><small>默认模型名，例如 gpt-5.6-luna。上下文长度、最大输出、视觉、温度等参数暂未由后端支持，因此不在这里配置。</small></span>
+        <input value={model} onChange={(event) => { setModel(event.target.value); setDirty(true); }} placeholder="gpt-5.6-luna" aria-label="Model ID" />
+      </label>
+      <div className="model-config-toolbar">
+        <button type="button" className="ghost-button" disabled={modelList.status === 'loading'} onClick={() => onFetchModels({ endpoint, tokens })}>
+          {modelList.status === 'loading' ? '获取中…' : '获取可用模型'}
+        </button>
+        <small>使用上方的 Base URL 与 API Key（留空则用已保存的）请求 /models。</small>
+      </div>
+      {modelList.status === 'error' ? <p className="settings-save-status settings-save-error" role="status">获取失败：{modelList.message}</p> : null}
+      {modelList.status === 'ready' ? <table className="model-config-table">
+        <thead><tr><th>Model ID</th><th>Provider ID</th><th>操作</th></tr></thead>
+        <tbody>
+          {modelList.models.length === 0 ? <tr><td colSpan={3}>上游没有返回任何模型。</td></tr> : null}
+          {modelList.models.map((id) => <tr key={id} className={id === model ? 'model-config-current' : undefined}>
+            <td><code>{id}</code></td>
+            <td>openai-compatible</td>
+            <td><button type="button" className="ghost-button" onClick={() => { setModel(id); setDirty(true); storeDefaultModel(id); }}>{id === model ? '当前' : '设为默认'}</button></td>
+          </tr>)}
+        </tbody>
+      </table> : null}
+    </section>
+
     <div className="settings-form-actions">
-      <button type="submit" className="ghost-button" disabled={!modelSettings || saveState.status === 'saving'}>{saveState.status === 'saving' ? '保存中…' : '保存并立即生效'}</button>
+      <button type="submit" className="ghost-button" disabled={!modelSettings || saveState.status === 'saving'}>{saveState.status === 'saving' ? '保存中…' : '保存全局配置'}</button>
       <span className={`settings-save-status settings-save-${saveState.status}`} role="status">{statusText}</span>
     </div>
   </form>;
@@ -308,54 +354,149 @@ const MCP_PRESETS: Array<{ label: string; server: McpServerEntry }> = [
   { label: 'Postgres', server: { name: 'postgres', command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', '${POSTGRES_URL}'], enabled: false } },
 ];
 
+function parseDraftServers(text: string): { ok: true; servers: McpServerDraft[] } | { ok: false; message: string } {
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch (cause) { return { ok: false, message: `JSON 格式错误：${cause instanceof Error ? cause.message : String(cause)}` }; }
+  const servers = (parsed as { servers?: unknown }).servers;
+  if (!Array.isArray(servers)) return { ok: false, message: '顶层需要 { "servers": [...] } 结构。' };
+  return { ok: true, servers: servers as McpServerDraft[] };
+}
+
 export function McpServersForm({ config, saveState, onSave }: { config: McpConfigState | null; saveState: McpSaveState; onSave: (servers: McpServerEntry[]) => void }): ReactElement {
+  const [servers, setServers] = useState<McpServerDraft[]>([]);
   const [text, setText] = useState('');
+  const [textEdited, setTextEdited] = useState(false);
   const [parseError, setParseError] = useState('');
   const [dirty, setDirty] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [pendingEnable, setPendingEnable] = useState<number | null>(null);
+  const [custom, setCustom] = useState<CustomServerInput>({ name: '', transport: 'stdio', command: '', args: '', url: '', secrets: '' });
 
   useEffect(() => {
     if (!config || dirty) return;
-    setText(config.servers.length > 0 ? JSON.stringify({ servers: config.servers }, null, 2) : MCP_TEMPLATE);
+    const next = config.servers.length > 0 ? (config.servers as McpServerDraft[]) : (JSON.parse(MCP_TEMPLATE).servers as McpServerDraft[]);
+    setServers(next);
+    setText(JSON.stringify({ servers: next }, null, 2));
   }, [config, dirty]);
+
+  const update = (next: McpServerDraft[]) => {
+    setServers(next);
+    setText(JSON.stringify({ servers: next }, null, 2));
+    setDirty(true);
+    setTextEdited(false);
+    setParseError('');
+  };
+
+  const toggle = (index: number) => {
+    const target = servers[index];
+    if (!target) return;
+    if (!target.enabled && needsEnableConfirmation(target)) { setPendingEnable(index); return; }
+    update(servers.map((server, i) => (i === index ? { ...server, enabled: !server.enabled } : server)));
+  };
+
+  const confirmEnable = () => {
+    if (pendingEnable === null) return;
+    update(servers.map((server, i) => (i === pendingEnable ? { ...server, enabled: true } : server)));
+    setPendingEnable(null);
+  };
+
+  const remove = (index: number) => update(servers.filter((_, i) => i !== index));
+
+  const addPreset = (preset: McpServerEntry) => {
+    if (servers.some((server) => server.name === preset.name)) return;
+    update([...servers, preset as McpServerDraft]);
+  };
+
+  const addCustom = (event: FormEvent) => {
+    event.preventDefault();
+    const result = buildCustomServer(custom, servers.map((server) => server.name));
+    if (!result.ok) { setFormError(result.message); return; }
+    setFormError('');
+    update([...servers, result.server]);
+    setCustom({ name: '', transport: 'stdio', command: '', args: '', url: '', secrets: '' });
+  };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    let parsed: unknown;
-    try { parsed = JSON.parse(text); } catch (cause) { setParseError(`JSON 格式错误：${cause instanceof Error ? cause.message : String(cause)}`); return; }
-    const servers = (parsed as { servers?: unknown }).servers;
-    if (!Array.isArray(servers)) { setParseError('顶层需要 { "servers": [...] } 结构。'); return; }
+    // Hand-edited JSON wins over the list draft, so advanced edits are never silently dropped.
+    if (textEdited) {
+      const parsedText = parseDraftServers(text);
+      if (!parsedText.ok) { setParseError(parsedText.message); return; }
+      setServers(parsedText.servers);
+      onSave(parsedText.servers as McpServerEntry[]);
+    } else {
+      onSave(servers as McpServerEntry[]);
+    }
     setParseError('');
-    onSave(servers as McpServerEntry[]);
     setDirty(false);
+    setTextEdited(false);
   };
 
   const statusByName = new Map((config?.statuses ?? []).map((status) => [status.name, status]));
   const statusText = saveState.status === 'saving' ? '保存并连接中…' : saveState.status === 'saved' ? '已保存' : saveState.status === 'error' ? saveState.message : '';
-
-  const addPreset = (preset: McpServerEntry) => {
-    let current: { servers?: unknown } = {};
-    try { current = JSON.parse(text) as { servers?: unknown }; } catch { current = {}; }
-    const servers = Array.isArray(current.servers) ? (current.servers as McpServerEntry[]) : [];
-    if (servers.some((server) => server.name === preset.name)) return;
-    setText(JSON.stringify({ servers: [...servers, preset] }, null, 2));
-    setParseError('');
-    setDirty(true);
-  };
+  const pending = pendingEnable !== null ? servers[pendingEnable] : undefined;
 
   return <form className="settings-mcp-form" onSubmit={submit}>
-    <p className="settings-mcp-hint">支持 stdio（本地命令）以及 sse / http（远程 URL）。保存到 {config?.path ?? '.hiero/mcp.json'}。预设默认禁用；启用前请确认命令来源可信，凭据请通过环境变量提供。</p>
+    <p className="settings-mcp-hint">支持 stdio（本地命令）以及 sse / http（远程 URL）。保存到 {config?.path ?? '.hiero/mcp.json'}。预设默认禁用；凭据请使用 ${'{'}环境变量名{'}'} 占位符，不要明文填写。</p>
     <div className="settings-mcp-presets" aria-label="MCP 预设">
       {MCP_PRESETS.map((preset) => <button type="button" key={preset.server.name} className="ghost-button" onClick={() => addPreset(preset.server)}>添加预设：{preset.label}</button>)}
     </div>
-    {config && config.statuses.length > 0 && <ul className="settings-mcp-status">
-      {config.statuses.map((status) => <li key={status.name} className={status.connected ? 'mcp-connected' : 'mcp-failed'}>
-        <strong>{status.name}</strong>：{status.connected ? `已连接，${status.tool_count} 个工具` : `未连接 — ${statusByName.get(status.name)?.error ?? '未知错误'}`}
-      </li>)}
-    </ul>}
-    <label className="settings-field">
-      <span><strong>服务器配置（JSON）</strong><small>每个服务器需要 name、command，可选 args、cwd、env、enabled。</small></span>
-      <textarea rows={12} value={text} onChange={(event) => { setText(event.target.value); setDirty(true); }} spellCheck={false} aria-label="MCP 服务器配置" />
-    </label>
+
+    {pending && <div className="settings-mcp-confirm" role="alertdialog" aria-label="确认启用 MCP 服务器">
+      <p><strong>确认启用 {pending.name}？</strong></p>
+      <p>{describeServer(pending)}。启用后 Hiero 会{pending.transport && pending.transport !== 'stdio' ? '把对话内容发送到该远程地址' : '在本机运行该命令'}，并把该服务器的工具提供给 Agent。请确认来源可信。</p>
+      <div className="settings-form-actions">
+        <button type="button" className="ghost-button" onClick={confirmEnable}>确认启用</button>
+        <button type="button" className="ghost-button" onClick={() => setPendingEnable(null)}>取消</button>
+      </div>
+    </div>}
+
+    <ul className="settings-mcp-list" aria-label="MCP 服务器列表">
+      {servers.length === 0 && <li className="settings-mcp-empty">尚未配置服务器。</li>}
+      {servers.map((server, index) => {
+        const status = statusByName.get(server.name);
+        return <li key={server.name} className="settings-mcp-item">
+          <div>
+            <strong>{server.name}</strong> <small>{server.transport ?? 'stdio'}</small>
+            <div className="settings-mcp-desc">{describeServer(server)}</div>
+            {status && <div className={status.connected ? 'mcp-connected' : 'mcp-failed'}>{status.connected ? `已连接，${status.tool_count} 个工具` : `未连接 — ${status.error ?? '未知错误'}`}</div>}
+          </div>
+          <div className="settings-mcp-item-actions">
+            <label><input type="checkbox" checked={server.enabled} onChange={() => toggle(index)} aria-label={`启用 ${server.name}`} /> 启用</label>
+            <button type="button" className="ghost-button" onClick={() => remove(index)} aria-label={`删除 ${server.name}`}>删除</button>
+          </div>
+        </li>;
+      })}
+    </ul>
+
+    <fieldset className="settings-mcp-custom">
+      <legend>添加自定义服务器</legend>
+      <label className="settings-field"><span><strong>名称</strong></span><input value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} aria-label="服务器名称" /></label>
+      <label className="settings-field"><span><strong>传输方式</strong></span>
+        <select value={custom.transport} onChange={(event) => setCustom({ ...custom, transport: event.target.value as McpTransport })} aria-label="传输方式">
+          <option value="stdio">stdio（本地命令）</option>
+          <option value="sse">sse（远程）</option>
+          <option value="http">http（远程）</option>
+        </select>
+      </label>
+      {custom.transport === 'stdio' ? <>
+        <label className="settings-field"><span><strong>命令</strong></span><input value={custom.command} onChange={(event) => setCustom({ ...custom, command: event.target.value })} aria-label="启动命令" placeholder="例如 npx" /></label>
+        <label className="settings-field"><span><strong>参数</strong><small>每行一个参数</small></span><textarea rows={3} value={custom.args} onChange={(event) => setCustom({ ...custom, args: event.target.value })} aria-label="命令参数" /></label>
+      </> : <label className="settings-field"><span><strong>URL</strong></span><input value={custom.url} onChange={(event) => setCustom({ ...custom, url: event.target.value })} aria-label="远程地址" placeholder="https://example.com/mcp" /></label>}
+      <label className="settings-field"><span><strong>{custom.transport === 'stdio' ? '环境变量' : '请求头'}</strong><small>每行 KEY=VALUE；凭据写成 ${'{'}变量名{'}'}，例如 Authorization=Bearer ${'{'}MY_TOKEN{'}'}</small></span>
+        <textarea rows={3} value={custom.secrets} onChange={(event) => setCustom({ ...custom, secrets: event.target.value })} aria-label="环境变量或请求头" spellCheck={false} />
+      </label>
+      {formError && <p className="settings-save-error" role="alert">{formError}</p>}
+      <div className="settings-form-actions"><button type="button" className="ghost-button" onClick={addCustom}>加入列表（默认禁用）</button></div>
+    </fieldset>
+
+    <details className="settings-mcp-advanced">
+      <summary>高级：直接编辑 JSON</summary>
+      <label className="settings-field">
+        <span><strong>服务器配置（JSON）</strong><small>每个服务器需要 name；stdio 需要 command，sse/http 需要 url。编辑后以此文本为准。</small></span>
+        <textarea rows={12} value={text} onChange={(event) => { setText(event.target.value); setDirty(true); setTextEdited(true); }} spellCheck={false} aria-label="MCP 服务器配置" />
+      </label>
+    </details>
     {parseError && <p className="settings-save-error" role="alert">{parseError}</p>}
     <div className="settings-form-actions">
       <button type="submit" className="ghost-button" disabled={!config || saveState.status === 'saving'}>保存并连接</button>
@@ -366,7 +507,7 @@ export function McpServersForm({ config, saveState, onSave }: { config: McpConfi
 
 export type SaveState = { status: 'idle' } | { status: 'saving' } | { status: 'saved'; tokenCount: number } | { status: 'error'; message: string };
 
-export function SettingsPanel({ modelSettings, saveState, onSaveModel, mcpConfig, mcpSaveState, onSaveMcp }: { modelSettings: ModelSettings | null; saveState: SaveState; onSaveModel: (input: { endpoint: string; model: string; tokens: string }) => void; mcpConfig: McpConfigState | null; mcpSaveState: McpSaveState; onSaveMcp: (servers: McpServerEntry[]) => void }): ReactElement {
+export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList, onFetchModels, mcpConfig, mcpSaveState, onSaveMcp }: { modelSettings: ModelSettings | null; saveState: SaveState; onSaveModel: (input: { endpoint: string; model: string; tokens: string }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void; mcpConfig: McpConfigState | null; mcpSaveState: McpSaveState; onSaveMcp: (servers: McpServerEntry[]) => void }): ReactElement {
   const values = usePreferences((state) => state.values);
   const update = usePreferences((state) => state.update);
   const reset = usePreferences((state) => state.reset);
@@ -419,7 +560,7 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, mcpConfig
     <div className="settings-domain">
       <h3>模型与网关</h3>
       {modelSettings
-        ? <ModelGatewayForm modelSettings={modelSettings} saveState={saveState} onSave={onSaveModel} />
+        ? <ModelGatewayForm modelSettings={modelSettings} saveState={saveState} onSave={onSaveModel} modelList={modelList} onFetchModels={onFetchModels} />
         : <p className="chat-empty">正在读取后端配置……</p>}
     </div>
     <div className="settings-domain">
