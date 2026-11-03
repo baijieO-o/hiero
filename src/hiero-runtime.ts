@@ -467,6 +467,7 @@ export class HieroRuntime {
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
     return new AgentWorkflow(this.machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter, 0.8, this.createCompactor()), (to, verified) => this.runtime.transition(to, verified), (document) => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document }), {
+      useDagPlan: true,
       onVerification: (result) => this.runtime.broadcast({ type: 'VERIFY_RESULT', payload: result }),
       rewind: async () => {
         const result = await this.writeSnapshots.rollback();
