@@ -516,8 +516,20 @@ button, textarea, select { font: inherit; }
 .chat-permission-chip { color: var(--text); }
 .chat-tool-panel { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 20; min-width: 320px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-1, var(--surface-2)); box-shadow: 0 8px 24px rgba(0, 0, 0, .2); }
 .chat-composer .chat-attach-button { width: 30px; height: 30px; border: none; border-radius: 50%; background: transparent; }
-.chat-send-round { flex: none; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: none; border-radius: 50%; background: var(--text-strong, #111); color: var(--surface-1, #fff); cursor: pointer; }
-.chat-send-round:disabled { opacity: .35; cursor: default; }
+.chat-toolbar .chat-option { position: relative; gap: 4px; padding: 3px 6px 3px 9px; background: transparent; color: var(--text); font-size: 12px; font-weight: 600; cursor: pointer; transition: background .15s; }
+.chat-toolbar .chat-option:hover { background: var(--surface-3); }
+.chat-toolbar .chat-option:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-toolbar .chat-option:has(select:disabled) { opacity: .55; }
+.chat-toolbar .chat-option span { color: var(--text-muted); font-weight: 600; letter-spacing: 0; }
+.chat-toolbar .chat-option select { max-width: 130px; padding: 0; font-size: 12px; font-weight: 600; color: var(--text); }
+.chat-toolbar .chat-option select option { background: var(--surface-2); color: var(--text); }
+.chat-toolbar .chat-option::after { content: ''; width: 5px; height: 5px; margin-left: 2px; border-right: 1.5px solid var(--text-muted); border-bottom: 1.5px solid var(--text-muted); transform: rotate(45deg) translateY(-2px); pointer-events: none; }
+.chat-toolbar .chat-option:has(select) select { appearance: none; -webkit-appearance: none; }
+.chat-toolbar .chat-permission-chip { border: none; background: transparent; padding: 3px 8px; font-size: 12px; font-weight: 600; color: var(--text); }
+.chat-toolbar .chat-permission-chip:hover { background: var(--surface-3); }
+.chat-send-round { flex: none; width: 34px; height: 34px; display: grid; place-items: center; padding: 0; border: none; border-radius: 50%; background: var(--accent); color: #0a0b0d; cursor: pointer; transition: opacity .15s, transform .1s; }
+.chat-send-round:hover:not(:disabled) { transform: scale(1.05); }
+.chat-send-round:disabled { background: var(--surface-3); color: var(--text-muted); cursor: default; }
 .chat-stop-round { background: #d1242f; color: #fff; }
 .chat-workspace-row { display: flex; align-items: center; gap: 6px; padding: 0 4px; font-size: 11px; color: var(--text-muted); }
 .chat-workspace-row span { font-weight: 700; letter-spacing: .04em; }
