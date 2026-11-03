@@ -23,7 +23,8 @@ interface TaskCardProps {
 /** Shows what the task will do before it starts. The user edits criteria and budget and must confirm. */
 export function TaskCard({ summary, criteria, budget, onCriteriaChange, onBudgetChange, onConfirmedChange, confirmed, disabled }: TaskCardProps): ReactElement {
   const executable = parseCriteria(criteria).filter(isExecutableCriterion).length;
-  const setBudget = (patch: Partial<TaskCardBudget>) => onBudgetChange(clampBudget({ ...budget, ...patch }));
+  const setBudget = (patch: Partial<TaskCardBudget>) => onBudgetChange({ ...budget, ...patch });
+  const commitBudget = () => onBudgetChange(clampBudget(budget));
   return (
     <div className="task-card">
       <div className="task-card-title">任务卡（启动前确认）</div>
@@ -42,11 +43,11 @@ export function TaskCard({ summary, criteria, budget, onCriteriaChange, onBudget
       <div className="field-grid">
         <label className="chat-option">
           <span>最大 token</span>
-          <input type="number" min={BUDGET_LIMITS.maxTokens.min} max={BUDGET_LIMITS.maxTokens.max} value={budget.maxTokens} disabled={disabled} onChange={(event) => setBudget({ maxTokens: Number(event.target.value) })} />
+          <input type="number" min={BUDGET_LIMITS.maxTokens.min} max={BUDGET_LIMITS.maxTokens.max} value={budget.maxTokens} disabled={disabled} onChange={(event) => setBudget({ maxTokens: Number(event.target.value) })} onBlur={commitBudget} />
         </label>
         <label className="chat-option">
           <span>最长时间（秒）</span>
-          <input type="number" min={BUDGET_LIMITS.maxTimeSeconds.min} max={BUDGET_LIMITS.maxTimeSeconds.max} value={budget.maxTimeSeconds} disabled={disabled} onChange={(event) => setBudget({ maxTimeSeconds: Number(event.target.value) })} />
+          <input type="number" min={BUDGET_LIMITS.maxTimeSeconds.min} max={BUDGET_LIMITS.maxTimeSeconds.max} value={budget.maxTimeSeconds} disabled={disabled} onChange={(event) => setBudget({ maxTimeSeconds: Number(event.target.value) })} onBlur={commitBudget} />
         </label>
       </div>
       <p className="task-card-hint">超出 token 预算会转为交接文档；超出时间预算会停止并报告。</p>
