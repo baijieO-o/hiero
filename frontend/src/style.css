@@ -72,6 +72,11 @@ button, textarea, select { font: inherit; }
 .screen-tab { padding: 4px 10px; border: 1px solid transparent; border-radius: 4px; color: var(--text-muted); background: transparent; font-size: 11px; font-weight: 700; letter-spacing: .04em; cursor: pointer; white-space: nowrap; }
 .screen-tab:hover { border-color: var(--text-muted); color: var(--text); }
 .screen-tab.active { border-color: transparent; color: var(--text-strong); background: rgba(255, 255, 255, .08); }
+.screen-tab-wrap { display: inline-flex; align-items: center; border-radius: 4px; }
+.screen-tab-wrap.active { background: rgba(255, 255, 255, .08); }
+.screen-tab-wrap .screen-tab.active { background: transparent; }
+.screen-tab-close { padding: 0 6px 0 2px; border: 0; background: transparent; color: var(--text-muted); font-size: 13px; line-height: 1; cursor: pointer; opacity: .5; }
+.screen-tab-close:hover { color: var(--text-strong); opacity: 1; }
 .screen-add input { width: 110px; padding: 6px 9px; border: 1px dashed var(--border); border-radius: 7px; outline: none; color: var(--text); background: var(--input-bg); font-size: 11px; }
 .screen-add input:focus { border-color: var(--accent-mid); }
 .workspace-body { flex: 1 1 auto; min-height: 0; display: flex; }

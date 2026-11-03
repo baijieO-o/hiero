@@ -72,6 +72,7 @@ interface WorkspaceState {
   setSerializedLayout: (layout: unknown) => void;
   setActiveScreen: (name: string) => void;
   addScreen: (name: string, root?: string) => void;
+  removeScreen: (name: string) => void;
   resetLayout: () => void;
   addBuffer: (kind: PanelKind, workspaceId: string) => string;
   removeBuffer: (id: string) => void;
@@ -93,6 +94,20 @@ const useWorkspaceStore = create<WorkspaceState>()(persist((set) => ({
     roots: root ? { ...state.roots, [name]: root } : state.roots,
     activeScreen: name,
   })),
+  removeScreen: (name) => set((state) => {
+    if (name === DEFAULT_SCREEN) return {};
+    const { [name]: _layout, ...screens } = state.screens;
+    const { [name]: _root, ...roots } = state.roots;
+    const owned = new Set(state.buffers.filter((buffer) => buffer.workspaceId === name).map((buffer) => buffer.id));
+    const browserUrls = Object.fromEntries(Object.entries(state.browserUrls).filter(([id]) => !owned.has(id)));
+    return {
+      screens,
+      roots,
+      buffers: state.buffers.filter((buffer) => !owned.has(buffer.id)),
+      browserUrls,
+      activeScreen: state.activeScreen === name ? DEFAULT_SCREEN : state.activeScreen,
+    };
+  }),
   resetLayout: () => set((state) => ({ screens: { ...state.screens, [state.activeScreen]: null } })),
   addBuffer: (kind, workspaceId) => {
     const id = `buffer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1895,6 +1910,7 @@ function App(): ReactElement {
   const addBuffer = useWorkspaceStore((state) => state.addBuffer);
   const removeBuffer = useWorkspaceStore((state) => state.removeBuffer);
   const clearBuffers = useWorkspaceStore((state) => state.clearBuffers);
+  const removeScreen = useWorkspaceStore((state) => state.removeScreen);
   const [api, setApi] = useState<DockviewApi | null>(null);
   const [screenDraft, setScreenDraft] = useState('');
   const hotEdgeSidebar = usePreferences((state) => state.values.hotEdgeSidebar);
@@ -2015,6 +2031,16 @@ function App(): ReactElement {
     setScreenDraft('');
   };
 
+  const onRemoveScreen = (name: string) => {
+    if (name === DEFAULT_SCREEN || !window.confirm(`删除工作区「${name}」？其中的窗口也会一起关闭，此操作不可撤销。`)) return;
+    const isActive = name === activeScreen;
+    if (isActive && api) {
+      activeBuffers.forEach((buffer) => { const panel = api.getPanel(buffer.id); if (panel) api.removePanel(panel); });
+    }
+    removeScreen(name);
+    if (isActive && api) loadLayout(api, useWorkspaceStore.getState().screens[DEFAULT_SCREEN], DEFAULT_SCREEN);
+  };
+
   const focusBuffer = (id: string) => api?.getPanel(id)?.api.setActive();
 
   const closeBuffer = (id: string) => {
@@ -2034,7 +2060,10 @@ function App(): ReactElement {
     <header className="topbar">
       <div className="brand"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>HIERO</span></div>
       <nav className="screen-tabs" aria-label="工作区">
-        {Object.keys(screens).map((name) => <button key={name} type="button" className={`screen-tab ${name === activeScreen ? 'active' : ''}`} onClick={() => switchScreen(name)}>{name}</button>)}
+        {Object.keys(screens).map((name) => <span key={name} className={`screen-tab-wrap ${name === activeScreen ? 'active' : ''}`}>
+          <button type="button" className={`screen-tab ${name === activeScreen ? 'active' : ''}`} onClick={() => switchScreen(name)}>{name}</button>
+          {name !== DEFAULT_SCREEN && <button type="button" className="screen-tab-close" aria-label={`删除工作区 ${name}`} title="删除工作区" onClick={() => onRemoveScreen(name)}>×</button>}
+        </span>)}
         <form className="screen-add" onSubmit={(event) => { event.preventDefault(); onCreateScreen(); }}><input value={screenDraft} onChange={(event) => setScreenDraft(event.target.value)} placeholder="新工作区" aria-label="新工作区名称" /></form>
       </nav>
       <span className="topbar-meta"><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className="live-pill"><b /> 在线</span></span>
