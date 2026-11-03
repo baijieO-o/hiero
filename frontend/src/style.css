@@ -231,7 +231,17 @@ button, textarea, select { font: inherit; }
 .chat-title-actions:has([aria-expanded="true"]) { opacity: 1; }
 .chat-rename-input { width: 100%; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-strong); font: inherit; }
 .chat-history-row .chat-rename-input { font-size: 13px; padding: 6px 8px; }
-.chat-delete-confirm { display: inline-flex; gap: 8px; align-items: center; margin: 4px 0; font-size: 12px; }
+.chat-delete-confirm { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, #f08c8c 45%, var(--border)); border-radius: 10px; background: var(--surface-2); }
+.chat-delete-confirm-text { display: grid; gap: 4px; min-width: 0; }
+.chat-delete-confirm-text strong { color: var(--text-strong); font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-delete-confirm-text span { color: var(--text-muted); font-size: 12px; }
+.chat-delete-confirm-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.chat-delete-cancel, .chat-delete-danger { height: 32px; padding: 0 14px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; }
+.chat-delete-cancel { border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.chat-delete-cancel:hover { color: var(--text-strong); }
+.chat-delete-danger { border: 1px solid #d86a6a; background: #d86a6a; color: #fff; font-weight: 600; }
+.chat-delete-danger:hover { filter: brightness(1.08); }
+.chat-delete-cancel:focus-visible, .chat-delete-danger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chat-text-button { padding: 2px 6px; border: 0; background: none; color: var(--text-muted); cursor: pointer; font: inherit; }
 .chat-text-button:hover { color: var(--text-strong); }
 .chat-text-button.danger { color: #f08c8c; }

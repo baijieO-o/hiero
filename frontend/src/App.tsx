@@ -713,8 +713,12 @@ function ChatPanel(): ReactElement {
   const renameInput = (id: string) => editing?.id === id
     ? <input className="chat-rename-input" autoFocus value={editing.title} onChange={(event) => setEditing({ id, title: event.target.value })} onBlur={commitRename} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commitRename(); } if (event.key === 'Escape') { renameSkipRef.current = true; setEditing(null); } }} />
     : null;
-  const deleteConfirm = (id: string) => confirmDeleteId === id
-    ? <span className="chat-delete-confirm"><button type="button" className="chat-text-button danger" onClick={() => confirmRemove(id)}>确认删除</button><button type="button" className="chat-text-button" onClick={() => setConfirmDeleteId(null)}>取消</button></span>
+  const deleteConfirm = confirmDeleteId
+    ? <DeleteConversationConfirm
+      title={conversations.find((item) => item.id === confirmDeleteId)?.title ?? '这段对话'}
+      onConfirm={() => confirmRemove(confirmDeleteId)}
+      onCancel={() => setConfirmDeleteId(null)}
+    />
     : null;
   const openMenu = (event: ReactMouseEvent, id: string) => {
     event.preventDefault();
@@ -728,7 +732,6 @@ function ChatPanel(): ReactElement {
         <ul className="chat-history">
           {conversations.map((conv) => <li key={conv.id} className="chat-history-row" onContextMenu={(event) => openMenu(event, conv.id)}>
             {renameInput(conv.id) ?? <button type="button" className={conv.id === active?.id ? 'chat-history-item active' : 'chat-history-item'} onClick={() => selectConversation(conv.id)}>{conv.title}</button>}
-            {deleteConfirm(conv.id)}
             <div className="chat-history-actions">
               <button type="button" className="chat-icon-button" title="重命名" aria-label="重命名" onClick={() => rename(conv.id)} disabled={pending}><PencilIcon /></button>
               <button type="button" className="chat-icon-button" title="删除" aria-label="删除" onClick={() => remove(conv.id)} disabled={pending}><TrashIcon /></button>
@@ -740,7 +743,6 @@ function ChatPanel(): ReactElement {
       <div className="chat-main">
         <div className="chat-title-row" onContextMenu={(event) => { if (active) openMenu(event, active.id); }}>
           <header className="panel-header"><span className="eyebrow">对话</span><h2>{active?.title ?? '新对话'}</h2></header>
-          {active && deleteConfirm(active.id)}
           {active && <div className="chat-title-actions">
             <button className="chat-icon-button" type="button" title="跳转到消息" aria-label="跳转到消息" aria-expanded={jumpOpen} onClick={() => setJumpOpen((open) => !open)} disabled={!messages.some((m) => m.role === 'user')}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h13" /></svg>
@@ -749,6 +751,7 @@ function ChatPanel(): ReactElement {
             <button className="chat-icon-button" type="button" title="删除" aria-label="删除" onClick={() => remove(active.id)} disabled={pending}><TrashIcon /></button>
           </div>}
         </div>
+        {deleteConfirm}
         {menu && <div className="chat-context-menu" style={{ left: menu.x, top: menu.y }}>
           <button type="button" disabled={pending} onClick={() => { setMenu(null); rename(menu.id); }}>重命名</button>
           <button type="button" disabled={pending} onClick={() => { setMenu(null); remove(menu.id); }}>删除</button>
@@ -1149,6 +1152,22 @@ function requestWorkspace(body: WorkspaceRequestBody): Promise<Record<string, un
 }
 
 type ApprovalRequest = ApprovalDialogRequest;
+
+/** Inline confirmation before deleting a conversation; cancel is the default and Esc cancels. */
+function DeleteConversationConfirm({ title, onConfirm, onCancel }: { title: string; onConfirm: () => void; onCancel: () => void }): ReactElement {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { cancelRef.current?.focus(); }, []);
+  return <div className="chat-delete-confirm" role="alertdialog" aria-labelledby="chat-delete-title" aria-describedby="chat-delete-desc" onKeyDown={(event) => { if (event.key === 'Escape') onCancel(); }}>
+    <div className="chat-delete-confirm-text">
+      <strong id="chat-delete-title">删除「{title}」？</strong>
+      <span id="chat-delete-desc">对话记录会被永久删除，无法恢复。</span>
+    </div>
+    <div className="chat-delete-confirm-actions">
+      <button ref={cancelRef} type="button" className="chat-delete-cancel" onClick={onCancel}>保留</button>
+      <button type="button" className="chat-delete-danger" onClick={onConfirm}>删除对话</button>
+    </div>
+  </div>;
+}
 
 /** Listens for APPROVAL_REQUIRED on a persistent socket and answers with approval_response. */
 function ApprovalModal(): ReactElement | null {
