@@ -42,6 +42,16 @@ export type RuntimeEvent =
 /** Sent once on connect. Lets a (re)connected panel rebuild its state node instead of waiting for the next transition. */
 export type RuntimeSnapshotEvent = { type: 'SNAPSHOT'; payload: { seq: number; node: AgentState } };
 
+/** Client request, sent after it detects a seq gap, to resync without a reconnect. */
+function isSnapshotRequestData(data: unknown): boolean {
+  try {
+    const message: unknown = JSON.parse(String(data));
+    return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'SNAPSHOT_REQUEST';
+  } catch {
+    return false;
+  }
+}
+
 export class RuntimeWebSocketServer {
   private readonly server: WebSocketServer;
   private readonly clients = new Set<WebSocket>();
@@ -63,6 +73,11 @@ export class RuntimeWebSocketServer {
       client.on('close', () => this.clients.delete(client));
       client.on('error', () => this.clients.delete(client));
       this.sendRaw({ type: 'SNAPSHOT', payload: { seq: this.seq, node: this.machine.state } }, client);
+      client.on('message', (data) => {
+        if (isSnapshotRequestData(data)) {
+          this.sendRaw({ type: 'SNAPSHOT', payload: { seq: this.seq, node: this.machine.state } }, client);
+        }
+      });
       this.ensureStatsTimer();
     });
   }
@@ -93,6 +108,10 @@ export class RuntimeWebSocketServer {
         }
       });
     });
+  }
+
+  public get currentSeq(): number {
+    return this.seq;
   }
 
   public broadcast(event: RuntimeEvent): void {

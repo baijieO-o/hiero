@@ -18,6 +18,7 @@ export class RuntimeSocket {
   private socket: WebSocket | null = null;
   private listeners = new Map<string, Set<Listener>>();
   private snapshotListeners = new Set<(seq: number) => void>();
+  private gapListeners = new Set<(fromSeq: number, toSeq: number) => void>();
   private refCount = 0;
   private retryTimer: number | undefined;
   private attempts = 0;
@@ -36,6 +37,14 @@ export class RuntimeSocket {
     this.listeners.set(type, set);
     return this.retain(() => {
       set.delete(listener);
+    });
+  }
+
+  /** Fires when server seq numbers skip ahead, meaning events were missed; listeners should resync. */
+  public onGap(listener: (fromSeq: number, toSeq: number) => void): () => void {
+    this.gapListeners.add(listener);
+    return this.retain(() => {
+      this.gapListeners.delete(listener);
     });
   }
 
@@ -99,7 +108,14 @@ export class RuntimeSocket {
       this.lastSeq = seq;
       for (const listener of this.snapshotListeners) listener(seq);
     }
-    if (typeof message.seq === 'number') this.lastSeq = message.seq;
+    if (typeof message.seq === 'number') {
+      if (this.lastSeq >= 0 && message.seq > this.lastSeq + 1) {
+        for (const listener of this.gapListeners) listener(this.lastSeq, message.seq);
+        // Ask the server for a fresh SNAPSHOT so panels resync and lastSeq is re-based.
+        this.socket?.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST' }));
+      }
+      this.lastSeq = message.seq;
+    }
     if (!message.type) return;
     for (const listener of this.listeners.get(message.type) ?? []) listener(message);
     for (const listener of this.listeners.get('*') ?? []) listener(message);

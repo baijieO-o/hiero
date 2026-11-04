@@ -35,6 +35,7 @@ function isModelSettingsSave(message: unknown): message is { type: 'settings_sav
   return candidate.type === 'settings_save' && typeof candidate.payload?.endpoint === 'string' && typeof candidate.payload?.model === 'string' && typeof candidate.payload?.tokens === 'string';
 }
 import { createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
+import { createWebFetchTool, createWebSearchTool } from './web-tools.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
@@ -104,6 +105,22 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     },
   },
   WRITE_FILE_TOOL_DEFINITION,
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the public web and return titles, URLs, and short descriptions. Requires user approval outside auto mode. Use web_fetch to read a result in full.',
+      parameters: { type: 'object', additionalProperties: false, properties: { query: { type: 'string' }, count: { type: 'integer', minimum: 1, maximum: 10, default: 5 } }, required: ['query'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description: 'Fetch a public http(s) web page and return its readable text (truncated to 20000 characters). Private, local, and credentialed URLs are refused. Requires user approval outside auto mode.',
+      parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' } }, required: ['url'] },
+    },
+  },
   {
     type: 'function',
     function: {
@@ -652,6 +669,8 @@ export class HieroRuntime {
     tools.register(createReadFileTool(workspacePath));
     tools.register(createListDirTool(workspacePath));
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
+    tools.register(createWebSearchTool(process.env.HIERO_BRAVE_API_KEY));
+    tools.register(createWebFetchTool());
     tools.register({
       name: 'memory_recall',
       inputSchema: z.object({ query: z.string().default('') }),

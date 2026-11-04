@@ -21,6 +21,12 @@ test('runtime server sends a SNAPSHOT on connect and sequences broadcasts', asyn
       const queued = inbox.shift();
       return queued ? Promise.resolve(queued) : new Promise((resolve) => waiters.push(resolve));
     };
+    const nextOfType = async (type: string): Promise<Record<string, unknown>> => {
+      for (;;) {
+        const message = await next();
+        if (message.type === type) return message;
+      }
+    };
     await new Promise<void>((resolve, reject) => {
       socket.once('open', () => resolve());
       socket.once('error', reject);
@@ -37,6 +43,10 @@ test('runtime server sends a SNAPSHOT on connect and sequences broadcasts', asyn
 
     server.broadcast({ type: 'REWIND_RESULT', payload: { restored: [], skipped: [] } });
     assert.equal((await next()).seq, 2);
+
+    socket.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST' }));
+    const resync = await nextOfType('SNAPSHOT');
+    assert.deepEqual(resync.payload, { seq: server.currentSeq, node: AgentState.Exec });
 
     socket.close();
   } finally {

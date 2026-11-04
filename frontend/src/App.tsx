@@ -1259,7 +1259,7 @@ function CodeReview(): ReactElement {
     if (message.type !== 'FILE_DIFF' || typeof message.payload?.path !== 'string') return;
     setDiff({ path: message.payload.path, original: typeof message.payload.original === 'string' ? message.payload.original : '', modified: typeof message.payload.modified === 'string' ? message.payload.modified : '' });
   }), []);
-  return <section className="panel-content review-panel"><PanelHeader eyebrow="代码审查" title="文件修改对比" /><div className="diff-path">{diff.path}</div><div className="editor-frame"><Suspense fallback={<div className="editor-loading">正在加载代码编辑器…</div>}><DiffEditor height="100%" language="typescript" original={diff.original} modified={diff.modified} theme="vs-dark" options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: true }} /></Suspense></div></section>;
+  return <section className="panel-content review-panel"><PanelHeader eyebrow="代码审查" title="文件修改对比" /><div className="diff-path">{diff.path}</div><div className="editor-frame"><Suspense fallback={<div className="editor-loading">正在加载代码编辑器…</div>}><DiffEditor key={`${diff.path}:${diff.original.length}:${diff.modified.length}`} height="100%" language="typescript" original={diff.original} modified={diff.modified} theme="vs-dark" options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: true }} /></Suspense></div></section>;
 }
 
 function HandoffPanel(): ReactElement {
