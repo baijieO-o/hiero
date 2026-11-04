@@ -85,7 +85,7 @@ export class AgentWorkflow {
         if (verification.verified) return { ...result, verification, retries };
         const failed = verification.checks.filter((check) => check.status === 'failed');
         lastFailure = failed.map((check) => check.criterion).join('; ');
-        previousFailure = failed.map((check) => `- ${check.criterion}\n${check.errorSummary ?? check.reason ?? ''}`).join('\n');
+        previousFailure = failed.map((check) => `- ${check.criterion}\n${check.guidance ? `[${check.failureKind}] ${check.guidance}\n` : ''}${check.errorSummary ?? check.reason ?? ''}`).join('\n');
       } catch (cause) {
         if (cause instanceof HandoffRequiredError) {
           const document = await this.handoff(task, goal, { completed_steps: ['Context limit checked before model request.'], next_steps: ['Resume the task from the saved handoff document.'] });

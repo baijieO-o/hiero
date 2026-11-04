@@ -9,6 +9,7 @@ Hiero 是一个个人自用、开源的 Agent 工作台。后端使用显式状�
 ### 任务编排（Agent 核心）
 
 - **显式状态机**：`Plan → Exec → Verify`，并支持 `Handoff`（交接）与 `Rewind`（回滚）。
+- **失败分类**：Verify 失败的 `cmd:` 验收会被归类为 `timeout` / `env` / `syntax` / `type` / `test` / `unknown`，并附带针对该类别的修正指导，随重试提示一起交给 Planner。
 - **Verify 闭环**：任务的 `cmd:` 验收标准在 Docker 沙箱中执行，退出码为 0 即通过。失败或 Exec 出错时回滚并重新规划，最多重试 2 次，耗尽后交接给人工。严格模式下拒绝执行 `cmd:` 验收命令。
 - **DAG 任务编排**（默认开启，`useDagPlan`）：Planner 可输出 JSON 格式的任务依赖图，无依赖的任务并行执行（`maxParallel` 限制并发数）。解析或校验失败时自动回退为线性计划。
 - **自我纠错**：Verify 失败时，`ErrorParser` 先提取核心报错行（支持 TypeScript、Python Traceback、Rust、GCC/Clang，其他输出按头尾截断），再作为上一次失败原因注入重新规划的提示，而不是让模型盲猜。

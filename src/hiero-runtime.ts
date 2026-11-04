@@ -714,6 +714,11 @@ export class HieroRuntime {
       const goal = typeof args.task === 'string' ? args.task.trim() : '';
       const toolName = mode === 'write' ? 'delegate_write' : mode === 'general' ? 'delegate_task' : 'delegate_read';
       if (!goal) return JSON.stringify({ error: `${toolName} requires a non-empty task.` });
+      // A general sub-agent can reach external tools, so the operator approves the whole delegation outside auto mode.
+      if (mode === 'general' && task.permission_mode !== 'auto') {
+        const decision = await this.requestToolApproval(toolName, { task: goal, tools: args.tools });
+        if (!decision.approved) return JSON.stringify({ error: `${toolName} was denied by the operator.` });
+      }
       const toolGateway = this.createChatToolGateway(workspacePath);
       const allowlist = mode === 'write' || mode === 'general' ? WRITE_SUBAGENT_TOOLS : READ_ONLY_SUBAGENT_TOOLS;
       const allowedTools: ModelToolDefinition[] = CHAT_TOOL_DEFINITIONS.filter((tool) => allowlist.has(tool.function.name));

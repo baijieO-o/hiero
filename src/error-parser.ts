@@ -96,6 +96,42 @@ function parsePython(lines: string[]): ParsedError[] {
   return errors;
 }
 
+export type FailureKind = 'syntax' | 'type' | 'test_assertion' | 'timeout' | 'environment' | 'unknown';
+
+export interface FailureClassification {
+  kind: FailureKind;
+  /** Concrete corrective instruction for the planner, scoped to this kind of failure. */
+  guidance: string;
+}
+
+const GUIDANCE: Record<FailureKind, string> = {
+  syntax: '语法错误：先修正报错行附近的语法（括号、分号、缩进、未闭合的字符串），不要改动无关逻辑。',
+  type: '类型错误：按报错的类型不匹配修正签名或调用处，不要用 any 或类型断言绕过。',
+  test_assertion: '测试断言失败：根据期望值与实际值修正实现代码。禁止修改测试文件或验收命令来让它通过。',
+  timeout: '命令超时：检查是否存在死循环、等待输入或过慢的操作，缩小范围后重试。',
+  environment: '环境缺失：确认依赖、命令或文件是否存在，补齐后再验证；不要用替代方案绕开验收命令。',
+  unknown: '未识别的失败：先阅读完整输出定位原因，再做最小修改。',
+};
+
+const TEST_FAILURE = /\b(AssertionError|expect\(|FAIL\b|FAILED\b|assert\b|Expected:|Received:|expected .* but got)/i;
+const SYNTAX_FAILURE = /\b(SyntaxError|Unexpected token|unexpected indent|IndentationError|parse error|unterminated)/i;
+const TYPE_FAILURE = /\b(TypeError|TS\d{4}|mismatched types|incompatible type|E0308|cannot assign)/i;
+const ENV_FAILURE = /\b(command not found|not recognized as an internal|No such file or directory|ModuleNotFoundError|Cannot find module|ERR_MODULE_NOT_FOUND|Permission denied|docker: )/i;
+
+/**
+ * Buckets a failed verification into a kind the planner can act on. Timeouts are decided by the caller,
+ * because only the process runner knows whether it killed the command.
+ */
+export function classifyFailure(output: string, timedOut = false): FailureClassification {
+  let kind: FailureKind = 'unknown';
+  if (timedOut) kind = 'timeout';
+  else if (ENV_FAILURE.test(output)) kind = 'environment';
+  else if (SYNTAX_FAILURE.test(output)) kind = 'syntax';
+  else if (TYPE_FAILURE.test(output)) kind = 'type';
+  else if (TEST_FAILURE.test(output)) kind = 'test_assertion';
+  return { kind, guidance: GUIDANCE[kind] };
+}
+
 /**
  * Extracts the core diagnostics from command output so a retry prompt carries the actual error instead of
  * only the failing command name. Recognises tsc, Python tracebacks, Rust and GCC/Clang/Go-style `error:` lines.

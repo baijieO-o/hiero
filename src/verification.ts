@@ -1,5 +1,5 @@
 import type { PermissionMode } from './contracts.js';
-import { summarizeErrors } from './error-parser.js';
+import { classifyFailure, summarizeErrors, type FailureKind } from './error-parser.js';
 import { runCommand, type CommandResult } from './workspace-services.js';
 
 /** Acceptance criteria prefixed with this marker are executed as shell commands during Verify. */
@@ -13,6 +13,9 @@ export interface VerificationCheck {
   output?: string;
   /** Core diagnostics extracted from `output`, for retry prompts. */
   errorSummary?: string;
+  /** Failure bucket and corrective guidance, set only for failed commands. */
+  failureKind?: FailureKind;
+  guidance?: string;
   reason?: string;
 }
 
@@ -27,6 +30,12 @@ export interface VerificationOptions {
   acceptanceCriteria: readonly string[];
   permissionMode: PermissionMode;
   run?: (root: string, command: string) => Promise<CommandResult>;
+}
+
+function failureDetails(result: CommandResult): Pick<VerificationCheck, 'errorSummary' | 'failureKind' | 'guidance'> {
+  const output = result.output ?? '';
+  const classification = classifyFailure(output, result.timedOut);
+  return { errorSummary: summarizeErrors(output).text, failureKind: classification.kind, guidance: classification.guidance };
 }
 
 /**
@@ -56,7 +65,7 @@ export async function runVerification(options: VerificationOptions): Promise<Ver
       command,
       exitCode: result.exitCode,
       output: result.output,
-      ...(passed ? {} : { errorSummary: summarizeErrors(result.output ?? '').text }),
+      ...(passed ? {} : failureDetails(result)),
       ...(result.timedOut ? { reason: 'Verification command timed out.' } : {}),
     });
   }

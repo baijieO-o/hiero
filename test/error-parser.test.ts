@@ -1,6 +1,6 @@
-import { strict as assert } from 'node:assert';
+﻿import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { summarizeErrors } from '../src/error-parser.js';
+import { classifyFailure, summarizeErrors } from '../src/error-parser.js';
 import { AgentWorkflow, type WorkflowOutcome } from '../src/agent-workflow.js';
 import type { AgentExecutor, ReActResult } from '../src/agent-executor.js';
 import type { TaskContract } from '../src/contracts.js';
@@ -103,3 +103,16 @@ test('a retry plans with the previous failure details in its goal', async () => 
   assert.match(seenGoals[1] ?? '', /previous attempt failed/);
   assert.match(seenGoals[1] ?? '', /src\/a\.ts:12: TS2322: bad type/);
 });
+
+test('classifies failed verification output into an actionable kind', () => {
+  assert.equal(classifyFailure("SyntaxError: Unexpected token '}'").kind, 'syntax');
+  assert.equal(classifyFailure("src/a.ts(1,1): error TS2322: Type 'string' is not assignable").kind, 'type');
+  assert.equal(classifyFailure('AssertionError [ERR_ASSERTION]: Expected values to be strictly equal').kind, 'test_assertion');
+  assert.equal(classifyFailure('bash: pytest: command not found').kind, 'environment');
+  assert.equal(classifyFailure('still running', true).kind, 'timeout');
+  assert.equal(classifyFailure('something odd').kind, 'unknown');
+  assert.equal(classifyFailure('AssertionError').kind, 'test_assertion');
+});
+
+
+

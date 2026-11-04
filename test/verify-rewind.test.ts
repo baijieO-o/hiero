@@ -1,4 +1,4 @@
-import { strict as assert } from 'node:assert';
+﻿import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -43,7 +43,7 @@ function verification(verified: boolean): () => Promise<VerificationResult> {
   return async () => ({ verified, checks: [{ criterion: 'cmd: test', status: verified ? 'passed' : 'failed' }] });
 }
 
-test('a passing verification completes Exec → Verify without rewinding', async () => {
+test('a passing verification completes Exec 鈫?Verify without rewinding', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'hiero-verify-'));
   try {
     const machine = new AgentStateMachine();
@@ -184,3 +184,21 @@ test('strict mode refuses to run cmd criteria', async () => {
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+test('failed command checks carry a failure kind and guidance', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'hiero-kind-'));
+  try {
+    const result = await runVerification({
+      workspacePath: workspace,
+      acceptanceCriteria: ['cmd: node test.js'],
+      permissionMode: 'standard',
+      run: async () => ({ exitCode: 1, output: 'AssertionError: expected 2 to equal 3', timedOut: false } as never),
+    });
+    const check = result.checks[0];
+    assert.equal(check?.failureKind, 'test_assertion');
+    assert.ok((check?.guidance ?? '').length > 0);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
