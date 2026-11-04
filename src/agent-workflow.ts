@@ -4,6 +4,7 @@ import type { HandoffDocument, TaskContract } from './contracts.js';
 import { AgentState, AgentStateMachine, type StateTransition } from './state-machine.js';
 import { ContextManager } from './context-manager.js';
 import { runVerification, type VerificationResult } from './verification.js';
+import { appendRegressionCases, formatRegressionContext, listRegressionCases } from './regression-store.js';
 import { parsePlanDag, runPlanDag, type PlanDag, type PlanTask } from './plan-dag.js';
 
 export interface WorkflowTransition { (to: AgentState, verified?: boolean): StateTransition; }
@@ -72,7 +73,9 @@ export class AgentWorkflow {
     let previousFailure = '';
     for (;;) {
       try {
-        const planGoal = previousFailure ? `${goal}\n\nThe previous attempt failed. Fix these problems:\n${previousFailure}` : goal;
+        const regressionContext = formatRegressionContext(await listRegressionCases(task.workspace_path).catch(() => []));
+        const withRegressions = regressionContext ? `${goal}\n\n${regressionContext}` : goal;
+        const planGoal = previousFailure ? `${withRegressions}\n\nThe previous attempt failed. Fix these problems:\n${previousFailure}` : withRegressions;
         const planned = await this.executor.planWithCapabilities(task, planGoal, tools, { dag: this.options.useDagPlan === true });
         this.transitionState(AgentState.Exec);
         const dag = this.options.useDagPlan ? tryParsePlanDag(planned.response.content) : undefined;
@@ -84,6 +87,9 @@ export class AgentWorkflow {
         this.options.onVerification?.(verification);
         if (verification.verified) return { ...result, verification, retries };
         const failed = verification.checks.filter((check) => check.status === 'failed');
+        await appendRegressionCases(task.workspace_path, task.task_id, failed.flatMap((check) => check.command && check.failureKind
+          ? [{ command: check.command, failure_kind: check.failureKind, error_summary: check.errorSummary ?? check.reason ?? '' }]
+          : [])).catch(() => undefined);
         lastFailure = failed.map((check) => check.criterion).join('; ');
         previousFailure = failed.map((check) => `- ${check.criterion}\n${check.guidance ? `[${check.failureKind}] ${check.guidance}\n` : ''}${check.errorSummary ?? check.reason ?? ''}`).join('\n');
       } catch (cause) {

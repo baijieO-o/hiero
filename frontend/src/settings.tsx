@@ -325,7 +325,7 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
           {modelList.models.map((id) => <tr key={id} className={id === model ? 'model-config-current' : undefined}>
             <td><code>{id}</code></td>
             <td>openai-compatible</td>
-            <td><button type="button" className="ghost-button" onClick={() => { setModel(id); setDirty(true); storeDefaultModel(id); }}>{id === model ? '当前' : '设为默认'}</button></td>
+            <td><button type="button" className="ghost-button" onClick={() => { setModel(id); storeDefaultModel(id); onSave({ endpoint, model: id, tokens: '' }); }}>{id === model ? '当前' : '设为默认'}</button></td>
           </tr>)}
         </tbody>
       </table> : null}
