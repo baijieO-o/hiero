@@ -152,4 +152,12 @@ D:\hiero\launch-hiero.bat
 - 前端 rontend/src/runtime-socket.ts 提供每个 URL 一个共享的 RuntimeSocket 单例：按类型引用计数订阅（'*' 表示全部），断线后指数退避重连（500ms 至 5s），并把 SNAPSHOT 分发给 onSnapshot。
 - 已迁移到共享连接的消费者：App.tsx 的 connectRuntime（SNAPSHOT、STATE_CHANGE、VERIFY_RESULT、REWIND_RESULT、FILE_DIFF、HANDOFF_TRIGGERED）以及 devtools.ts 的运行时日志。
 - 尚未迁移：聊天、设置、审批、回滚、MCP 等请求/响应流仍使用各自的连接。
-- 限制：断线期间错过的事件不回放，没有 seq 缺口检测。重连后仅 TodoList 会依据 SNAPSHOT 重新对齐节点。浏览器中的重连行为尚未实际验证。
+- 缺口处理：前端发现 seq 跳变后发送 SNAPSHOT_REQUEST，后端回复新的 SNAPSHOT 完成重同步（测试见 test/runtime-server.test.ts）。断线期间的事件仍不回放。
+
+## 当前状态（回归库与默认模型）
+
+- 回归库：失败且带分类的 cmd: 验收项写入 .hiero/regressions.jsonl，重试时注入 Planner 上下文（src/regression-store.ts，测试 	est/regression-store.test.ts）。仅记录 cmd: 检查，不记录普通工具失败。
+pm test 165/165 通过。
+- 设为默认：settings.tsx 中的按钮会同时写入 .env 的 HIERO_LLM_MODEL。未在浏览器中实测：当前模型列表只有一个模型，按钮不会显示，无法触发。
+- 浏览器验证：页面可加载，控制台无错误，右下角显示 CPU/MEM/GPU 与时间（GPU 显示 —，本机无读数）。未打开 Monaco diff 面板，因此 disposed 修复只是间接验证。
+- 未解决：web_fetch 存在 DNS 重绑定缝隙（先检查 DNS，再由 fetch 二次解析）。
