@@ -134,6 +134,8 @@ D:\hiero\launch-hiero.bat
 
 验证结果：后端 `npm test` 133/133 通过；前端 `tsc --noEmit` 通过；浏览器中切换模型后发送消息，`model` 字段正确。
 
+- 失败分类（`src/error-parser.ts` 的 `classifyFailure`）：失败的 `cmd:` 验收归类为 `timeout` / `env` / `syntax` / `type` / `test` / `unknown`，附带指导文本，写入重试提示。基于正则，可能误判。测试：`test/error-parser.test.ts`、`test/verify-rewind.test.ts`。**审批更新（v0.2.2）**：`general` 模式下 `delegate_task` 需要审批（auto 模式跳过），推翻了此前不加审批的决策。
+
 待处理：
 1. 多次压缩的端到端验证未完成（单令牌冷却限制）。
 2. 前后端压缩保留条数不一致：后端 keepRecent=6，前端 keepRecent=1，需统一。
