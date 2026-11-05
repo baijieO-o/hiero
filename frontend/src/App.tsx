@@ -398,7 +398,9 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         activeRequest = null;
         set({ pending: false, streamingText: '', streamingSteps: [], error: null });
       } else if (message.type === 'CHAT_ERROR') {
-        const detail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
+        const rawDetail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
+        const errorCode = typeof message.payload?.code === 'string' ? message.payload.code : '';
+        const detail = errorCode ? `[${errorCode}] ${rawDetail}` : rawDetail;
         pendingFiles = [];
         pendingSteps = [];
         pendingTrace = undefined;

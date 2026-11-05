@@ -51,6 +51,50 @@ test('ModelGateway rotates past 5xx and network failures to the next token', asy
   assert.deepEqual(calls, ['broken', 'offline', 'healthy']);
 });
 
+test('ModelGateway waits for the shortest cooldown instead of failing a single-token pool', async () => {
+  let now = 0;
+  const waits: number[] = [];
+  let calls = 0;
+  const transport: ModelTransport = {
+    complete: async (request, token) => {
+      calls += 1;
+      if (calls === 1) throw { status: 429 };
+      return { model: request.model ?? 'unknown', token_id: token, content: 'ok' };
+    },
+  };
+  const gateway = new ModelGateway(transport, ['only'], () => now, 60_000, async (ms) => {
+    waits.push(ms);
+    now += ms;
+  });
+  const response = await gateway.complete(task, { prompt: 'hello' });
+  assert.equal(response.content, 'ok');
+  assert.deepEqual(waits, [60_000]);
+  assert.equal(calls, 2);
+});
+
+test('ModelGateway retries through repeated 429s on a single-token pool before giving up', async () => {
+  let now = 0;
+  let calls = 0;
+  const transport: ModelTransport = {
+    complete: async (request, token) => {
+      calls += 1;
+      if (calls <= 3) throw { status: 429 };
+      return { model: request.model ?? 'unknown', token_id: token, content: 'ok' };
+    },
+  };
+  const gateway = new ModelGateway(transport, ['only'], () => now, 60_000, async (ms) => { now += ms; });
+  const response = await gateway.complete(task, { prompt: 'hello' });
+  assert.equal(response.content, 'ok');
+  assert.equal(calls, 4);
+});
+
+test('ModelGateway still reports MOD-003 when cooldown waits are exhausted by persistent 429s', async () => {
+  let now = 0;
+  const transport: ModelTransport = { complete: async () => { throw { status: 429 }; } };
+  const gateway = new ModelGateway(transport, ['only'], () => now, 60_000, async (ms) => { now += ms; });
+  await assert.rejects(gateway.complete(task, { prompt: 'hello' }), /No model token is currently available/);
+});
+
 test('ModelGateway supports unauthenticated local OpenAI-compatible models', async () => {
   let receivedToken = 'not-called';
   const gateway = new ModelGateway({
@@ -126,6 +170,28 @@ test('streams SSE deltas through the OpenAI-compatible transport', async () => {
     server.close();
   }
 });
+test('sends max_tokens only when configured', async () => {
+  const bodies: any[] = [];
+  const server = createServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    bodies.push(JSON.parse(raw));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  try {
+    const endpoint = `http://127.0.0.1:${port}/v1`;
+    await new ModelGateway(new OpenAICompatibleTransport(endpoint, undefined, 512), ['token-a'], () => 0).complete(task, { prompt: 'hi' });
+    await new ModelGateway(new OpenAICompatibleTransport(endpoint), ['token-a'], () => 0).complete(task, { prompt: 'hi' });
+    assert.equal(bodies[0].max_tokens, 512);
+    assert.equal('max_tokens' in bodies[1], false);
+  } finally {
+    server.close();
+  }
+});
 test('sends image messages as OpenAI multimodal content parts', async () => {
   let body: any;
   const server = createServer(async (req, res) => {
@@ -152,6 +218,61 @@ test('sends image messages as OpenAI multimodal content parts', async () => {
     ]);
   } finally {
     server.close();
+  }
+});
+
+test('OpenAICompatibleTransport aborts a stream that stops sending data', async () => {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"model":"m","choices":[{"delta":{"content":"hi"}}]}\n\n');
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const transport = new OpenAICompatibleTransport(`http://127.0.0.1:${port}/v1`, 300);
+    const started = Date.now();
+    await assert.rejects(
+      transport.complete({ prompt: 'x', model: 'm', onDelta: () => undefined }, 'token'),
+      (err: unknown) => err instanceof Error && err.name === 'TimeoutError' && /stalled/.test(err.message),
+    );
+    assert.ok(Date.now() - started < 5_000, 'stalled stream should fail within the idle timeout');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('OpenAICompatibleTransport keeps a steadily streaming reply alive past the idle timeout', async () => {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      let sent = 0;
+      const timer = setInterval(() => {
+        sent += 1;
+        if (sent > 8) {
+          clearInterval(timer);
+          res.end('data: [DONE]\n\n');
+          return;
+        }
+        res.write(`data: {"model":"m","choices":[{"delta":{"content":"${sent}"}}]}\n\n`);
+      }, 100);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const transport = new OpenAICompatibleTransport(`http://127.0.0.1:${port}/v1`, 300);
+    const deltas: string[] = [];
+    const result = await transport.complete({ prompt: 'x', model: 'm', onDelta: (text) => deltas.push(text) }, 'token');
+    assert.equal(deltas.length, 8);
+    assert.equal(result.content, '12345678');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

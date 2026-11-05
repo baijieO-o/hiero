@@ -71,6 +71,7 @@ export class ModelGateway {
     tokens: readonly string[],
     private readonly now: () => number = Date.now,
     private readonly cooldownMs = 60_000,
+    private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void> = delay,
   ) {
     this.tokens = tokens.map((token) => ({ token, cooldownUntil: 0, retired: false }));
   }
@@ -87,8 +88,20 @@ export class ModelGateway {
 
     let attempted = 0;
     let lastRetryable = false;
-    while (attempted < this.tokens.length * models.length) {
-      const tokenState = this.nextAvailableToken();
+    let cooldownWaits = 0;
+    let lastStatus: number | undefined;
+    let lastFailure: unknown;
+    const maxAttempts = this.tokens.length * models.length * (1 + MAX_COOLDOWN_WAITS);
+    while (attempted < maxAttempts) {
+      let tokenState = this.nextAvailableToken();
+      if (!tokenState && lastRetryable && cooldownWaits < MAX_COOLDOWN_WAITS) {
+        const waitMs = this.shortestCooldownWait();
+        if (waitMs === undefined) break;
+        cooldownWaits += 1;
+        await this.sleep(waitMs, request.signal);
+        if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
+        tokenState = this.nextAvailableToken();
+      }
       if (!tokenState) break;
       const selectedModel = models[attempted % models.length];
       if (!selectedModel) throw error('MOD-001', 'blocker', 'No model is available for this request.', 'Configure a preferred model or fallback chain.');
@@ -100,6 +113,8 @@ export class ModelGateway {
         if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
         if (cause instanceof HieroError && cause.record.code === 'MOD-007') throw cause;
         const status = statusCode(cause);
+        lastStatus = status;
+        lastFailure = cause;
         if (status === 429) {
           tokenState.cooldownUntil = this.now() + this.cooldownMs;
           lastRetryable = true;
@@ -121,12 +136,25 @@ export class ModelGateway {
     if (this.tokens.every((candidate) => candidate.retired)) {
       throw error('MOD-003', 'blocker', 'All model tokens were rejected (401).', 'Replace the invalid tokens in HIERO_LLM_TOKENS.');
     }
-    if (lastRetryable) throw error('MOD-003', 'degradation', 'No model token is currently available.', 'Wait for cooldown, check the endpoint, or configure another token.');
+    if (lastRetryable) {
+      const reason = failureReason(lastFailure, lastStatus);
+      throw error('MOD-003', 'degradation', `No model token is currently available. 最后一次失败：${reason}，已等待冷却 ${cooldownWaits} 次。`, 'Wait for cooldown, check the endpoint, or configure another token.');
+    }
     throw error('MOD-001', 'blocker', 'No model is available for this request.', 'Check model configuration, token health, and fallback channels.');
   }
 
   public tokenStatuses(): readonly { token: string; cooldownUntil: number; retired: boolean }[] {
     return this.tokens.map(({ token, cooldownUntil, retired }) => ({ token, cooldownUntil, retired }));
+  }
+
+  /** Milliseconds until the soonest non-retired token leaves cooldown; undefined when no token will recover. */
+  private shortestCooldownWait(): number | undefined {
+    const now = this.now();
+    const waits = this.tokens
+      .filter((candidate) => !candidate.retired && candidate.cooldownUntil > now)
+      .map((candidate) => candidate.cooldownUntil - now);
+    if (waits.length === 0) return undefined;
+    return Math.min(...waits);
   }
 
   private nextAvailableToken(): TokenState | undefined {
@@ -142,6 +170,22 @@ export class ModelGateway {
   }
 }
 
+const MAX_COOLDOWN_WAITS = 3;
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function statusCode(cause: unknown): number | undefined {
   if (cause instanceof HieroError) return undefined;
   if (typeof cause === 'object' && cause !== null && 'status' in cause && typeof cause.status === 'number') return cause.status;
@@ -152,7 +196,14 @@ function isRetryableFailure(cause: unknown): boolean {
   const status = statusCode(cause);
   if (status !== undefined) return status >= 500;
   if (cause instanceof HieroError) return false;
-  return cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TypeError');
+  return cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TimeoutError' || cause.name === 'TypeError');
+}
+
+function failureReason(cause: unknown, status: number | undefined): string {
+  if (status === 429) return '上游限流（429）';
+  if (status !== undefined) return `上游返回 ${status}`;
+  if (cause instanceof Error && cause.name === 'TimeoutError') return '上游长时间无数据（连接停滞）';
+  return '网络或上游异常';
 }
 
 export function parseTokenList(raw: string | undefined): string[] {
@@ -169,11 +220,20 @@ function toWireMessage(message: ModelMessage): Record<string, unknown> {
 }
 
 export class OpenAICompatibleTransport implements ModelTransport {
-  public constructor(private readonly endpoint: string, private readonly timeoutMs = 30_000) {}
+  public constructor(private readonly endpoint: string, private readonly timeoutMs = 120_000, private readonly maxTokens?: number) {}
 
   public async complete(request: ModelRequest, token: string): Promise<ModelResponse> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timedOut = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const armTimer = () => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.timeoutMs);
+    };
+    armTimer();
     const onCancel = () => controller.abort();
     if (request.signal?.aborted) controller.abort();
     request.signal?.addEventListener('abort', onCancel, { once: true });
@@ -189,6 +249,7 @@ export class OpenAICompatibleTransport implements ModelTransport {
         body: JSON.stringify({
           model: request.model,
           messages: (request.messages ?? [{ role: 'user', content: request.prompt }]).map(toWireMessage),
+          ...(this.maxTokens ? { max_tokens: this.maxTokens } : {}),
           ...(request.tools ? { tools: request.tools } : {}),
           ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}),
         }),
@@ -201,21 +262,22 @@ export class OpenAICompatibleTransport implements ModelTransport {
       }
       const isEventStream = (response.headers.get('content-type') ?? '').includes('text/event-stream');
       if (streaming && isEventStream && response.body) {
-        return await readStream(response.body, request.model ?? 'unknown', token, request.onDelta!);
+        return await readStream(response.body, request.model ?? 'unknown', token, request.onDelta!, armTimer);
       }
       const payload: unknown = await response.json();
       return parseModelResponse(payload, request.model ?? 'unknown', token);
     } catch (cause) {
       if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
+      if (timedOut) throw Object.assign(new Error(`Model request stalled: no data received for ${this.timeoutMs}ms.`, { cause }), { name: 'TimeoutError' });
       throw cause;
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       request.signal?.removeEventListener('abort', onCancel);
     }
   }
 }
 
-async function readStream(body: ReadableStream<Uint8Array>, model: string, token: string, onDelta: (text: string) => void): Promise<ModelResponse> {
+async function readStream(body: ReadableStream<Uint8Array>, model: string, token: string, onDelta: (text: string) => void, onChunk: () => void): Promise<ModelResponse> {
   const decoder = new TextDecoder();
   const reader = body.getReader();
   let buffer = '';
@@ -249,6 +311,7 @@ async function readStream(body: ReadableStream<Uint8Array>, model: string, token
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    onChunk();
     buffer += decoder.decode(value, { stream: true });
     let newline = buffer.indexOf('\n');
     while (newline !== -1) {

@@ -78,7 +78,8 @@ export class ToolGateway {
         created_at: new Date().toISOString(),
       };
     } catch (cause) {
-      throw error('GOV-003', 'degradation', `Tool '${toolName}' failed during execution.`, 'Inspect the tool evidence and retry if safe.', cause instanceof Error ? cause.message : undefined);
+      const reason = cause instanceof Error ? cause.message : undefined;
+      throw error('GOV-003', 'degradation', `Tool '${toolName}' failed during execution${reason ? `: ${reason}` : '.'}`, 'Inspect the tool evidence and retry if safe.', reason);
     }
   }
 }

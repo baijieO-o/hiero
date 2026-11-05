@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { assertFetchableUrl, fetchWebPage, htmlToText, isBlockedAddress, searchWeb } from '../src/web-tools.js';
+import { assertFetchableUrl, fetchWebPage, htmlToText, isBlockedAddress, parseDuckDuckGoHtml, searchWeb } from '../src/web-tools.js';
 
 test('isBlockedAddress rejects loopback, private, link-local and mapped private addresses', () => {
   for (const host of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '0.0.0.0', '::1', 'fd00::1', '::ffff:127.0.0.1', 'localhost', 'api.local']) {
@@ -56,11 +56,29 @@ test('fetchWebPage refuses hostnames that resolve to private addresses', async (
   await assert.rejects(fetchWebPage('https://internal.example.com/', fetcher, lookup), /resolves to a private/);
 });
 
-test('searchWeb reports a missing key without making a request', async () => {
-  let called = false;
-  const fetcher = (async () => { called = true; return new Response('{}'); }) as typeof fetch;
-  await assert.rejects(searchWeb('q', 3, undefined, fetcher), /HIERO_BRAVE_API_KEY/);
-  assert.equal(called, false);
+test('searchWeb falls back to DuckDuckGo when no Brave key is set', async () => {
+  let seenUrl = '';
+  const html = '<div class="result results_links"><h2><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fx&amp;rut=1">Ex <b>Title</b></a></h2><a class="result__snippet" href="#">A snippet</a></div>';
+  const fetcher = (async (input: string | URL | Request) => { seenUrl = String(input); return new Response(html, { status: 200 }); }) as typeof fetch;
+  const results = await searchWeb('hello world', 3, undefined, fetcher);
+  assert.ok(seenUrl.startsWith('https://html.duckduckgo.com/html/'));
+  assert.deepEqual(results, [{ title: 'Ex Title', url: 'https://example.test/x', description: 'A snippet' }]);
+});
+
+test('searchWeb reports a DuckDuckGo bot-challenge page instead of returning no results', async () => {
+  const fetcher = (async () => new Response('<html><div class="anomaly-modal">challenge</div></html>', { status: 202 })) as typeof fetch;
+  await assert.rejects(searchWeb('weibo hot search', 5, undefined, fetcher), /bot-challenge/);
+});
+
+test('searchWeb reports when DuckDuckGo returns no parseable results', async () => {
+  const fetcher = (async () => new Response('<html><body>nothing</body></html>', { status: 200 })) as typeof fetch;
+  await assert.rejects(searchWeb('weibo hot search', 5, undefined, fetcher), /no parseable results/);
+});
+
+test('parseDuckDuckGoHtml respects count and skips non-http links', () => {
+  const block = (href: string) => `<div class="result"><a class="result__a" href="${href}">T</a><a class="result__snippet">S</a></div>`;
+  const html = block('javascript:void(0)') + block('https://a.test') + block('https://b.test') + block('https://c.test');
+  assert.deepEqual(parseDuckDuckGoHtml(html, 2).map((item) => item.url), ['https://a.test', 'https://b.test']);
 });
 
 test('searchWeb sends the key in a header and maps results', async () => {

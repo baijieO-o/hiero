@@ -109,7 +109,7 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Search the public web and return titles, URLs, and short descriptions. Requires user approval outside auto mode. Use web_fetch to read a result in full.',
+      description: 'Search the public web (Brave when configured, otherwise DuckDuckGo) and return titles, URLs, and short descriptions. Requires user approval outside auto mode. Use web_fetch to read a result in full. For Weibo hot search, web_fetch https://s.weibo.com/top/summary directly instead of searching.',
       parameters: { type: 'object', additionalProperties: false, properties: { query: { type: 'string' }, count: { type: 'integer', minimum: 1, maximum: 10, default: 5 } }, required: ['query'] },
     },
   },
@@ -404,7 +404,8 @@ export class HieroRuntime {
     if (tokens.length === 0) console.info('[hiero] HIERO_LLM_TOKENS is empty; using unauthenticated OpenAI-compatible endpoint (suitable for local Ollama/vLLM).');
     const embeddingConfig = embeddingConfigFromEnv();
     setDeepMemoryEmbedder(embeddingConfig ? createEmbedder(embeddingConfig) : undefined);
-    return new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? '')), tokens);
+    const maxTokens = Number.parseInt(process.env.HIERO_LLM_MAX_TOKENS ?? '', 10);
+    return new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? ''), undefined, Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : undefined), tokens);
   }
 
   /** Summarizes older history with HIERO_COMPACT_MODEL (a cheap or local model) when set, otherwise the main model. */

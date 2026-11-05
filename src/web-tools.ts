@@ -136,9 +136,50 @@ export interface WebSearchResult {
   description: string;
 }
 
-/** Queries the Brave Search API. Requires HIERO_BRAVE_API_KEY; the key is sent only in a request header and never returned. */
+const DUCKDUCKGO_ENDPOINT = 'https://html.duckduckgo.com/html/';
+
+/** Extracts results from DuckDuckGo's HTML endpoint. Redirect links (uddg=) are unwrapped to the real target URL. */
+export function parseDuckDuckGoHtml(html: string, count: number): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  const blocks = html.split(/<div[^>]+class="[^"]*\bresult\b[^"]*"/).slice(1);
+  for (const block of blocks) {
+    const link = block.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!link?.[1]) continue;
+    const snippet = block.match(/<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/);
+    const href = link[1].replace(/&amp;/g, '&');
+    const uddg = href.match(/[?&]uddg=([^&]+)/);
+    const target = uddg?.[1] ? decodeURIComponent(uddg[1]) : href.startsWith('//') ? `https:${href}` : href;
+    if (!/^https?:\/\//.test(target)) continue;
+    results.push({
+      title: htmlToText(link[2] ?? ''),
+      url: target,
+      description: htmlToText(snippet?.[1] ?? ''),
+    });
+    if (results.length >= count) break;
+  }
+  return results;
+}
+
+async function searchDuckDuckGo(query: string, count: number, fetcher: typeof fetch): Promise<WebSearchResult[]> {
+  const url = new URL(DUCKDUCKGO_ENDPOINT);
+  url.searchParams.set('q', query);
+  const response = await fetcher(url, {
+    headers: { 'user-agent': 'Mozilla/5.0 (compatible; Hiero/0.2)', accept: 'text/html' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`Web search failed with HTTP ${response.status}.`);
+  const html = await response.text();
+  if (/anomaly-modal|\bchallenge\b/i.test(html) && !/class="[^"]*\bresult__a\b/.test(html)) {
+    throw new Error('DuckDuckGo returned a bot-challenge page instead of results. Set HIERO_BRAVE_API_KEY, or use web_fetch on a known URL.');
+  }
+  const results = parseDuckDuckGoHtml(html, count);
+  if (results.length === 0) throw new Error('DuckDuckGo returned no parseable results for this query.');
+  return results;
+}
+
+/** Searches the web. Uses the Brave Search API when HIERO_BRAVE_API_KEY is set; otherwise falls back to DuckDuckGo's keyless HTML endpoint. The key is sent only in a request header and never returned. */
 export async function searchWeb(query: string, count: number, apiKey: string | undefined, fetcher: typeof fetch = fetch): Promise<WebSearchResult[]> {
-  if (!apiKey?.trim()) throw new Error('Web search is not configured. Set HIERO_BRAVE_API_KEY to a Brave Search API key.');
+  if (!apiKey?.trim()) return searchDuckDuckGo(query, count, fetcher);
   const url = new URL(BRAVE_ENDPOINT);
   url.searchParams.set('q', query);
   url.searchParams.set('count', String(count));
