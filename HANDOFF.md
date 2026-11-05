@@ -1,6 +1,6 @@
 # Hiero 交接文档（精简版）
 
-更新时间：2026-11-02
+更新时间：2026-11-05
 完整历史记录：会话目录 `files/HANDOFF-full.md`。
 
 ## 1. 项目
@@ -144,6 +144,37 @@ D:\hiero\launch-hiero.bat
 5. 未决假设：压缩小模型默认使用主模型（可用 `HIERO_COMPACT_MODEL` 覆盖）；上下文上限固定为 128K。
 
 启动方式：后端 `node dist/src/server.js`（ws://localhost:8080）；前端 `npx vite --port 5173 --strictPort`。
+
+## 交接状态（2026-11-05）
+
+已完成（均已提交到 `main`，最新提交 `1090025`）：
+- 流式渲染：按块渐显/上滑（仅新增块）、光标结束淡出、自动滚动与「回到底部」按钮；缩进列表闪烁问题已修复（动画限定在 `.chat-block-enter` 下）。
+- Markdown 扩展：数学公式（KaTeX，先从原始 Markdown 抽取公式，修复 `<br>` 与 `&lt;` 残留）、图片骨架屏、链接预览卡片、代码块逐行高亮/行号渐显/语言标签淡入/复制按钮。
+- 长回复（约 4000 字符以上且无工具调用）自动保存为工作区 `.md` 文件。
+- 断线重连：修复新发送的 `chat_attach` 早于 run 注册导致 `CHAT_UNKNOWN` 的问题（`sentOnSocket`）；重连时回放事件。
+- `load_skill` 聊天工具：模型可按需读取 SKILL.md 正文。
+- 错误码文档面板（右上角「文档」，23 条，8 组）；原生功能文档 `docs/FEATURES.md`（README 已链接）。
+- 文件管理器：名称排序（数字感知、文件夹优先）、有界并发 stat、二进制检测、Home/End/PageUp/PageDown 导航。
+- 底栏：时钟独立为 `Clock` 组件，命令框最小宽度 180px，窄屏隐藏 GPU。
+
+未验证：
+- `load_skill` 在真实模型上的调用。
+- 文件管理器的键盘与焦点行为（浏览器内）。
+- 底栏渲染次数减少（未用 React Profiler 测量）。
+- 流式卡顿改善（未测量）。
+- 错误码文档面板的视觉效果。
+- `npm run build` 默认内存不足，需 `NODE_OPTIONS=--max-old-space-size=4096`。
+
+未做 / 待确认：
+- 底栏命令输入框不会发给 Agent，未知输入会被静默清空。
+- 底栏缓冲区标签对同类缓冲区看起来相同。
+- 底栏状态行离线时显示 `—`，没有明确的离线状态。
+
+已评估并决定不做（代码前提不成立）：
+- 在 `runtime-socket.ts` 与 store 之间加 rAF 缓冲层：聊天增量已经由 `queueDelta`/`flushDeltas` 按帧合并；空闲时 WebSocket 每 5 秒约 4 条消息；其他事件稀疏。
+- Mermaid/Markmap 池化、Monaco 销毁重建、xterm 隐藏时暂停写入：代码里 Mermaid 是全局单例，Monaco 只有一个 DiffEditor 且懒加载，xterm 只有一个实例，没有对应的成本可省。
+
+如需继续排查卡顿：用 React Profiler 在一次真实对话中测量流式期间的提交次数与耗时，重点看流式 Markdown 的重解析与 DOM 替换。
 
 ## 事件总线（统一 WebSocket）
 
