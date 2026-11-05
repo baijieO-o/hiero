@@ -53,22 +53,34 @@ function escapeHtml(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/** Replaces $$...$$ and $...$ math with KaTeX output. Math that does not parse is left as source. */
-function renderMath(source: string): string {
-  const render = (tex: string, displayMode: boolean): string => {
-    try {
-      return katex.renderToString(tex, { displayMode, throwOnError: true, output: 'html' });
-    } catch {
-      return escapeHtml(displayMode ? `$$${tex}$$` : `$${tex}$`);
-    }
+function renderTex(tex: string, displayMode: boolean): string {
+  try {
+    const html = katex.renderToString(tex, { displayMode, throwOnError: true, output: 'html' });
+    return displayMode ? `<span class="chat-math chat-math-block">${html}</span>` : `<span class="chat-math">${html}</span>`;
+  } catch {
+    return escapeHtml(displayMode ? `$$${tex}$$` : `$${tex}$`);
+  }
+}
+
+/**
+ * Pulls $$...$$ and $...$ math out of the markdown source before marked runs, so TeX keeps its raw text
+ * (no <br> from newlines, no escaped operators). Each formula is swapped for a placeholder and restored after rendering.
+ * Code fences and inline code are skipped so a literal "$" in code is never treated as math.
+ */
+function extractMath(source: string): { text: string; formulas: string[] } {
+  const formulas: string[] = [];
+  const stash = (html: string): string => {
+    formulas.push(html);
+    return `HIEROMATH${formulas.length - 1}X`;
   };
-  // Code blocks are split out first so a literal "$" in code is never treated as math.
-  return source.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/).map((part, index) => {
+  const parts = source.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`)/);
+  const text = parts.map((part, index) => {
     if (index % 2 === 1) return part;
     return part
-      .replace(/\$\$([\s\S]+?)\$\$/g, (_, tex: string) => `<span class="chat-math chat-math-block">${render(tex.trim(), true)}</span>`)
-      .replace(/(^|[^\\$])\$([^\n$]+?)\$/g, (_, prefix: string, tex: string) => `${prefix}<span class="chat-math">${render(tex, false)}</span>`);
+      .replace(/\$\$([\s\S]+?)\$\$/g, (_, tex: string) => stash(renderTex(tex.trim(), true)))
+      .replace(/(^|[^\\$\w])\$(?=\S)([^\n$]*?\S)\$(?!\d)/g, (_, prefix: string, tex: string) => `${prefix}${stash(renderTex(tex, false))}`);
   }).join('');
+  return { text, formulas };
 }
 
 /** Shows a standalone link (a paragraph that is only the link) as a preview card with its domain. */
@@ -83,10 +95,12 @@ function linkCard(href: string, text: string): string | undefined {
 }
 
 export function renderMarkdown(source: string): string {
-  const html = renderMath(marked.parse(source, { async: false }) as string).replace(
+  const { text, formulas } = extractMath(source);
+  const rendered = (marked.parse(text, { async: false }) as string).replace(
     /<p><a href="([^"]+)"[^>]*>([^<]+)<\/a><\/p>/g,
-    (match, href: string, text: string) => linkCard(href.replace(/&amp;/g, '&'), text) ?? match,
+    (match, href: string, linkText: string) => linkCard(href.replace(/&amp;/g, '&'), linkText) ?? match,
   );
+  const html = rendered.replace(/HIEROMATH(\d+)X/g, (match, index: string) => formulas[Number(index)] ?? match);
   return DOMPurify.sanitize(html, {
     ADD_ATTR: ['target', 'loading'],
   });
