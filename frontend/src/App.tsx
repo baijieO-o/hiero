@@ -815,11 +815,26 @@ function MarkdownBody({ content }: { content: string }): ReactElement {
   useEffect(() => {
     const root = ref.current;
     if (!root) return;
+    root.querySelectorAll('img').forEach((img) => {
+      if (!img.complete) return;
+      if (img.naturalWidth > 0) img.dataset.loaded = '';
+      else img.dataset.failed = '';
+    });
     const instances = renderMarkmaps(root);
     void renderMermaidBlocks(root);
     return () => instances.forEach((instance) => instance.destroy?.());
   }, [html]);
-  return <div ref={ref} className="chat-markdown" onClick={(event) => { handleCodeCopy(event.target); }} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div ref={ref} className="chat-markdown" onClick={(event) => { handleCodeCopy(event.target); }}   onLoadCapture={(event) => { markImageLoaded(event.target); }} onErrorCapture={(event) => { markImageFailed(event.target); }} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+/** Marks an image as loaded so its skeleton fades out. Stable images from history get the same mark. */
+function markImageLoaded(target: EventTarget | null): void {
+  if (target instanceof HTMLImageElement) target.dataset.loaded = '';
+}
+
+/** Ends the skeleton for a broken image so it doesn't shimmer forever. */
+function markImageFailed(target: EventTarget | null): void {
+  if (target instanceof HTMLImageElement) target.dataset.failed = '';
 }
 
 /** Renders narration text and tool rows in the order they happened, like Copilot's chat. */
@@ -828,10 +843,7 @@ function SegmentList({ segments, streaming }: { segments: ChatSegment[]; streami
     {segments.map((segment, index) => {
       if (segment.kind === 'tool') return <ToolRow key={index} step={segment.step} />;
       if (!segment.text) return null;
-      if (streaming) return <StreamingText key={index} text={segment.text} />;
-      return <div key={index} className="chat-segment-text">
-        <MarkdownBody content={segment.text} />
-      </div>;
+      return <FadingStreamingText key={index} text={segment.text} streaming={!!streaming} />;
     })}
   </div>;
 }
@@ -854,13 +866,31 @@ function ToolRow({ step }: { step: ToolStep }): ReactElement {
  * Renders a streaming text segment block by block. Finished blocks are rendered as markdown and
  * memoized, so each new token only re-parses the unfinished tail.
  */
-function StreamingText({ text }: { text: string }): ReactElement {
+function StreamingText({ text, fading = false }: { text: string; fading?: boolean }): ReactElement {
   const { done, tail } = useMemo(() => splitStreamingBlocks(text), [text]);
   const tailHtml = useMemo(() => (tail.trim() ? renderPartialMarkdown(tail) : ''), [tail]);
   return <div className="chat-segment-text chat-streaming-text">
     {done.map((block, index) => <div key={index} className="chat-block-enter"><MarkdownBody content={block} /></div>)}
-    {tailHtml && <div className="chat-markdown chat-streaming-tail" dangerouslySetInnerHTML={{ __html: tailHtml }} />}
+    {tailHtml && <div className={`chat-markdown chat-streaming-tail${fading ? ' chat-cursor-out' : ''}`} dangerouslySetInnerHTML={{ __html: tailHtml }} />}
   </div>;
+}
+
+/** Keeps the streaming cursor visible briefly after a stream ends so it can fade out instead of vanishing. */
+const CURSOR_FADE_MS = 400;
+
+function FadingStreamingText({ text, streaming }: { text: string; streaming: boolean }): ReactElement {
+  const wasStreaming = useRef(streaming);
+  const [fading, setFading] = useState(false);
+  useEffect(() => {
+    if (streaming) { wasStreaming.current = true; setFading(false); return undefined; }
+    if (!wasStreaming.current) return undefined;
+    setFading(true);
+    const timer = window.setTimeout(() => setFading(false), CURSOR_FADE_MS);
+    return () => window.clearTimeout(timer);
+  }, [streaming]);
+  if (streaming) return <StreamingText text={text} />;
+  if (fading) return <StreamingText text={text} fading />;
+  return <div className="chat-segment-text"><MarkdownBody content={text} /></div>;
 }
 
 function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {

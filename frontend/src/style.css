@@ -482,7 +482,35 @@ button, textarea, select { font: inherit; }
 .chat-block-enter table tr:nth-child(2) { animation-delay: 60ms; }
 .chat-block-enter table tr:nth-child(n+3) { animation-delay: 120ms; }
 .chat-block-enter pre { animation: chat-block-enter .28s ease-out both; }
+/* Code block lines fade in one by one, and line numbers appear with them. */
+.chat-block-enter .code-line { animation: chat-line-enter .3s ease-out both; animation-delay: min(calc(var(--line-index, 0) * 25ms), 400ms); }
+.code-block .code-line { display: block; }
+.code-block .code-line::before { content: attr(data-line); display: inline-block; width: 3em; margin-right: 1em; text-align: right; color: var(--text-muted); opacity: .6; user-select: none; }
+@keyframes chat-line-enter { from { opacity: 0; } to { opacity: 1; } }
+.code-block-lang { animation: chat-line-enter .4s ease-out both; }
+/* The copy button only appears once the block is finished, so a live tail never shows it. */
+.chat-streaming-tail .code-copy { display: none; }
+/* Math shows source until closed, then fades in as KaTeX output. */
+.chat-math { animation: chat-line-enter .35s ease-out both; }
+/* Images show a shimmer skeleton until loaded, then fade in. */
+.chat-image { display: inline-block; min-width: 120px; min-height: 80px; border-radius: 6px; background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%) 0 0 / 200% 100%; animation: chat-shimmer 1.4s linear infinite; }
+.chat-image img { display: block; max-width: 100%; border-radius: 6px; opacity: 0; transition: opacity .35s ease; }
+.chat-image img[data-loaded] { opacity: 1; }
+@keyframes chat-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.chat-image:has(img[data-loaded]), .chat-image:has(img[data-failed]) { background: none; animation: none; }
+.chat-image img[data-failed] { opacity: 1; width: auto; min-height: 1.4em; font-size: 12px; color: var(--text-muted); }
+/* Link preview card: the domain and link title only, no fetch. */
+.chat-link-card { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); color: var(--text); text-decoration: none; animation: chat-link-enter .3s ease-out both; }
+.chat-link-card:hover { border-color: var(--accent); }
+.chat-link-domain { font-size: 11px; color: var(--text-muted); }
+.chat-link-title { font-weight: 600; }
+@keyframes chat-link-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+/* On stream completion the cursor fades out instead of disappearing. */
+.chat-streaming-text .chat-cursor-out > :last-child::after { animation: chat-cursor-fade .4s ease-out forwards; }
+@keyframes chat-cursor-fade { from { opacity: 1; } to { opacity: 0; } }
 .chat-plain { white-space: pre-wrap; }
+:root[data-motion='reduce'] .chat-block-enter .code-line, :root[data-motion='reduce'] .chat-math, :root[data-motion='reduce'] .chat-link-card, :root[data-motion='reduce'] .chat-image, :root[data-motion='reduce'] .chat-image img { animation: none; transition: none; }
+:root[data-motion='reduce'] .chat-image img { opacity: 1; }
 
 .chat-steps {
   display: flex;
