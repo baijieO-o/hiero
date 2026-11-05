@@ -42,6 +42,16 @@ export type RuntimeEvent =
 /** Sent once on connect. Lets a (re)connected panel rebuild its state node instead of waiting for the next transition. */
 export type RuntimeSnapshotEvent = { type: 'SNAPSHOT'; payload: { seq: number; node: AgentState } };
 
+/** Client request sent on reconnect with the last seq it saw, asking the server to replay what it missed. */
+function parseResumeSince(data: unknown): number | undefined {
+  try {
+    const message = JSON.parse(String(data)) as { type?: unknown; payload?: { since?: unknown } };
+    return message.type === 'RESUME' && typeof message.payload?.since === 'number' ? message.payload.since : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Client request, sent after it detects a seq gap, to resync without a reconnect. */
 function isSnapshotRequestData(data: unknown): boolean {
   try {
@@ -56,10 +66,12 @@ export class RuntimeWebSocketServer {
   private readonly server: WebSocketServer;
   private readonly clients = new Set<WebSocket>();
   private seq = 0;
+  /** Recent broadcast messages keyed by seq, so a reconnecting client can replay what it missed. */
+  private readonly replayBuffer: { seq: number; message: string }[] = [];
   private readonly statsSampler = new SystemStatsSampler();
   private statsTimer: NodeJS.Timeout | undefined;
 
-  public constructor(private readonly machine: AgentStateMachine, port = 8080) {
+  public constructor(private readonly machine: AgentStateMachine, port = 8080, private readonly replayCapacity = 500) {
     this.server = new WebSocketServer({
       port,
       verifyClient: ({ origin, req }, done) => {
@@ -76,7 +88,10 @@ export class RuntimeWebSocketServer {
       client.on('message', (data) => {
         if (isSnapshotRequestData(data)) {
           this.sendRaw({ type: 'SNAPSHOT', payload: { seq: this.seq, node: this.machine.state } }, client);
+          return;
         }
+        const since = parseResumeSince(data);
+        if (since !== undefined) this.resume(since, client);
       });
       this.ensureStatsTimer();
     });
@@ -117,7 +132,21 @@ export class RuntimeWebSocketServer {
   public broadcast(event: RuntimeEvent): void {
     this.seq += 1;
     const message = JSON.stringify({ ...event, seq: this.seq });
+    this.replayBuffer.push({ seq: this.seq, message });
+    if (this.replayBuffer.length > this.replayCapacity) this.replayBuffer.shift();
     for (const client of this.clients) this.sendMessage(message, client);
+  }
+
+  /** Sends events after `since`. Falls back to a SNAPSHOT when the buffer no longer covers the gap. */
+  private resume(since: number, client: WebSocket): void {
+    const oldest = this.replayBuffer[0]?.seq ?? this.seq + 1;
+    if (since < oldest - 1) {
+      this.sendRaw({ type: 'SNAPSHOT', payload: { seq: this.seq, node: this.machine.state } }, client);
+      return;
+    }
+    for (const entry of this.replayBuffer) {
+      if (entry.seq > since) this.sendMessage(entry.message, client);
+    }
   }
 
   public send(event: RuntimeEvent, client?: WebSocket): void {

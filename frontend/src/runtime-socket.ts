@@ -23,6 +23,7 @@ export class RuntimeSocket {
   private retryTimer: number | undefined;
   private attempts = 0;
   private lastSeq = -1;
+  private awaitingResync = false;
 
   private readonly url: string;
 
@@ -73,7 +74,11 @@ export class RuntimeSocket {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
     const socket = new WebSocket(this.url);
     this.socket = socket;
-    socket.onopen = () => { this.attempts = 0; };
+    socket.onopen = () => {
+      this.attempts = 0;
+      // Ask the server to replay events after the last seq we saw before the drop.
+      if (this.lastSeq >= 0) socket.send(JSON.stringify({ type: 'RESUME', payload: { since: this.lastSeq } }));
+    };
     socket.onmessage = (event) => this.dispatch(event.data);
     socket.onclose = () => {
       if (this.socket !== socket) return;
@@ -105,13 +110,19 @@ export class RuntimeSocket {
     try { message = JSON.parse(String(raw)) as RuntimeSocketMessage; } catch { return; }
     if (message.type === 'SNAPSHOT') {
       const seq = typeof message.payload?.seq === 'number' ? message.payload.seq : 0;
-      this.lastSeq = seq;
+      // Only re-base lastSeq when no baseline exists or a gap resync was requested. On a plain reconnect
+      // keep the pre-drop lastSeq so the RESUME replay is not treated as stale.
+      if (this.lastSeq < 0 || this.awaitingResync) {
+        this.lastSeq = seq;
+        this.awaitingResync = false;
+      }
       for (const listener of this.snapshotListeners) listener(seq);
     }
     if (typeof message.seq === 'number') {
       if (this.lastSeq >= 0 && message.seq > this.lastSeq + 1) {
         for (const listener of this.gapListeners) listener(this.lastSeq, message.seq);
         // Ask the server for a fresh SNAPSHOT so panels resync and lastSeq is re-based.
+        this.awaitingResync = true;
         this.socket?.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST' }));
       }
       this.lastSeq = message.seq;
