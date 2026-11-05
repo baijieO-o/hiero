@@ -332,10 +332,33 @@ function createConversation(): Conversation {
 
 /** Last serialized value written per storage key, so unchanged state skips the localStorage write. */
 const lastPersisted = new Map<string, string>();
+/** Remembers the in-flight chat request so a page reload can re-attach to it. */
+const ACTIVE_REQUEST_KEY = 'hiero-active-request';
+const RECONNECT_RETRY_MS = 1500;
+
+function readActiveRequest(): { conversationId: string; requestId: string } | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_REQUEST_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { conversationId?: unknown; requestId?: unknown };
+    return typeof parsed.conversationId === 'string' && typeof parsed.requestId === 'string'
+      ? { conversationId: parsed.conversationId, requestId: parsed.requestId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeActiveRequest(request: { conversationId: string; requestId: string } | null): void {
+  if (request) localStorage.setItem(ACTIVE_REQUEST_KEY, JSON.stringify(request));
+  else localStorage.removeItem(ACTIVE_REQUEST_KEY);
+}
 
 const useChatStore = create<ChatState>()(persist((set, get) => {
   let socket: WebSocket | null = null;
   let activeRequest: { conversationId: string; requestId: string } | null = null;
+  // The request whose chat message was queued on the socket; onopen must not re-attach it.
+  let sentOnSocket: string | null = null;
   let pendingFiles: string[] = [];
   let pendingTrace: TraceEvent[] | undefined;
   /** Deltas arrive per token; they are merged and written to the store at most once per animation frame. */
@@ -461,6 +484,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         if (replied !== undefined) finished.content = replied;
         updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         activeRequest = null;
+        writeActiveRequest(null);
         set({ pending: false, streamingSegments: [], error: null });
       } else if (message.type === 'CHAT_CANCELLED') {
         const finished = finishStream({});
@@ -469,7 +493,16 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
           updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         }
         activeRequest = null;
+        writeActiveRequest(null);
         set({ pending: false, streamingSegments: [], error: null });
+      } else if (message.type === 'CHAT_UNKNOWN') {
+        // The backend no longer has this run (it restarted or the record expired), so nothing can be recovered.
+        pendingFiles = [];
+        pendingTrace = undefined;
+        discardDeltas();
+        activeRequest = null;
+        writeActiveRequest(null);
+        set({ pending: false, streamingSegments: [], error: '未找到该请求的记录，可能后端已重启，请重试。' });
       } else if (message.type === 'CHAT_ERROR') {
         const rawDetail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
         const errorCode = typeof message.payload?.code === 'string' ? message.payload.code : '';
@@ -478,28 +511,44 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         pendingTrace = undefined;
         discardDeltas();
         activeRequest = null;
+        writeActiveRequest(null);
         set({ pending: false, streamingSegments: [], error: detail });
       }
     };
-    const abandonPending = () => {
+    // The backend keeps a chat run alive when the socket drops. On reconnect the pending request is re-attached
+    // and its buffered events replay, so a page reload does not lose the in-flight reply.
+    const handleDisconnect = () => {
       if (socket !== next) return;
       socket = null;
+      sentOnSocket = null;
       if (!activeRequest) return;
-      activeRequest = null;
-      pendingFiles = [];
-      discardDeltas();
-      set({ pending: false, streamingSegments: [], error: '与后端的连接已断开，请重试。' });
+      set({ error: '与后端的连接已断开，正在重连…' });
+      window.setTimeout(() => {
+        if (activeRequest && (!socket || socket.readyState > WebSocket.OPEN)) ensureSocket();
+      }, RECONNECT_RETRY_MS);
     };
-    next.onclose = abandonPending;
-    next.onerror = abandonPending;
+    next.onopen = () => {
+      if (socket !== next || !activeRequest) return;
+      // A request sent on this socket already starts its run; attaching it would race ahead of the chat message.
+      if (activeRequest.requestId === sentOnSocket) return;
+      next.send(JSON.stringify({ type: 'chat_attach', request_id: activeRequest.requestId }));
+    };
+    next.onclose = handleDisconnect;
+    next.onerror = handleDisconnect;
     socket = next;
     return next;
   };
   const initial = createConversation();
+  // A reload during a reply: restore the in-flight marker so the socket re-attaches and replays the run.
+  const restored = readActiveRequest();
+  if (restored) {
+    activeRequest = restored;
+    window.setTimeout(() => ensureSocket(), 0);
+  }
   return {
     conversations: [initial],
     activeId: initial.id,
-    pending: false,
+    pending: restored !== null,
     streamingSegments: [],
     error: null,
     compacting: false,
@@ -580,6 +629,8 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const message: ChatMessage = { role: 'user', content: trimmed, ...(images.length > 0 ? { images } : {}) };
       const requestId = `chat-${Date.now()}`;
       activeRequest = { conversationId: conversation.id, requestId };
+      sentOnSocket = requestId;
+      writeActiveRequest(activeRequest);
       updateConversation(conversation.id, (conv) => ({
         ...conv,
         messages: [...conv.messages, message],
@@ -610,6 +661,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const finished = finishStream({});
       const hasContent = finished.content.trim().length > 0 || (finished.steps?.length ?? 0) > 0;
       activeRequest = null;
+      writeActiveRequest(null);
       if (hasContent) {
         updateConversation(request.conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
       }

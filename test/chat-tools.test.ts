@@ -13,6 +13,12 @@ interface CapturedEvent {
   payload: Record<string, unknown>;
 }
 
+/** Chat events are buffered per run and only sent to attached clients, so tests read the buffer. */
+function bufferedChatEvents(runtime: HieroRuntime, requestId: string): CapturedEvent[] {
+  const run = (runtime as unknown as { chatRuns: Map<string, { events: string[] }> }).chatRuns.get(requestId);
+  return (run?.events ?? []).map((message) => JSON.parse(message) as CapturedEvent);
+}
+
 test('chat runs read_file tool call and returns final answer', async () => {
   const requests: Array<{ messages: Array<{ role: string; content?: string }> }> = [];
   const server = createServer((req, res) => {
@@ -42,10 +48,6 @@ test('chat runs read_file tool call and returns final answer', async () => {
   process.chdir(workDir);
 
   const runtime = new HieroRuntime(0);
-  const events: CapturedEvent[] = [];
-  const fakeRuntime = (runtime as unknown as { runtime: RuntimeWebSocketServer }).runtime;
-  fakeRuntime.send = ((event: CapturedEvent) => { events.push(event); }) as RuntimeWebSocketServer['send'];
-
   try {
     await runtime.handleChat({ type: 'CHAT', request_id: 'r1', messages: [{ role: 'user', content: 'read note.txt' }] } as never);
   } finally {
@@ -60,6 +62,7 @@ test('chat runs read_file tool call and returns final answer', async () => {
   const toolMessage = requests[1]?.messages.find((message) => message.role === 'tool') as { content?: string } | undefined;
   assert.ok(toolMessage?.content?.includes('hello from file'), 'tool result should contain file contents');
 
+  const events = bufferedChatEvents(runtime, 'r1');
   const toolEvent = events.find((event) => event.type === 'CHAT_TOOL');
   assert.ok(toolEvent, 'CHAT_TOOL event should be sent');
   assert.equal(toolEvent.payload.name, 'read_file');
@@ -110,12 +113,11 @@ test('read_file tool rejects paths outside the workspace', async () => {
   process.chdir(workDir);
 
   const runtime = new HieroRuntime(0);
-  const events: CapturedEvent[] = [];
-  const fakeRuntime = (runtime as unknown as { runtime: RuntimeWebSocketServer }).runtime;
-  fakeRuntime.send = ((event: CapturedEvent) => { events.push(event); }) as RuntimeWebSocketServer['send'];
+  let events: CapturedEvent[] = [];
 
   try {
     await runtime.handleChat({ type: 'CHAT', request_id: 'r2', messages: [{ role: 'user', content: 'read secret' }] } as never);
+    events = bufferedChatEvents(runtime, 'r2');
   } finally {
     await runtime.close();
     process.chdir(previousCwd);

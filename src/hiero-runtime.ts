@@ -12,7 +12,7 @@ import { ToolGateway } from './tool-gateway.js';
 import { CapabilityRouter } from './capability-router.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
-import { RuntimeWebSocketServer } from './runtime-server.js';
+import { RuntimeWebSocketServer, type RuntimeEvent } from './runtime-server.js';
 import type { ModelMessage, ModelResponse, ModelToolDefinition } from './model-gateway.js';
 import type { TaskContract, ErrorRecord, PermissionMode } from './contracts.js';
 import { z } from 'zod';
@@ -219,6 +219,27 @@ function isChatCancelRequest(message: unknown): message is ChatCancelRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_cancel' && typeof (message as { request_id?: unknown }).request_id === 'string';
 }
 
+interface ChatAttachRequest { type: 'chat_attach'; request_id: string }
+
+function isChatAttachRequest(message: unknown): message is ChatAttachRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_attach' && typeof (message as { request_id?: unknown }).request_id === 'string';
+}
+
+/** Events for one chat request. They are kept after the client disconnects so a reconnecting client can replay them. */
+interface ChatRunBuffer {
+  events: string[];
+  client: WebSocket | undefined;
+  finished: boolean;
+  finishedAt?: number;
+}
+
+/** Finished runs are kept briefly so a reload right after completion can still recover the reply. */
+const CHAT_RUN_RETENTION_MS = 10 * 60_000;
+
+function isCompletedChatEvent(type: string): boolean {
+  return type === 'CHAT_REPLY' || type === 'CHAT_ERROR' || type === 'CHAT_CANCELLED';
+}
+
 interface ChatUsageRequest { type: 'chat_usage'; request_id: string; messages: RuntimeChatRequest['messages']; workspace?: string; subagent?: Partial<SubagentSettings>; compacted_summary?: string }
 
 function isChatUsageRequest(message: unknown): message is ChatUsageRequest {
@@ -314,6 +335,7 @@ export class HieroRuntime {
   private readonly approvals: ApprovalBroker;
   private readonly writeSnapshots = new WriteSnapshotStore();
   private readonly activeChats = new Map<string, AbortController>();
+  private readonly chatRuns = new Map<string, ChatRunBuffer>();
   private readonly stateStore: StateStore;
   private currentTaskId: string | undefined;
 
@@ -330,6 +352,7 @@ export class HieroRuntime {
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) this.cancelChat(message.request_id, client);
+      else if (isChatAttachRequest(message)) this.attachChat(message.request_id, client);
       else if (isChatUsageRequest(message)) await this.handleChatUsage(message, client);
       else if (isChatCompactRequest(message)) await this.handleChatCompact(message, client);
       else if (isTaskHistoryRequest(message)) this.runtime.send({ type: 'TASK_HISTORY', payload: { tasks: this.stateStore.listTasks() } }, client);
@@ -560,13 +583,53 @@ export class HieroRuntime {
     const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna';
     const controller = new AbortController();
     this.activeChats.set(request.request_id, controller);
+    const run: ChatRunBuffer = { events: [], client, finished: false };
+    this.chatRuns.set(request.request_id, run);
+    console.log(`[chat ${request.request_id}] start model=${model} client=${client ? 'attached' : 'none'}`);
     try {
-      await this.runChat(request, model, client, controller.signal);
+      await this.runChat(request, model, run, controller.signal);
     } catch (cause) {
       const record = this.machine.toErrorRecord(cause);
-      this.runtime.send({ type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } }, client);
+      this.sendChat(request.request_id, run, { type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } });
     } finally {
       this.activeChats.delete(request.request_id);
+      run.finished = true;
+      run.finishedAt = Date.now();
+      run.client = undefined;
+      this.pruneChatRuns();
+    }
+  }
+
+  /**
+   * Sends a chat event to the attached client and buffers it. Buffering means a client that reconnects
+   * (for example after a page reload) can ask for the same request and receive everything it missed.
+   */
+  private sendChat(requestId: string, run: ChatRunBuffer, event: RuntimeEvent): void {
+    const message = JSON.stringify(event);
+    run.events.push(message);
+    if (run.client) this.runtime.send(event, run.client);
+    else if (!run.finished) console.log(`[chat ${requestId}] no client attached; buffered ${event.type}`);
+    if (isCompletedChatEvent(event.type)) console.log(`[chat ${requestId}] ${event.type} (client ${run.client ? 'attached' : 'detached'})`);
+  }
+
+  /** Re-attaches a client to a chat run. Buffered events replay first, then new events stream to this client. */
+  private attachChat(requestId: string, client: WebSocket): void {
+    const run = this.chatRuns.get(requestId);
+    if (!run) {
+      this.runtime.send({ type: 'CHAT_UNKNOWN', payload: { request_id: requestId } }, client);
+      console.log(`[chat ${requestId}] attach: unknown or expired request`);
+      return;
+    }
+    run.client = run.finished ? undefined : client;
+    for (const message of run.events) this.runtime.sendRawMessage(message, client);
+    console.log(`[chat ${requestId}] attach: replayed ${run.events.length} events, ${run.finished ? 'run already finished' : 'run still active'}`);
+  }
+
+  /** Drops finished runs after the retention window so memory does not grow without bound. */
+  private pruneChatRuns(): void {
+    const cutoff = Date.now() - CHAT_RUN_RETENTION_MS;
+    for (const [id, run] of this.chatRuns) {
+      if (run.finished && (run.finishedAt ?? 0) < cutoff) this.chatRuns.delete(id);
     }
   }
 
@@ -574,11 +637,16 @@ export class HieroRuntime {
   private cancelChat(requestId: string, client?: WebSocket): void {
     const controller = this.activeChats.get(requestId);
     if (!controller) return;
+    console.log(`[chat ${requestId}] cancel requested`);
     controller.abort();
-    this.runtime.send({ type: 'CHAT_CANCELLED', payload: { request_id: requestId } }, client);
+    const run = this.chatRuns.get(requestId);
+    if (run) this.sendChat(requestId, run, { type: 'CHAT_CANCELLED', payload: { request_id: requestId } });
+    else this.runtime.send({ type: 'CHAT_CANCELLED', payload: { request_id: requestId } }, client);
   }
 
-  private async runChat(request: RuntimeChatRequest, model: string, client: WebSocket | undefined, signal: AbortSignal): Promise<void> {
+  private async runChat(request: RuntimeChatRequest, model: string, run: ChatRunBuffer, signal: AbortSignal): Promise<void> {
+    const requestId = request.request_id;
+    const emit = (event: RuntimeEvent) => this.sendChat(requestId, run, event);
     const workspacePath = resolveChatWorkspace(request.workspace);
     const task: TaskContract = {
       task_id: randomUUID(),
@@ -594,9 +662,9 @@ export class HieroRuntime {
     await this.capabilityRouter.discoverSkills(workspacePath).catch(() => undefined);
     const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata());
     const trace = new ChatTrace();
-    const sendTrace = () => this.runtime.send({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } }, client);
+    const sendTrace = () => emit({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } });
     try {
-      const onDelta = (text: string) => this.runtime.send({ type: 'CHAT_DELTA', payload: { request_id: request.request_id, text } }, client);
+      const onDelta = (text: string) => emit({ type: 'CHAT_DELTA', payload: { request_id: request.request_id, text } });
       let response: ModelResponse | undefined;
       const startedAt = Date.now();
       const usage = { input_tokens: 0, output_tokens: 0, calls: 0, duration_ms: 0 };
@@ -617,7 +685,7 @@ export class HieroRuntime {
         track(response);
         endModelCall({ ok: true, detail: response.usage ? `输入 ${response.usage.input_tokens} / 输出 ${response.usage.output_tokens} tokens` : undefined });
         if (!response.tool_calls || response.tool_calls.length === 0) break;
-        this.runtime.send({ type: 'CHAT_RESET', payload: { request_id: request.request_id } }, client);
+        emit({ type: 'CHAT_RESET', payload: { request_id: request.request_id } });
         messages.push({ role: 'assistant', content: response.content, tool_calls: response.tool_calls });
         let delegatedThisTurn = 0;
         for (const call of response.tool_calls) {
@@ -638,7 +706,7 @@ export class HieroRuntime {
           endToolCall({ ok: !isToolErrorResult(result), detail: summarizeForTrace(result) });
           sendTrace();
           messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: result });
-          this.runtime.send({ type: 'CHAT_TOOL', payload: { request_id: request.request_id, name: call.function.name, arguments: call.function.arguments, result } }, client);
+          emit({ type: 'CHAT_TOOL', payload: { request_id: request.request_id, name: call.function.name, arguments: call.function.arguments, result } });
         }
         response = undefined;
       }
@@ -652,7 +720,7 @@ export class HieroRuntime {
       trace.mark('reply', '完成回复', true, `共 ${usage.calls} 次模型调用，耗时 ${usage.duration_ms}ms`);
       sendTrace();
       await appendChatTrace(workspacePath, request.request_id, trace.snapshot()).catch(() => undefined);
-      this.runtime.send({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage } }, client);
+      emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage } });
     } catch (cause) {
       if (signal.aborted) return;
       const record = this.machine.toErrorRecord(cause);
@@ -660,7 +728,7 @@ export class HieroRuntime {
       trace.mark('error', '请求失败', false, record.message);
       sendTrace();
       await appendChatTrace(workspacePath, request.request_id, trace.snapshot()).catch(() => undefined);
-      this.runtime.send({ type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } }, client);
+      emit({ type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } });
     }
   }
 

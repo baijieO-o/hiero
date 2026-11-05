@@ -28,6 +28,7 @@ export type RuntimeEvent =
   | { type: 'CHAT_TRACE_HISTORY'; payload: { workspace: string; traces: StoredChatTrace[] } }
   | { type: 'TASK_HISTORY'; payload: { tasks: TaskRecord[] } }
   | { type: 'CHAT_CANCELLED'; payload: { request_id: string } }
+  | { type: 'CHAT_UNKNOWN'; payload: { request_id: string } }
   | { type: 'CHAT_USAGE'; payload: { request_id: string; usage: ContextUsageBreakdown } }
   | { type: 'MODEL_LIST'; payload: { request_id: string; models: string[]; error?: string } }
   | { type: 'CHAT_COMPACTED'; payload: { request_id: string; summary: string; before_tokens: number; after_tokens: number; kept_messages: number } | { request_id: string; ok: false; message: string } }
@@ -153,6 +154,11 @@ export class RuntimeWebSocketServer {
     const message = JSON.stringify(event);
     const targets = client ? [client] : this.clients;
     for (const target of targets) this.sendMessage(message, target);
+  }
+
+  /** Sends an already-serialized message to one client. Used to replay buffered chat events. */
+  public sendRawMessage(message: string, client: WebSocket): void {
+    this.sendMessage(message, client);
   }
 
   private sendRaw(event: RuntimeSnapshotEvent, client: WebSocket): void {

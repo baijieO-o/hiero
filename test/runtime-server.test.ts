@@ -85,6 +85,34 @@ test('runtime server replays events missed while disconnected on RESUME', async 
   }
 });
 
+test('runtime server sendRawMessage delivers to one client without advancing seq', async () => {
+  const machine = { state: AgentState.Exec } as unknown as AgentStateMachine;
+  const port = 18000 + Math.floor(Math.random() * 1000);
+  const server = new RuntimeWebSocketServer(machine, port);
+  try {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+    const received: Record<string, unknown>[] = [];
+    socket.on('message', (data) => received.push(JSON.parse(data.toString()) as Record<string, unknown>));
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve());
+      socket.once('error', reject);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    received.length = 0;
+
+    const client = [...server['clients']][0] as WebSocket;
+    server.sendRawMessage(JSON.stringify({ type: 'CHAT_REPLY', payload: { request_id: 'r9' } }), client);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(received.length, 1);
+    assert.equal(received[0]?.type, 'CHAT_REPLY');
+    assert.equal(received[0]?.seq, undefined);
+
+    socket.close();
+  } finally {
+    await server.close();
+  }
+});
+
 test('runtime server falls back to SNAPSHOT when RESUME is older than the replay buffer', async () => {
   const machine = { state: AgentState.Exec } as unknown as AgentStateMachine;
   const port = 18000 + Math.floor(Math.random() * 1000);
