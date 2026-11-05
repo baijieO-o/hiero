@@ -858,7 +858,7 @@ function StreamingText({ text }: { text: string }): ReactElement {
   const { done, tail } = useMemo(() => splitStreamingBlocks(text), [text]);
   const tailHtml = useMemo(() => (tail.trim() ? renderPartialMarkdown(tail) : ''), [tail]);
   return <div className="chat-segment-text chat-streaming-text">
-    {done.map((block, index) => <MarkdownBody key={index} content={block} />)}
+    {done.map((block, index) => <div key={index} className="chat-block-enter"><MarkdownBody content={block} /></div>)}
     {tailHtml && <div className="chat-markdown chat-streaming-tail" dangerouslySetInnerHTML={{ __html: tailHtml }} />}
   </div>;
 }
@@ -970,8 +970,8 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
     if (!autoScroll) return;
     const log = anchor.current?.closest<HTMLElement>('.chat-log');
     if (!log) return;
-    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
-    if (nearBottom) log.scrollTop = log.scrollHeight;
+    if (log.dataset.userScrolledUp === 'true') return;
+    log.scrollTop = log.scrollHeight;
   }, [autoScroll, segments]);
   const hasOutput = segments.some((segment) => segment.kind === 'tool' || segment.text.length > 0);
   return <div ref={anchor}>
@@ -1038,8 +1038,27 @@ function ChatPanel(): ReactElement {
   const logRef = useRef<HTMLDivElement>(null);
   const active = conversations.find((conv) => conv.id === activeId) ?? conversations[0];
   const messages = active?.messages ?? [];
+  const [scrolledUp, setScrolledUp] = useState(false);
   useEffect(() => {
-    if (autoScroll && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+    const log = logRef.current;
+    if (!log) return;
+    const onScroll = (): void => {
+      const up = log.scrollHeight - log.scrollTop - log.clientHeight > 120;
+      log.dataset.userScrolledUp = up ? 'true' : 'false';
+      setScrolledUp((prev) => (prev === up ? prev : up));
+    };
+    log.addEventListener('scroll', onScroll, { passive: true });
+    return () => log.removeEventListener('scroll', onScroll);
+  }, []);
+  const scrollToBottom = (): void => {
+    const log = logRef.current;
+    if (!log) return;
+    log.dataset.userScrolledUp = 'false';
+    setScrolledUp(false);
+    log.scrollTo({ top: log.scrollHeight, behavior: 'smooth' });
+  };
+  useEffect(() => {
+    if (autoScroll && logRef.current && logRef.current.dataset.userScrolledUp !== 'true') logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [autoScroll, messages.length]);
   const [jumpOpen, setJumpOpen] = useState(false);
   useEffect(() => { setJumpOpen(false); }, [activeId]);
@@ -1206,12 +1225,15 @@ function ChatPanel(): ReactElement {
         {sessionUsage.calls > 0 && <div className="chat-session-usage" title="本会话所有助手回复的模型调用合计（成本为估算）">
           会话合计：模型调用 {sessionUsage.calls} 次 · 输入 {sessionUsage.input_tokens} / 输出 {sessionUsage.output_tokens} tokens · 成本 {formatCost(sessionUsage.costUsd)}
         </div>}
+        <div className="chat-log-wrap">
         <div className="chat-log" ref={logRef}>
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
           {messages.map((message, index) => message.compactedMarker
             ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
             : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
           {pending && <StreamingBubble />}
+        </div>
+        {scrolledUp && <button type="button" className="chat-scroll-bottom" onClick={scrollToBottom}>回到底部 ↓</button>}
         </div>
         {error && <p className="chat-error">{error}</p>}
         {folderError && <p className="chat-error">{folderError}</p>}

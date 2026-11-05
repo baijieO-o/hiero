@@ -460,6 +460,26 @@ button, textarea, select { font: inherit; }
 
 .chat-segments { display: flex; flex-direction: column; gap: 6px; }
 .chat-segment-text { line-height: 1.6; word-break: break-word; }
+.chat-log-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-scroll-bottom { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); padding: 4px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: 12px; cursor: pointer; box-shadow: 0 6px 16px rgba(0,0,0,.35); animation: chat-block-enter .25s ease-out both; }
+.chat-scroll-bottom:hover { background: var(--surface-3); }
+/* Streaming cursor: a pseudo-element on the live tail, so token updates never touch the DOM. */
+.chat-streaming-text .chat-streaming-tail > :last-child::after { content: ''; display: inline-block; width: 6px; height: 1em; margin-left: 2px; vertical-align: text-bottom; background: var(--accent); border-radius: 2px; animation: chat-cursor-blink calc(1s / var(--anim-speed, 1)) steps(2, start) infinite; }
+@keyframes chat-cursor-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+/* Only blocks that mount during streaming play this, so stable blocks are not re-animated. */
+.chat-block-enter { animation: chat-block-enter .28s ease-out both; }
+@keyframes chat-block-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3, .chat-markdown h4 { padding-left: 8px; border-left: 3px solid transparent; animation: chat-heading-accent 1.2s ease-out both; }
+@keyframes chat-heading-accent { from { border-left-color: var(--accent); } to { border-left-color: transparent; } }
+.chat-markdown li { animation: chat-item-enter .3s ease-out both; }
+.chat-markdown li:nth-child(2) { animation-delay: 60ms; }
+.chat-markdown li:nth-child(3) { animation-delay: 120ms; }
+.chat-markdown li:nth-child(n+4) { animation-delay: 180ms; }
+@keyframes chat-item-enter { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+.chat-markdown table tr { animation: chat-block-enter .25s ease-out both; }
+.chat-markdown table tr:nth-child(2) { animation-delay: 60ms; }
+.chat-markdown table tr:nth-child(n+3) { animation-delay: 120ms; }
+.chat-markdown pre { animation: chat-block-enter .28s ease-out both; }
 .chat-plain { white-space: pre-wrap; }
 
 .chat-steps {
