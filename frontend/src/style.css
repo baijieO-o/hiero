@@ -98,6 +98,17 @@ button, textarea, select { font: inherit; }
 .skills-empty { padding: 12px; opacity: .6; font-size: 13px; }
 .skills-status { color: var(--accent, #a5ec68); font-size: 12px; }
 .skills-error { color: #ff7b72; font-size: 12px; }
+.error-doc-note { margin: 0 0 14px; color: var(--text-muted); font-size: 12px; }
+.error-doc-group { margin-bottom: 20px; }
+.error-doc-group h3 { margin: 0 0 8px; color: var(--accent-text); font-size: 12px; letter-spacing: .04em; }
+.error-doc-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.5; color: var(--text); }
+.error-doc-table th, .error-doc-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.error-doc-table th { color: var(--text-muted); font-weight: 700; font-size: 11px; }
+.error-doc-table code { color: var(--accent-text); font-family: 'JetBrains Mono', Consolas, monospace; white-space: nowrap; }
+.error-doc-level { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.error-doc-level.blocker { color: #ff7b72; border: 1px solid #ff7b72; }
+.error-doc-level.degradation { color: #e3b341; border: 1px solid #e3b341; }
+.error-doc-level.warning { color: var(--text-muted); border: 1px solid var(--border); }
 .quick-rail { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 24px 0 26px 14px; width: 176px; transition: width .2s; }
 .quick-rail.closed { width: 44px; }
 .rail-toggle { align-self: flex-end; width: 26px; height: 26px; border: 1px solid transparent; border-radius: 4px; color: var(--text-muted); background: var(--surface-2); cursor: pointer; }
