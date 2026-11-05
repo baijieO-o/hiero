@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewHeaderActionsProps } from 'dockview-react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { useShallow } from 'zustand/react/shallow';
 import type { ReactElement } from 'react';
 import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState } from './settings';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
@@ -192,12 +193,36 @@ interface TraceEvent {
   detail?: string;
 }
 
+/** One ordered piece of an assistant turn: narration text or a tool call, in the order they happened. */
+type ChatSegment = { kind: 'text'; text: string } | { kind: 'tool'; step: ToolStep };
+
+/** Appends a text delta, extending the last text segment when there is one. Returns a new array. */
+function appendTextSegment(segments: ChatSegment[], text: string): ChatSegment[] {
+  if (!text) return segments;
+  const last = segments[segments.length - 1];
+  if (last?.kind === 'text') return [...segments.slice(0, -1), { kind: 'text', text: last.text + text }];
+  return [...segments, { kind: 'text', text }];
+}
+
+/** Builds the text-only content and tool list that older message rendering and persistence still use. */
+function summarizeSegments(segments: ChatSegment[]): { content: string; steps: ToolStep[] } {
+  let content = '';
+  const steps: ToolStep[] = [];
+  for (const segment of segments) {
+    if (segment.kind === 'text') content += segment.text;
+    else steps.push(segment.step);
+  }
+  return { content, steps };
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   images?: string[];
   files?: string[];
   steps?: ToolStep[];
+  /** Interleaved text and tool steps in arrival order; absent on messages saved before this layout. */
+  segments?: ChatSegment[];
   usage?: ChatUsage;
   model?: string;
   trace?: TraceEvent[];
@@ -268,8 +293,8 @@ interface ChatState {
   conversations: Conversation[];
   activeId: string;
   pending: boolean;
-  streamingText: string;
-  streamingSteps: ToolStep[];
+  /** Ordered text and tool segments for the reply in progress. Only the streaming bubble subscribes to this. */
+  streamingSegments: ChatSegment[];
   error: string | null;
   compacting: boolean;
   /** Latest context usage per conversation id, requested when the session info panel opens. */
@@ -305,12 +330,63 @@ function createConversation(): Conversation {
   return { id: `conv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, title: '新对话', messages: [], updatedAt: Date.now() };
 }
 
+/** Last serialized value written per storage key, so unchanged state skips the localStorage write. */
+const lastPersisted = new Map<string, string>();
+
 const useChatStore = create<ChatState>()(persist((set, get) => {
   let socket: WebSocket | null = null;
   let activeRequest: { conversationId: string; requestId: string } | null = null;
   let pendingFiles: string[] = [];
-  let pendingSteps: ToolStep[] = [];
   let pendingTrace: TraceEvent[] | undefined;
+  /** Deltas arrive per token; they are merged and written to the store at most once per animation frame. */
+  let deltaBuffer = '';
+  let deltaFrame: number | undefined;
+  /** Set after a tool call or reset so the next delta opens a new text segment instead of extending the previous one. */
+  let textBreak = false;
+  const flushDeltas = () => {
+    if (deltaFrame !== undefined) {
+      cancelAnimationFrame(deltaFrame);
+      deltaFrame = undefined;
+    }
+    if (!deltaBuffer) return;
+    const text = deltaBuffer;
+    deltaBuffer = '';
+    const startNew = textBreak;
+    textBreak = false;
+    set((state) => ({
+      streamingSegments: startNew
+        ? [...state.streamingSegments, { kind: 'text', text }]
+        : appendTextSegment(state.streamingSegments, text),
+    }));
+  };
+  const queueDelta = (text: string) => {
+    deltaBuffer += text;
+    if (deltaFrame === undefined) deltaFrame = requestAnimationFrame(() => { deltaFrame = undefined; flushDeltas(); });
+  };
+  const discardDeltas = () => {
+    deltaBuffer = '';
+    if (deltaFrame !== undefined) cancelAnimationFrame(deltaFrame);
+    deltaFrame = undefined;
+  };
+  /** Turns the in-flight stream into a finished assistant message and clears the stream state. */
+  const finishStream = (extra: Partial<ChatMessage>): ChatMessage => {
+    flushDeltas();
+    const segments = get().streamingSegments;
+    const summary = summarizeSegments(segments);
+    const files = pendingFiles.length > 0 ? [...new Set(pendingFiles)] : undefined;
+    const message: ChatMessage = {
+      role: 'assistant',
+      content: summary.content,
+      segments: segments.length > 0 ? segments : undefined,
+      steps: summary.steps.length > 0 ? summary.steps : undefined,
+      files,
+      completedAt: Date.now(),
+      ...extra,
+    };
+    pendingFiles = [];
+    pendingTrace = undefined;
+    return message;
+  };
   /** Usage and compaction requests are independent of chat turns, so they are matched by request id here. */
   const sideRequests = new Map<string, { kind: 'usage' | 'compact'; conversationId: string }>();
   const updateConversation = (id: string, change: (conv: Conversation) => Conversation) =>
@@ -356,15 +432,18 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const conversationId = activeRequest.conversationId;
       if (message.type === 'CHAT_DELTA') {
         const text = typeof message.payload?.text === 'string' ? message.payload.text : '';
-        set((state) => ({ streamingText: state.streamingText + text }));
+        queueDelta(text);
       } else if (message.type === 'CHAT_RESET') {
-        set({ streamingText: '' });
+        // A reset ends the current text run; the next delta starts a new text segment.
+        flushDeltas();
+        textBreak = true;
       } else if (message.type === 'CHAT_TOOL') {
+        flushDeltas();
+        textBreak = true;
         const name = typeof message.payload?.name === 'string' ? message.payload.name : '';
         const args = typeof message.payload?.arguments === 'string' ? message.payload.arguments : '{}';
         const result = typeof message.payload?.result === 'string' ? message.payload.result : '';
-        pendingSteps.push({ name, arguments: args, result });
-        set({ streamingSteps: [...pendingSteps] });
+        set((state) => ({ streamingSegments: [...state.streamingSegments, { kind: 'tool', step: { name, arguments: args, result } }] }));
         if (name === 'read_file') {
           const path = readPathArgument(args);
           if (path) pendingFiles.push(path);
@@ -372,40 +451,34 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       } else if (message.type === 'CHAT_TRACE') {
         pendingTrace = parseTraceEvents(message.payload?.events);
       } else if (message.type === 'CHAT_REPLY') {
-        const content = typeof message.payload?.content === 'string' ? message.payload.content : get().streamingText;
-        const files = pendingFiles.length > 0 ? [...new Set(pendingFiles)] : undefined;
-        const steps = pendingSteps.length > 0 ? pendingSteps : undefined;
+        const replied = typeof message.payload?.content === 'string' ? message.payload.content : undefined;
         const usage = parseChatUsage(message.payload?.usage);
         const model = typeof message.payload?.model === 'string' ? message.payload.model : undefined;
         const trace = pendingTrace;
         const requestId = activeRequest.requestId;
-        pendingFiles = [];
-        pendingSteps = [];
-        pendingTrace = undefined;
-        updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content, files, steps, usage, model, trace, requestId, completedAt: Date.now() }], updatedAt: Date.now() }));
+        const finished = finishStream({ usage, model, trace, requestId });
+        // The final reply text is authoritative; replace the last text segment when the server sends it.
+        if (replied !== undefined) finished.content = replied;
+        updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         activeRequest = null;
-        set({ pending: false, streamingText: '', streamingSteps: [], error: null });
+        set({ pending: false, streamingSegments: [], error: null });
       } else if (message.type === 'CHAT_CANCELLED') {
-        const partial = get().streamingText.trim();
-        const files = pendingFiles.length > 0 ? [...new Set(pendingFiles)] : undefined;
-        const steps = pendingSteps.length > 0 ? pendingSteps : undefined;
-        pendingFiles = [];
-        pendingSteps = [];
-        pendingTrace = undefined;
-        if (partial || steps) {
-          updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content: partial, files, steps, completedAt: Date.now() }], updatedAt: Date.now() }));
+        const finished = finishStream({});
+        const partial = finished.content.trim();
+        if (partial || finished.steps) {
+          updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         }
         activeRequest = null;
-        set({ pending: false, streamingText: '', streamingSteps: [], error: null });
+        set({ pending: false, streamingSegments: [], error: null });
       } else if (message.type === 'CHAT_ERROR') {
         const rawDetail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
         const errorCode = typeof message.payload?.code === 'string' ? message.payload.code : '';
         const detail = errorCode ? `[${errorCode}] ${rawDetail}` : rawDetail;
         pendingFiles = [];
-        pendingSteps = [];
         pendingTrace = undefined;
+        discardDeltas();
         activeRequest = null;
-        set({ pending: false, streamingText: '', streamingSteps: [], error: detail });
+        set({ pending: false, streamingSegments: [], error: detail });
       }
     };
     const abandonPending = () => {
@@ -414,8 +487,8 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       if (!activeRequest) return;
       activeRequest = null;
       pendingFiles = [];
-      pendingSteps = [];
-      set({ pending: false, streamingText: '', streamingSteps: [], error: '与后端的连接已断开，请重试。' });
+      discardDeltas();
+      set({ pending: false, streamingSegments: [], error: '与后端的连接已断开，请重试。' });
     };
     next.onclose = abandonPending;
     next.onerror = abandonPending;
@@ -427,8 +500,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     conversations: [initial],
     activeId: initial.id,
     pending: false,
-    streamingText: '',
-    streamingSteps: [],
+    streamingSegments: [],
     error: null,
     compacting: false,
     contextUsage: {},
@@ -515,8 +587,9 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         updatedAt: Date.now(),
       }));
       pendingFiles = [];
-      pendingSteps = [];
-      set({ pending: true, streamingText: '', streamingSteps: [], error: null });
+      discardDeltas();
+      textBreak = false;
+      set({ pending: true, streamingSegments: [], error: null });
       const target = ensureSocket();
       const { model, permission, workspace, contextMode } = state.options;
       const subagent = useSubagentPreferences.getState().values;
@@ -527,29 +600,41 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     cancel: () => {
       const request = activeRequest;
       if (!request) {
-        if (get().pending) set({ pending: false, streamingText: '', streamingSteps: [], error: null });
+        if (get().pending) set({ pending: false, streamingSegments: [], error: null });
         return;
       }
       const target = ensureSocket();
       const payload = JSON.stringify({ type: 'chat_cancel', request_id: request.requestId });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
-      const partial = get().streamingText.trim();
-      const steps = pendingSteps.length > 0 ? pendingSteps : undefined;
-      const files = pendingFiles.length > 0 ? [...new Set(pendingFiles)] : undefined;
-      pendingFiles = [];
-      pendingSteps = [];
-      pendingTrace = undefined;
+      const finished = finishStream({});
+      const hasContent = finished.content.trim().length > 0 || (finished.steps?.length ?? 0) > 0;
       activeRequest = null;
-      if (partial || steps) {
-        updateConversation(request.conversationId, (conv) => ({ ...conv, messages: [...conv.messages, { role: 'assistant', content: partial, files, steps, completedAt: Date.now() }], updatedAt: Date.now() }));
+      if (hasContent) {
+        updateConversation(request.conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
       }
-      set({ pending: false, streamingText: '', streamingSteps: [], error: null });
+      set({ pending: false, streamingSegments: [], error: null });
     },
   };
 }, {
   name: 'hiero-chat',
   partialize: (state) => ({ conversations: state.conversations, activeId: state.activeId, options: state.options }),
+  storage: {
+    getItem: (name) => {
+      const raw = localStorage.getItem(name);
+      return raw === null ? null : JSON.parse(raw);
+    },
+    setItem: (name, value) => {
+      const serialized = JSON.stringify(value);
+      if (lastPersisted.get(name) === serialized) return;
+      lastPersisted.set(name, serialized);
+      localStorage.setItem(name, serialized);
+    },
+    removeItem: (name) => {
+      lastPersisted.delete(name);
+      localStorage.removeItem(name);
+    },
+  },
 }));
 
 /** Fills in traces that exist only on the backend (for example after browser storage was cleared). */
@@ -683,7 +768,39 @@ function MarkdownBody({ content }: { content: string }): ReactElement {
   return <div ref={ref} className="chat-markdown" onClick={(event) => { handleCodeCopy(event.target); }} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-function ChatMessageView({ role, content, images, files, steps, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
+/** Renders narration text and tool rows in the order they happened, like Copilot's chat. */
+function SegmentList({ segments, streaming }: { segments: ChatSegment[]; streaming?: boolean }): ReactElement {
+  return <div className="chat-segments">
+    {segments.map((segment, index) => {
+      if (segment.kind === 'tool') return <ToolRow key={index} step={segment.step} />;
+      if (!segment.text) return null;
+      return <div key={index} className="chat-segment-text">
+        {streaming ? <PlainText text={segment.text} /> : <MarkdownBody content={segment.text} />}
+      </div>;
+    })}
+  </div>;
+}
+
+function ToolRow({ step }: { step: ToolStep }): ReactElement {
+  const view = describeStep(step);
+  return <details className={`chat-step${view.failed ? ' chat-step-failed' : ''}`}>
+    <summary>
+      <span className="chat-step-icon" aria-hidden="true">{view.failed ? '✕' : '✓'}</span>
+      <span className="chat-step-name">{view.title}</span>
+      <span className="chat-step-arg">{view.detail}</span>
+    </summary>
+    <div className="chat-step-body">
+      <pre>{view.body}</pre>
+    </div>
+  </details>;
+}
+
+/** Plain text while a reply is still arriving; markdown is rendered once the segment is final. */
+function PlainText({ text }: { text: string }): ReactElement {
+  return <div className="chat-plain">{text}</div>;
+}
+
+function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
   const [copied, setCopied] = useState(false);
   const [timeVisible, setTimeVisible] = useState(false);
   const idleTimer = useRef<number | undefined>(undefined);
@@ -708,11 +825,15 @@ function ChatMessageView({ role, content, images, files, steps, usage, model, tr
       <span className="chat-role">{role === 'user' ? '你' : 'Hiero'}</span>
       <button type="button" className="chat-copy" onClick={copy} aria-label={copied ? '已复制' : '复制消息'} title={copied ? '已复制' : '复制消息'}>{copied ? <CheckIcon /> : <CopyIcon />}</button>
     </div>
-    {steps && steps.length > 0 && <ToolChain steps={steps} />}
     {images && images.length > 0 && <div className="chat-images">
       {images.map((src, index) => <img key={index} src={src} alt={`上传的图片 ${index + 1}`} />)}
     </div>}
-    {content && <MarkdownBody content={content} />}
+    {segments && segments.length > 0
+      ? <SegmentList segments={segments} />
+      : <>
+        {steps && steps.length > 0 && <ToolChain steps={steps} />}
+        {content && <MarkdownBody content={content} />}
+      </>}
     {files && files.length > 0 && <div className="chat-files">
       {files.map((file) => <button type="button" key={file} className="chat-file" onClick={() => requestOpenFile(file)} title={`在文件管理器中打开 ${file}`}>📄 {file}</button>)}
     </div>}
@@ -777,8 +898,31 @@ function TraceTimeline({ events }: { events: TraceEvent[] }): ReactElement {
   </details>;
 }
 
+/** Owns the streaming subscription so token updates re-render only this bubble, not the whole chat panel. */
+const StreamingBubble = memo(function StreamingBubble(): ReactElement {
+  const segments = useChatStore((state) => state.streamingSegments);
+  const autoScroll = usePreferences((state) => state.values.autoScroll);
+  const anchor = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!autoScroll) return;
+    const log = anchor.current?.closest<HTMLElement>('.chat-log');
+    if (!log) return;
+    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+    if (nearBottom) log.scrollTop = log.scrollHeight;
+  }, [autoScroll, segments]);
+  const hasOutput = segments.some((segment) => segment.kind === 'tool' || segment.text.length > 0);
+  return <div ref={anchor}>
+    {hasOutput
+      ? <div className="chat-message chat-assistant chat-streaming">
+        <div className="chat-message-head"><span className="chat-role">Hiero</span></div>
+        <SegmentList segments={segments} streaming />
+      </div>
+      : <div className="chat-loader" role="status" aria-label="思考中"><span /><span /><span /></div>}
+  </div>;
+});
+
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, streamingText, streamingSteps, error, compacting, contextUsage, requestContextUsage, compactConversation, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore();
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, cancel: state.cancel })));
   const [draft, setDraft] = useState('');
   const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
   const [folderPicking, setFolderPicking] = useState(false);
@@ -833,7 +977,7 @@ function ChatPanel(): ReactElement {
   const messages = active?.messages ?? [];
   useEffect(() => {
     if (autoScroll && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [autoScroll, messages.length, streamingText]);
+  }, [autoScroll, messages.length]);
   const [jumpOpen, setJumpOpen] = useState(false);
   useEffect(() => { setJumpOpen(false); }, [activeId]);
   useEffect(() => { if (sessionInfoOpen && active && !pending) requestContextUsage(active.id); }, [sessionInfoOpen, activeId, messages.length, pending]);
@@ -1003,9 +1147,8 @@ function ChatPanel(): ReactElement {
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
           {messages.map((message, index) => message.compactedMarker
             ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
-            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
-          {pending && (streamingText || streamingSteps.length > 0) && <ChatMessageView role="assistant" content={streamingText} steps={streamingSteps} />}
-          {pending && !streamingText && <div className="chat-loader" role="status" aria-label="思考中"><span /><span /><span /></div>}
+            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
+          {pending && <StreamingBubble />}
         </div>
         {error && <p className="chat-error">{error}</p>}
         {folderError && <p className="chat-error">{folderError}</p>}
