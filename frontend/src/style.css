@@ -469,17 +469,19 @@ button, textarea, select { font: inherit; }
 /* Only blocks that mount during streaming play this, so stable blocks are not re-animated. */
 .chat-block-enter { animation: chat-block-enter .28s ease-out both; }
 @keyframes chat-block-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.chat-markdown h1, .chat-markdown h2, .chat-markdown h3, .chat-markdown h4 { padding-left: 8px; border-left: 3px solid transparent; animation: chat-heading-accent 1.2s ease-out both; }
+/* Element-level entrances only apply inside finished blocks (.chat-block-enter). The live tail is
+   replaced on every token, so animating its children would restart them on each update. */
+.chat-block-enter h1, .chat-block-enter h2, .chat-block-enter h3, .chat-block-enter h4 { padding-left: 8px; border-left: 3px solid transparent; animation: chat-heading-accent 1.2s ease-out both; }
 @keyframes chat-heading-accent { from { border-left-color: var(--accent); } to { border-left-color: transparent; } }
-.chat-markdown li { animation: chat-item-enter .3s ease-out both; }
-.chat-markdown li:nth-child(2) { animation-delay: 60ms; }
-.chat-markdown li:nth-child(3) { animation-delay: 120ms; }
-.chat-markdown li:nth-child(n+4) { animation-delay: 180ms; }
+.chat-block-enter li { animation: chat-item-enter .3s ease-out both; }
+.chat-block-enter li:nth-child(2) { animation-delay: 60ms; }
+.chat-block-enter li:nth-child(3) { animation-delay: 120ms; }
+.chat-block-enter li:nth-child(n+4) { animation-delay: 180ms; }
 @keyframes chat-item-enter { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
-.chat-markdown table tr { animation: chat-block-enter .25s ease-out both; }
-.chat-markdown table tr:nth-child(2) { animation-delay: 60ms; }
-.chat-markdown table tr:nth-child(n+3) { animation-delay: 120ms; }
-.chat-markdown pre { animation: chat-block-enter .28s ease-out both; }
+.chat-block-enter table tr { animation: chat-block-enter .25s ease-out both; }
+.chat-block-enter table tr:nth-child(2) { animation-delay: 60ms; }
+.chat-block-enter table tr:nth-child(n+3) { animation-delay: 120ms; }
+.chat-block-enter pre { animation: chat-block-enter .28s ease-out both; }
 .chat-plain { white-space: pre-wrap; }
 
 .chat-steps {
