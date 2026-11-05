@@ -4,6 +4,8 @@
 
 ## 功能概览
 
+完整功能说明见 [docs/FEATURES.md](docs/FEATURES.md)。
+
 Hiero 是一个个人自用、开源的 Agent 工作台。后端使用显式状态机驱动任务执行，前端提供多窗口工作台，并通过 WebSocket 实时同步状态。
 
 ### 任务编排（Agent 核心）
