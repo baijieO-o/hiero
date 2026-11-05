@@ -2087,6 +2087,8 @@ function FileManagerBuffer(): ReactElement {
   const [selected, setSelected] = useState<WorkspaceEntry | null>(null);
   const [content, setContent] = useState('');
   const [truncated, setTruncated] = useState(false);
+  const [binary, setBinary] = useState(false);
+  const [previewSize, setPreviewSize] = useState(0);
   const [loading, setLoading] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2096,6 +2098,7 @@ function FileManagerBuffer(): ReactElement {
   const [showHidden, setShowHidden] = useState(false);
   const previewRequest = useRef(0);
   const listRequest = useRef(0);
+  const tableRef = useRef<HTMLDivElement>(null);
 
   const readFile = (entry: WorkspaceEntry) => {
     const requestId = ++previewRequest.current;
@@ -2103,12 +2106,15 @@ function FileManagerBuffer(): ReactElement {
     setError(null);
     setContent('');
     setTruncated(false);
+    setBinary(false);
     setPreviewLoading(true);
     requestWorkspace({ type: 'fs_read', path: entry.path })
       .then((payload) => {
         if (requestId !== previewRequest.current) return;
         setContent(String(payload.content ?? ''));
         setTruncated(payload.truncated === true);
+        setBinary(payload.binary === true);
+        setPreviewSize(Number(payload.size ?? entry.size));
       })
       .catch((cause: Error) => { if (requestId === previewRequest.current) setError(cause.message); })
       .finally(() => { if (requestId === previewRequest.current) setPreviewLoading(false); });
@@ -2126,6 +2132,7 @@ function FileManagerBuffer(): ReactElement {
         setEntries(nextEntries);
         setSelected(null);
         setContent('');
+        setBinary(false);
         setFilter('');
         if (thenRead) {
           const target = nextEntries.find((entry) => entry.path === thenRead);
@@ -2167,25 +2174,46 @@ function FileManagerBuffer(): ReactElement {
   }, [entries, filter, sortKey, sortDesc, showHidden]);
 
   const open = (entry: WorkspaceEntry) => {
-    if (entry.kind === 'dir') load(entry.path);
-    else readFile(entry);
+    if (entry.kind === 'dir') {
+      load(entry.path);
+      // Keep keyboard focus on the list so arrow keys keep working in the new folder.
+      tableRef.current?.focus();
+    } else readFile(entry);
+  };
+
+  const moveSelection = (next: WorkspaceEntry) => {
+    if (next.kind === 'file') readFile(next);
+    else setSelected(next);
+    // Keep the newly selected row visible while keyboard navigating.
+    requestAnimationFrame(() => {
+      document.getElementById(`file-${next.path}`)?.scrollIntoView({ block: 'nearest' });
+    });
   };
 
   const onListKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (visible.length === 0) return;
     const index = selected ? visible.findIndex((entry) => entry.path === selected.path) : -1;
+    const last = visible.length - 1;
+    const pageSize = 10;
+    const clamp = (value: number) => Math.min(last, Math.max(0, value));
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       const delta = event.key === 'ArrowDown' ? 1 : -1;
-      const next = visible[Math.min(visible.length - 1, Math.max(0, index < 0 ? 0 : index + delta))];
-      if (next.kind === 'file') readFile(next);
-      else setSelected(next);
+      moveSelection(visible[clamp(index < 0 ? 0 : index + delta)]);
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      moveSelection(visible[event.key === 'Home' ? 0 : last]);
+    } else if (event.key === 'PageDown' || event.key === 'PageUp') {
+      event.preventDefault();
+      const delta = event.key === 'PageDown' ? pageSize : -pageSize;
+      moveSelection(visible[clamp(index < 0 ? 0 : index + delta)]);
     } else if (event.key === 'Enter' && selected) {
       event.preventDefault();
       open(selected);
     } else if (event.key === 'Backspace' && path) {
       event.preventDefault();
       load(parent);
+      tableRef.current?.focus();
     }
   };
 
@@ -2212,7 +2240,7 @@ function FileManagerBuffer(): ReactElement {
     </header>
     {error && <p className="browser-error" role="alert">{error}</p>}
     <div className="files-body">
-      <div className="files-table-wrap" tabIndex={0} onKeyDown={onListKey} role="listbox" aria-label="文件列表" aria-activedescendant={selected ? `file-${selected.path}` : undefined}>
+      <div ref={tableRef} className="files-table-wrap" tabIndex={0} onKeyDown={onListKey} role="listbox" aria-label="文件列表" aria-activedescendant={selected ? `file-${selected.path}` : undefined}>
         <table className="files-table">
           <thead>
             <tr>
@@ -2252,7 +2280,8 @@ function FileManagerBuffer(): ReactElement {
           </div>
           {selected.kind === 'file' && <>
             {previewLoading && <p className="files-preview-hint">加载预览…</p>}
-            {!previewLoading && <pre className="files-preview">{content}{truncated && '\n…（内容已截断）'}</pre>}
+            {!previewLoading && binary && <p className="files-preview-hint">二进制文件（{formatFileSize(previewSize)}），无法以文本预览。</p>}
+            {!previewLoading && !binary && <pre className="files-preview">{content}{truncated && '\n…（内容已截断）'}</pre>}
           </>}
         </>}
       </aside>

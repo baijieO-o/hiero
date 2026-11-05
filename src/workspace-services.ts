@@ -16,10 +16,28 @@ const MAX_READ_BYTES = 200_000;
 const MAX_OUTPUT_CHARS = 50_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+const STAT_CONCURRENCY = 16;
+const BINARY_SNIFF_BYTES = 8_000;
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+/** Maps items with at most `limit` promises in flight, preserving input order. */
+async function mapLimited<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index] as T);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function listDirectory(root: string, relPath = ''): Promise<{ path: string; entries: DirEntry[] }> {
   const target = resolveWorkspacePath(root, relPath);
   const dirents = await readdir(target, { withFileTypes: true });
-  const entries = await Promise.all(dirents.map(async (dirent): Promise<DirEntry> => {
+  const entries = await mapLimited(dirents, STAT_CONCURRENCY, async (dirent): Promise<DirEntry> => {
     const full = join(target, dirent.name);
     const info = await stat(full).catch(() => null);
     return {
@@ -29,18 +47,22 @@ export async function listDirectory(root: string, relPath = ''): Promise<{ path:
       size: info?.size ?? 0,
       modified: info?.mtimeMs ?? 0,
     };
-  }));
-  entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
+  });
+  entries.sort((a, b) => (a.kind === b.kind ? nameCollator.compare(a.name, b.name) : a.kind === 'dir' ? -1 : 1));
   return { path: relative(root, target).split(sep).join('/'), entries };
 }
 
-export async function readTextFile(root: string, relPath: string): Promise<{ path: string; content: string; truncated: boolean }> {
+export async function readTextFile(root: string, relPath: string): Promise<{ path: string; content: string; truncated: boolean; binary: boolean; size: number }> {
   const target = resolveWorkspacePath(root, relPath);
   const info = await stat(target);
   if (!info.isFile()) throw new Error('Path is not a file.');
+  const path = relative(root, target).split(sep).join('/');
   const buffer = await readFile(target);
+  // A NUL byte in the leading bytes is the usual signal that the file is not text.
+  const binary = buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0);
+  if (binary) return { path, content: '', truncated: false, binary: true, size: buffer.byteLength };
   const truncated = buffer.byteLength > MAX_READ_BYTES;
-  return { path: relative(root, target).split(sep).join('/'), content: buffer.subarray(0, MAX_READ_BYTES).toString('utf8'), truncated };
+  return { path, content: buffer.subarray(0, MAX_READ_BYTES).toString('utf8'), truncated, binary: false, size: buffer.byteLength };
 }
 
 /**
