@@ -36,6 +36,7 @@ function isModelSettingsSave(message: unknown): message is { type: 'settings_sav
 }
 import { createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
 import { createWebFetchTool, createWebSearchTool } from './web-tools.js';
+import { LOAD_SKILL_TOOL_DEFINITION, registerLoadSkillTool } from './skill-tool.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
@@ -145,6 +146,7 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
       parameters: { type: 'object', additionalProperties: false, properties: { content: { type: 'string' }, scope: { type: 'string', enum: ['global', 'project'] } }, required: ['content', 'scope'] },
     },
   },
+  LOAD_SKILL_TOOL_DEFINITION,
   DELEGATE_READ_TOOL_DEFINITION,
   DELEGATE_WRITE_TOOL_DEFINITION,
   DELEGATE_TASK_TOOL_DEFINITION,
@@ -180,11 +182,11 @@ function chatToolDefinitions(subagent: SubagentSettings): ModelToolDefinition[] 
  * Builds the model messages for a chat turn. When the client has compacted earlier history, the summary is placed
  * before the messages the client kept verbatim.
  */
-async function buildChatMessages(workspacePath: string, history: RuntimeChatRequest['messages'], compactedSummary?: string): Promise<ModelMessage[]> {
+async function buildChatMessages(workspacePath: string, history: RuntimeChatRequest['messages'], compactedSummary?: string, skillMetadata = ''): Promise<ModelMessage[]> {
   const memory = await memoryContext(workspacePath);
   const lastUser = [...history].reverse().find((item) => item.role === 'user')?.content ?? '';
   const recalled = await deepRecallContext(workspacePath, lastUser);
-  const memorySections = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : ''].filter(Boolean);
+  const memorySections = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : '', skillMetadata ? `Available skills (call load_skill to read one before following it):\n${skillMetadata}` : ''].filter(Boolean);
   const systemContent = [CHAT_SYSTEM_PROMPT, ...memorySections].join('\n\n');
   const summary = typeof compactedSummary === 'string' && compactedSummary.trim() ? [{ role: 'user' as const, content: `${COMPACT_SUMMARY_PREFIX}\n${compactedSummary.trim()}` }] : [];
   return [
@@ -589,7 +591,8 @@ export class HieroRuntime {
     };
     const subagent = normalizeSubagentSettings(request.subagent);
     const toolDefinitions = chatToolDefinitions(subagent);
-    const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
+    await this.capabilityRouter.discoverSkills(workspacePath).catch(() => undefined);
+    const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata());
     const trace = new ChatTrace();
     const sendTrace = () => this.runtime.send({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } }, client);
     try {
@@ -672,6 +675,7 @@ export class HieroRuntime {
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
     tools.register(createWebSearchTool(process.env.HIERO_BRAVE_API_KEY));
     tools.register(createWebFetchTool());
+    registerLoadSkillTool(tools, this.capabilityRouter);
     tools.register({
       name: 'memory_recall',
       inputSchema: z.object({ query: z.string().default('') }),
