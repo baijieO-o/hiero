@@ -27,6 +27,36 @@ export function renderMarkdown(source: string): string {
   return DOMPurify.sanitize(marked.parse(source, { async: false }) as string);
 }
 
+/**
+ * Splits streaming text into finished blocks and an unfinished tail.
+ * A block ends at a blank line outside a code fence. The tail is whatever follows the last such boundary.
+ */
+export function splitStreamingBlocks(source: string): { done: string[]; tail: string } {
+  const done: string[] = [];
+  let current = '';
+  let inFence = false;
+  const lines = source.split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    const isLast = index === lines.length - 1;
+    if (!inFence && line.trim() === '' && !isLast) {
+      if (current.trim()) done.push(current);
+      current = '';
+      continue;
+    }
+    current += (current ? '\n' : '') + line;
+  }
+  return { done, tail: current };
+}
+
+/** Renders an unfinished block tolerantly: an open code fence is closed so the code still shows as code. */
+export function renderPartialMarkdown(source: string): string {
+  const fences = source.match(/^\s*(```|~~~)/gm)?.length ?? 0;
+  const closed = fences % 2 === 1 ? `${source}\n\`\`\`` : source;
+  return renderMarkdown(closed);
+}
+
 /** Copies the code of a clicked copy button. Returns true when the click was handled. */
 export function handleCodeCopy(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;

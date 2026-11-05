@@ -6,7 +6,7 @@ import { useShallow } from 'zustand/react/shallow';
 import type { ReactElement } from 'react';
 import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState } from './settings';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
-import { handleCodeCopy, renderMarkdown } from './markdown';
+import { handleCodeCopy, renderMarkdown, renderPartialMarkdown, splitStreamingBlocks } from './markdown';
 import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
 import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
 import { TaskCard } from './task-card';
@@ -479,6 +479,8 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         const model = typeof message.payload?.model === 'string' ? message.payload.model : undefined;
         const trace = pendingTrace;
         const requestId = activeRequest.requestId;
+        const savedPath = typeof message.payload?.saved_path === 'string' ? message.payload.saved_path : undefined;
+        if (savedPath) pendingFiles.push(savedPath);
         const finished = finishStream({ usage, model, trace, requestId });
         // The final reply text is authoritative; replace the last text segment when the server sends it.
         if (replied !== undefined) finished.content = replied;
@@ -826,8 +828,9 @@ function SegmentList({ segments, streaming }: { segments: ChatSegment[]; streami
     {segments.map((segment, index) => {
       if (segment.kind === 'tool') return <ToolRow key={index} step={segment.step} />;
       if (!segment.text) return null;
+      if (streaming) return <StreamingText key={index} text={segment.text} />;
       return <div key={index} className="chat-segment-text">
-        {streaming ? <PlainText text={segment.text} /> : <MarkdownBody content={segment.text} />}
+        <MarkdownBody content={segment.text} />
       </div>;
     })}
   </div>;
@@ -847,9 +850,17 @@ function ToolRow({ step }: { step: ToolStep }): ReactElement {
   </details>;
 }
 
-/** Plain text while a reply is still arriving; markdown is rendered once the segment is final. */
-function PlainText({ text }: { text: string }): ReactElement {
-  return <div className="chat-plain">{text}</div>;
+/**
+ * Renders a streaming text segment block by block. Finished blocks are rendered as markdown and
+ * memoized, so each new token only re-parses the unfinished tail.
+ */
+function StreamingText({ text }: { text: string }): ReactElement {
+  const { done, tail } = useMemo(() => splitStreamingBlocks(text), [text]);
+  const tailHtml = useMemo(() => (tail.trim() ? renderPartialMarkdown(tail) : ''), [tail]);
+  return <div className="chat-segment-text chat-streaming-text">
+    {done.map((block, index) => <MarkdownBody key={index} content={block} />)}
+    {tailHtml && <div className="chat-markdown chat-streaming-tail" dangerouslySetInnerHTML={{ __html: tailHtml }} />}
+  </div>;
 }
 
 function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {

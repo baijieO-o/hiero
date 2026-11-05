@@ -22,7 +22,7 @@ export type RuntimeEvent =
   | { type: 'CHAT_DELTA'; payload: { request_id: string; text: string } }
   | { type: 'CHAT_RESET'; payload: { request_id: string } }
   | { type: 'CHAT_TOOL'; payload: { request_id: string; name: string; arguments: string; result: string } }
-  | { type: 'CHAT_REPLY'; payload: { request_id: string; content: string; model: string; usage?: { input_tokens: number; output_tokens: number; calls: number; duration_ms: number } } }
+  | { type: 'CHAT_REPLY'; payload: { request_id: string; content: string; model: string; saved_path?: string; usage?: { input_tokens: number; output_tokens: number; calls: number; duration_ms: number } } }
   | { type: 'CHAT_ERROR'; payload: { request_id: string; code: string; message: string } }
   | { type: 'CHAT_TRACE'; payload: { request_id: string; events: ChatTraceEvent[] } }
   | { type: 'CHAT_TRACE_HISTORY'; payload: { workspace: string; traces: StoredChatTrace[] } }

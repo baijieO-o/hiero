@@ -39,6 +39,7 @@ import { createWebFetchTool, createWebSearchTool } from './web-tools.js';
 import { LOAD_SKILL_TOOL_DEFINITION, registerLoadSkillTool } from './skill-tool.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
+import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
@@ -674,6 +675,7 @@ export class HieroRuntime {
         usage.output_tokens += item.usage?.output_tokens ?? 0;
       };
       let delegatedChatTotal = 0;
+      let toolRuns = 0;
       const compactor = this.createCompactor();
       for (let step = 0; step < CHAT_TOOL_ROUNDS; step += 1) {
         if (estimateTokens(messages, toolDefinitions) > CHAT_COMPACT_TOKENS) {
@@ -703,6 +705,7 @@ export class HieroRuntime {
           } else {
             result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode);
           }
+          toolRuns += 1;
           endToolCall({ ok: !isToolErrorResult(result), detail: summarizeForTrace(result) });
           sendTrace();
           messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: result });
@@ -720,7 +723,15 @@ export class HieroRuntime {
       trace.mark('reply', '完成回复', true, `共 ${usage.calls} 次模型调用，耗时 ${usage.duration_ms}ms`);
       sendTrace();
       await appendChatTrace(workspacePath, request.request_id, trace.snapshot()).catch(() => undefined);
-      emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage } });
+      const longReply = toolRuns === 0 && response.content.length > LONG_REPLY_THRESHOLD
+        ? await saveLongReply(workspacePath, request.request_id, response.content).catch(() => undefined)
+        : undefined;
+      if (longReply) {
+        const note = `${longReply.summary}\n\n回复较长（${response.content.length} 字符），已保存到 \`${longReply.path}\`。`;
+        emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: note, model: response.model, usage, saved_path: longReply.path } });
+      } else {
+        emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage } });
+      }
     } catch (cause) {
       if (signal.aborted) return;
       const record = this.machine.toErrorRecord(cause);
