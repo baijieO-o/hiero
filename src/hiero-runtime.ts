@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { AgentExecutor } from './agent-executor.js';
-import { COMPACT_SUMMARY_PREFIX, ContextCompactor } from './context-compactor.js';
+import { COMPACT_SUMMARY_PREFIX, ContextCompactor, DEFAULT_KEEP_RECENT } from './context-compactor.js';
 import { breakdownContextUsage, type ContextUsageBreakdown } from './context-usage.js';
-import { AgentWorkflow } from './agent-workflow.js';
+import { AgentWorkflow, type WorkflowOptions } from './agent-workflow.js';
 import { AgentStateMachine, AgentState } from './state-machine.js';
 import { StateStore } from './state-store.js';
 import { ModelGateway, OpenAICompatibleTransport, parseTokenList } from './model-gateway.js';
@@ -13,7 +14,7 @@ import { CapabilityRouter } from './capability-router.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { RuntimeWebSocketServer, type RuntimeEvent } from './runtime-server.js';
-import type { ModelMessage, ModelResponse, ModelToolDefinition } from './model-gateway.js';
+import type { ModelMessage, ModelResponse, ModelToolCall, ModelToolDefinition } from './model-gateway.js';
 import type { TaskContract, ErrorRecord, PermissionMode } from './contracts.js';
 import { z } from 'zod';
 import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
@@ -34,9 +35,12 @@ function isModelSettingsSave(message: unknown): message is { type: 'settings_sav
   const candidate = message as { type?: unknown; payload?: Partial<ModelSettingsInput> };
   return candidate.type === 'settings_save' && typeof candidate.payload?.endpoint === 'string' && typeof candidate.payload?.model === 'string' && typeof candidate.payload?.tokens === 'string';
 }
-import { createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
+import { createEditFileTool, createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
 import { createWebFetchTool, createWebSearchTool } from './web-tools.js';
 import { LOAD_SKILL_TOOL_DEFINITION, registerLoadSkillTool } from './skill-tool.js';
+import { CodeIndex, createSymbolSearchTool } from './code-index.js';
+import { paramsForModel, ConfigWatcher } from './config.js';
+import { Telemetry } from './telemetry.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
@@ -55,6 +59,8 @@ export interface RuntimeTaskRequest {
   tools?: readonly ModelToolDefinition[];
   handoff?: { completed_steps?: string[]; decisions_and_rationale?: { decision: string; reason: string }[]; next_steps?: string[]; active_mcp_servers?: string[]; deferred_tool_subset?: string[]; mrtr_pending?: boolean; human_modified_files?: string[] };
   extension?: { github_url: string; install_root?: string };
+  /** Continues an `interrupted` task from its last checkpoint instead of starting a new one. */
+  resume_task_id?: string;
 }
 
 export interface RuntimeChatRequest {
@@ -89,7 +95,14 @@ const WRITE_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     parameters: { type: 'object', additionalProperties: false, properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
   },
 };
-const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
+const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'edit_file',
+    description: 'Replace one exact text span in a UTF-8 workspace file. old_string must match exactly once in the file (include enough surrounding lines to make it unique). Prefer this over write_file for changing part of an existing file.',
+    parameters: { type: 'object', additionalProperties: false, properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] },
+  },
+};const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
   {
     type: 'function',
     function: {
@@ -107,6 +120,7 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     },
   },
   WRITE_FILE_TOOL_DEFINITION,
+  EDIT_FILE_TOOL_DEFINITION,
   {
     type: 'function',
     function: {
@@ -154,7 +168,7 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
 ];
 
 const READ_ONLY_SUBAGENT_TOOLS = new Set(['read_file', 'list_dir', 'memory_recall']);
-const WRITE_SUBAGENT_TOOLS = new Set(['read_file', 'list_dir', 'write_file', 'memory_recall']);
+const WRITE_SUBAGENT_TOOLS = new Set(['read_file', 'list_dir', 'write_file', 'edit_file', 'memory_recall']);
 const SUBAGENT_TOOL_NAMES = new Set(['delegate_read', 'delegate_write', 'delegate_task']);
 
 /**
@@ -326,6 +340,11 @@ function isWorkspaceRequest(message: unknown): message is WorkspaceRequest {
   return type === 'folder_pick' || type === 'fs_list' || type === 'fs_read' || type === 'term_exec' || type === 'skill_list' || type === 'skill_read' || type === 'skill_save' || type === 'skill_delete' || type === 'memory_read' || type === 'memory_save' || type === 'deep_memory_list' || type === 'deep_memory_delete';
 }
 
+/** Tool names from HIERO_HITL_TOOLS (comma-separated) that always pause for approval outside auto mode. */
+export function hitlBreakpointsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.HIERO_HITL_TOOLS ?? '').split(',').map((name) => name.trim()).filter((name) => name.length > 0);
+}
+
 export class HieroRuntime {
   private readonly machine = new AgentStateMachine();
   private gateway: ModelGateway;
@@ -334,7 +353,10 @@ export class HieroRuntime {
   private readonly systemAgent = new SystemAgentClient();
   private readonly capabilityRouter = new CapabilityRouter();
   private readonly approvals: ApprovalBroker;
-  private readonly writeSnapshots = new WriteSnapshotStore();
+  private readonly writeSnapshots = new WriteSnapshotStore(join(homedir(), '.hiero', 'write-snapshots.json'));
+  private readonly codeIndexes = new Map<string, CodeIndex>();
+  private readonly configWatcher = new ConfigWatcher({ home: homedir() });
+  private readonly telemetry = new Telemetry(this.configWatcher.current().logging.file);
   private readonly activeChats = new Map<string, AbortController>();
   private readonly chatRuns = new Map<string, ChatRunBuffer>();
   private readonly stateStore: StateStore;
@@ -431,11 +453,17 @@ export class HieroRuntime {
     const embeddingConfig = embeddingConfigFromEnv();
     setDeepMemoryEmbedder(embeddingConfig ? createEmbedder(embeddingConfig) : undefined);
     const maxTokens = Number.parseInt(process.env.HIERO_LLM_MAX_TOKENS ?? '', 10);
-    return new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? ''), undefined, Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : undefined), tokens);
+    const transport = new OpenAICompatibleTransport(
+      normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? ''),
+      undefined,
+      Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : undefined,
+      (model) => paramsForModel(this.configWatcher.current(), model),
+    );
+    return new ModelGateway(transport, tokens, undefined, undefined, undefined, (event) => this.telemetry.record({ name: 'model.call', ...event }));
   }
 
   /** Summarizes older history with HIERO_COMPACT_MODEL (a cheap or local model) when set, otherwise the main model. */
-  private createCompactor(keepRecent = 6): ContextCompactor {
+  private createCompactor(keepRecent = DEFAULT_KEEP_RECENT): ContextCompactor {
     const compactModel = process.env.HIERO_COMPACT_MODEL || undefined;
     return new ContextCompactor(async (task, transcript) => {
       const summaryTask: TaskContract = { ...task, model_config: { preferred_model: compactModel ?? task.model_config.preferred_model, fallback_chain: [] } };
@@ -482,7 +510,7 @@ export class HieroRuntime {
      const tools = chatToolDefinitions(normalizeSubagentSettings(undefined));
      const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
      const beforeTokens = estimateTokens(messages, tools);
-     const compacted = await this.createCompactor(1).compact(task, messages);
+     const compacted = await this.createCompactor().compact(task, messages);
      const summaryMessage = compacted[1];
      if (compacted.length === messages.length || summaryMessage?.role !== 'user' || !summaryMessage.content.startsWith(COMPACT_SUMMARY_PREFIX)) {
        throw new Error('历史太短，没有可压缩的内容。');
@@ -507,13 +535,29 @@ export class HieroRuntime {
     if (!decision.approved) throw new Error('操作员拒绝了该技能修改，或审批已超时。');
   }
 
-  private createWorkflow(workspacePath: string = process.cwd()): AgentWorkflow {
+  /** One code index per workspace, built lazily and refreshed on demand. */
+  private codeIndexFor(workspacePath: string): CodeIndex {
+    let index = this.codeIndexes.get(workspacePath);
+    if (!index) {
+      index = new CodeIndex(workspacePath);
+      this.codeIndexes.set(workspacePath, index);
+    }
+    return index;
+  }
+
+  private createWorkflow(workspacePath: string = process.cwd(), extra: Pick<WorkflowOptions, 'onCheckpoint' | 'resume'> = {}): AgentWorkflow {
+    // Per-step Verify is opt-in (HIERO_STEP_VERIFY=1) because each run starts a sandbox container.
     const tools = new ToolGateway();
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
+    tools.register(createEditFileTool(workspacePath, this.writeSnapshots));
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
+    tools.setBreakpoints(hitlBreakpointsFromEnv());
     return new AgentWorkflow(this.machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter, 0.8, this.createCompactor()), (to, verified) => this.runtime.transition(to, verified), (document) => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document }), {
       useDagPlan: true,
+      stepVerify: process.env.HIERO_STEP_VERIFY === '1',
+      ...extra,
       onVerification: (result) => this.runtime.broadcast({ type: 'VERIFY_RESULT', payload: result }),
+      onDagTask: (event) => this.runtime.broadcast({ type: 'DAG_TASK', payload: event }),
       rewind: async () => {
         const result = await this.writeSnapshots.rollback();
         if (result.skipped.length > 0) this.runtime.broadcast({ type: 'ERROR', payload: humanModifiedWarning(result.skipped).record });
@@ -690,24 +734,42 @@ export class HieroRuntime {
         emit({ type: 'CHAT_RESET', payload: { request_id: request.request_id } });
         messages.push({ role: 'assistant', content: response.content, tool_calls: response.tool_calls });
         let delegatedThisTurn = 0;
-        for (const call of response.tool_calls) {
-          if (signal.aborted) return;
+        // Quota is checked in call order, so the per-turn cap is the same whether or not the delegations run concurrently.
+        const planned = response.tool_calls.map((call) => {
           const isDelegate = SUBAGENT_TOOL_NAMES.has(call.function.name);
-          let result: string;
-          const endToolCall = trace.begin(isDelegate ? 'subagent_call' : 'tool_call', call.function.name, summarizeForTrace(call.function.arguments));
-          if (isDelegate && !canDelegate(subagent, delegatedThisTurn, delegatedChatTotal)) {
-            result = `子代理调用被限制：每轮最多 ${subagent.maxConcurrent} 个，每次聊天最多 ${subagent.maxPerChat} 个。请直接回答或减少委派。`;
-          } else if (isDelegate) {
+          const allowed = !isDelegate || canDelegate(subagent, delegatedThisTurn, delegatedChatTotal);
+          if (isDelegate && allowed) {
             delegatedThisTurn += 1;
             delegatedChatTotal += 1;
+          }
+          return { call, isDelegate, allowed };
+        });
+        const runCall = async (call: ModelToolCall, isDelegate: boolean, allowed: boolean): Promise<string> => {
+          if (isDelegate && !allowed) {
+            return `子代理调用被限制：每轮最多 ${subagent.maxConcurrent} 个，每次聊天最多 ${subagent.maxPerChat} 个。请直接回答或减少委派。`;
+          }
+          const endToolCall = trace.begin(isDelegate ? 'subagent_call' : 'tool_call', call.function.name, summarizeForTrace(call.function.arguments));
+          let result: string;
+          if (isDelegate) {
             const mode = call.function.name === 'delegate_task' ? 'general' : call.function.name === 'delegate_write' ? 'write' : 'read';
             result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent);
           } else {
             result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode);
           }
-          toolRuns += 1;
           endToolCall({ ok: !isToolErrorResult(result), detail: summarizeForTrace(result) });
           sendTrace();
+          return result;
+        };
+        // Delegations run concurrently (bounded by maxConcurrent per turn). Other tools stay serial to avoid racing on the shared workspace.
+        const delegated = planned.filter((item) => item.isDelegate);
+        const delegatedResults = new Map<string, string>();
+        await Promise.all(delegated.map(async ({ call, allowed }) => {
+          delegatedResults.set(call.id, await runCall(call, true, allowed));
+        }));
+        for (const { call, isDelegate, allowed } of planned) {
+          if (signal.aborted) return;
+          const result = isDelegate ? delegatedResults.get(call.id) ?? '' : await runCall(call, false, allowed);
+          toolRuns += 1;
           messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: result });
           emit({ type: 'CHAT_TOOL', payload: { request_id: request.request_id, name: call.function.name, arguments: call.function.arguments, result } });
         }
@@ -752,9 +814,11 @@ export class HieroRuntime {
     tools.register(createReadFileTool(workspacePath));
     tools.register(createListDirTool(workspacePath));
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
+    tools.register(createEditFileTool(workspacePath, this.writeSnapshots));
     tools.register(createWebSearchTool(process.env.HIERO_BRAVE_API_KEY));
     tools.register(createWebFetchTool());
     registerLoadSkillTool(tools, this.capabilityRouter);
+    tools.register(createSymbolSearchTool(this.codeIndexFor(workspacePath)));
     tools.register({
       name: 'memory_recall',
       inputSchema: z.object({ query: z.string().default('') }),
@@ -785,6 +849,7 @@ export class HieroRuntime {
       },
     });
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
+    tools.setBreakpoints(hitlBreakpointsFromEnv());
     return tools;
   }
 
@@ -798,8 +863,8 @@ export class HieroRuntime {
       const goal = typeof args.task === 'string' ? args.task.trim() : '';
       const toolName = mode === 'write' ? 'delegate_write' : mode === 'general' ? 'delegate_task' : 'delegate_read';
       if (!goal) return JSON.stringify({ error: `${toolName} requires a non-empty task.` });
-      // A general sub-agent can reach external tools, so the operator approves the whole delegation outside auto mode.
-      if (mode === 'general' && task.permission_mode !== 'auto') {
+      // General and write sub-agents can change files or reach external tools, so the operator approves the whole delegation outside auto mode.
+      if ((mode === 'general' || mode === 'write') && task.permission_mode !== 'auto') {
         const decision = await this.requestToolApproval(toolName, { task: goal, tools: args.tools });
         if (!decision.approved) return JSON.stringify({ error: `${toolName} was denied by the operator.` });
       }
@@ -838,8 +903,11 @@ export class HieroRuntime {
     }
     if (!message.goal?.trim()) return;
     try {
+      const resumable = message.resume_task_id ? this.stateStore.getTask(message.resume_task_id) : undefined;
+      const checkpoint = resumable?.status === 'interrupted' ? this.stateStore.latestCheckpoint(resumable.task_id) : undefined;
+      if (message.resume_task_id && !checkpoint) throw new Error(`Task ${message.resume_task_id} has no checkpoint to resume from.`);
       const task: TaskContract = {
-        task_id: message.task?.task_id ?? randomUUID(),
+        task_id: checkpoint && resumable ? resumable.task_id : message.task?.task_id ?? randomUUID(),
         workspace_path: resolveChatWorkspace(message.task?.workspace_path),
         model_config: message.task?.model_config ?? { preferred_model: process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna', fallback_chain: [] },
         permission_mode: message.task?.permission_mode ?? 'standard',
@@ -854,12 +922,18 @@ export class HieroRuntime {
         this.runtime.completeState(AgentState.Handoff);
         return;
       }
+      const goal = resumable ? resumable.goal : message.goal;
       this.machine.beginTask();
       this.writeSnapshots.clear();
       this.currentTaskId = task.task_id;
-      this.stateStore.startTask(task.task_id, task.workspace_path, message.goal);
+      if (checkpoint) this.stateStore.resumeTask(task.task_id);
+      else this.stateStore.startTask(task.task_id, task.workspace_path, goal);
       const before = await snapshotTextFiles(task.workspace_path);
-      const outcome = await this.createWorkflow(task.workspace_path).run(task, message.goal, [WRITE_FILE_TOOL_DEFINITION, ...(message.tools ?? [])]);
+      const workflow = this.createWorkflow(task.workspace_path, {
+        onCheckpoint: (messages, evidence) => this.stateStore.saveCheckpoint(task.task_id, messages, evidence),
+        ...(checkpoint ? { resume: checkpoint } : {}),
+      });
+      const outcome = await workflow.run(task, goal, [WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION, ...(message.tools ?? [])]);
       if ('handoff' in outcome) {
         this.runtime.completeState(AgentState.Handoff);
         this.stateStore.finishTask(task.task_id, 'completed');

@@ -23,9 +23,15 @@ export type ApprovalHook = (toolName: string, input: unknown) => Promise<{ appro
 export class ToolGateway {
   private readonly tools = new Map<string, RegisteredTool<unknown, unknown>>();
   private approver: ApprovalHook | undefined;
+  private breakpoints: ReadonlySet<string> = new Set();
 
   public setApprover(approver: ApprovalHook | undefined): void {
     this.approver = approver;
+  }
+
+  /** Tools that always pause for approval outside `auto` mode, whatever their effect (human-in-the-loop breakpoints). */
+  public setBreakpoints(toolNames: Iterable<string>): void {
+    this.breakpoints = new Set(toolNames);
   }
 
   public register<TInput, TResult>(tool: RegisteredTool<TInput, TResult>): void {
@@ -56,10 +62,11 @@ export class ToolGateway {
 
     const needsApproval = tool.networkAccess === true
       || (tool.irreversible === true && (tool.effect ?? 'external') === 'external')
-      || (tool.irreversible === true && permissionMode === 'strict');
+      || (tool.irreversible === true && permissionMode === 'strict')
+      || this.breakpoints.has(toolName);
     if (needsApproval && permissionMode !== 'auto') {
       if (!this.approver) {
-        throw error('GOV-001', 'blocker', `Tool '${toolName}' requires approval for irreversible effects.`, 'Obtain human approval or use an allowed permission mode.');
+        throw error('GOV-001', 'blocker', `Tool '${toolName}' requires approval${this.breakpoints.has(toolName) ? ' (breakpoint)' : ' for irreversible effects'}.`, 'Obtain human approval or use an allowed permission mode.');
       }
       const decision = await this.approver(toolName, parsed.data);
       if (!decision.approved) {

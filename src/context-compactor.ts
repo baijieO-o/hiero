@@ -5,9 +5,13 @@ export type Summarizer = (task: TaskContract, transcript: string) => Promise<str
 
 export const COMPACT_SUMMARY_PREFIX = '[Compacted history]';
 
+/** Recent turns kept verbatim. Manual and automatic compaction share this so both ends agree. */
+export const DEFAULT_KEEP_RECENT = 6;
+
 const SUMMARY_INSTRUCTION = [
   'Summarize the earlier conversation for an agent that will continue the task.',
   'Use these headings: 目标 (goal), 已完成 (done), 未完成或失败 (open or failed), 关键决定与原因 (decisions), 下一步 (next steps).',
+  'If the conversation starts with an earlier summary, merge it into the new one so the result is a single rolling summary.',
   'Keep file paths, identifiers, and error messages exact. Do not invent facts.',
 ].join('\n');
 
@@ -20,7 +24,7 @@ function renderTranscript(messages: readonly ModelMessage[]): string {
  * Returns the input unchanged when there is nothing old enough to compact.
  */
 export class ContextCompactor {
-  public constructor(private readonly summarize: Summarizer, private readonly keepRecent = 6) {}
+  public constructor(private readonly summarize: Summarizer, private readonly keepRecent = DEFAULT_KEEP_RECENT) {}
 
   public async compact(task: TaskContract, messages: readonly ModelMessage[]): Promise<ModelMessage[]> {
     const head = messages[0]?.role === 'system' ? [messages[0]] : [];

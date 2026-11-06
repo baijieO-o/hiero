@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { error, HieroError, type TaskContract } from './contracts.js';
+import type { ModelParams } from './config.js';
 
 export interface ModelMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -72,6 +73,7 @@ export class ModelGateway {
     private readonly now: () => number = Date.now,
     private readonly cooldownMs = 60_000,
     private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void> = delay,
+    private readonly onCall?: (event: { model: string; ok: boolean; inputTokens?: number; outputTokens?: number }) => void,
   ) {
     this.tokens = tokens.map((token) => ({ token, cooldownUntil: 0, retired: false }));
   }
@@ -108,8 +110,11 @@ export class ModelGateway {
       attempted += 1;
       try {
         const modelRequest: ModelRequest = { prompt: request.prompt, model: selectedModel, ...(request.messages ? { messages: request.messages } : {}), ...(request.tools ? { tools: request.tools } : {}), ...(request.onDelta ? { onDelta: request.onDelta } : {}), ...(request.signal ? { signal: request.signal } : {}) };
-        return await this.transport.complete(modelRequest, tokenState.token);
+        const response = await this.transport.complete(modelRequest, tokenState.token);
+        this.onCall?.({ model: selectedModel, ok: true, ...(response.usage?.input_tokens !== undefined ? { inputTokens: response.usage.input_tokens } : {}), ...(response.usage?.output_tokens !== undefined ? { outputTokens: response.usage.output_tokens } : {}) });
+        return response;
       } catch (cause) {
+        this.onCall?.({ model: selectedModel, ok: false });
         if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
         if (cause instanceof HieroError && cause.record.code === 'MOD-007') throw cause;
         const status = statusCode(cause);
@@ -220,7 +225,23 @@ function toWireMessage(message: ModelMessage): Record<string, unknown> {
 }
 
 export class OpenAICompatibleTransport implements ModelTransport {
-  public constructor(private readonly endpoint: string, private readonly timeoutMs = 120_000, private readonly maxTokens?: number) {}
+  public constructor(
+    private readonly endpoint: string,
+    private readonly timeoutMs = 120_000,
+    private readonly maxTokens?: number,
+    private readonly paramsFor: (model: string | undefined) => ModelParams = () => ({}),
+  ) {}
+
+  /** Per-model params from config win over the env-level max token default. */
+  private requestParams(model: string | undefined): ModelParams {
+    const configured = this.paramsFor(model);
+    const maxTokens = configured.max_tokens ?? this.maxTokens;
+    return {
+      ...(configured.temperature !== undefined ? { temperature: configured.temperature } : {}),
+      ...(configured.top_p !== undefined ? { top_p: configured.top_p } : {}),
+      ...(maxTokens ? { max_tokens: maxTokens } : {}),
+    };
+  }
 
   public async complete(request: ModelRequest, token: string): Promise<ModelResponse> {
     const controller = new AbortController();
@@ -249,7 +270,7 @@ export class OpenAICompatibleTransport implements ModelTransport {
         body: JSON.stringify({
           model: request.model,
           messages: (request.messages ?? [{ role: 'user', content: request.prompt }]).map(toWireMessage),
-          ...(this.maxTokens ? { max_tokens: this.maxTokens } : {}),
+          ...this.requestParams(request.model),
           ...(request.tools ? { tools: request.tools } : {}),
           ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}),
         }),

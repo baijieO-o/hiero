@@ -434,7 +434,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     if (!summary) return;
     updateConversation(pending.conversationId, (conv) => {
       // The summary replaces everything up to the current end of the visible history; the divider marks where it happened.
-      // Manual /compact keeps only the latest message unsummarized (backend createCompactor(1)); automatic compaction keeps 6.
+      // The backend keeps the last KEEP_RECENT_MESSAGES messages verbatim; the summary covers the rest.
       const upTo = compactionBoundary(conv.messages);
       const divider: ChatMessage = { role: 'assistant', content: '', compactedMarker: true, completedAt: Date.now() };
       return { ...conv, compactedSummary: summary, compactedUpTo: upTo, messages: insertDivider(conv.messages, upTo, divider), updatedAt: Date.now() };

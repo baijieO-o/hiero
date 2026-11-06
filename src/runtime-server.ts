@@ -16,6 +16,7 @@ export type RuntimeEvent =
   | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
   | { type: 'VERIFY_RESULT'; payload: VerificationResult }
+  | { type: 'DAG_TASK'; payload: { task_id: string; goal: string; read_only: boolean; status: 'running' | 'completed' | 'failed'; error?: string } }
   | { type: 'REWIND_RESULT'; payload: { restored: string[]; skipped: string[] } }
   | { type: 'EXTENSION_READY'; payload: { request_id: string; plugin_path: string; mcp_config_path: string } }
   | { type: 'ERROR'; payload: ErrorRecord }

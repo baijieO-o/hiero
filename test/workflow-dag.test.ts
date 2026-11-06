@@ -52,6 +52,62 @@ test('a DAG plan runs dependencies first and passes their output to dependents',
   }
 });
 
+test('DAG tasks run with the read-only guard only when the plan marks them read_only', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'hiero-dag-'));
+  try {
+    const plan = JSON.stringify({ tasks: [
+      { id: 'scan', goal: 'scan files', depends_on: [], read_only: true },
+      { id: 'edit', goal: 'edit files', depends_on: ['scan'], read_only: false },
+    ] });
+    const readOnlyFlags: Record<string, boolean | undefined> = {};
+    const executor = {
+      planWithCapabilities: async () => ({ response: { content: plan }, tools: [] }),
+      exec: async (_task: TaskContract, goal: string, _tools: unknown, options: { readOnly?: boolean } = {}): Promise<ReActResult> => {
+        readOnlyFlags[goal.split('\n')[0] ?? goal] = options.readOnly;
+        return result('out');
+      },
+    } as unknown as AgentExecutor;
+    const workflow = new AgentWorkflow(new AgentStateMachine(), executor, undefined, undefined, { useDagPlan: true, verify: async () => ({ verified: true, checks: [] }) });
+    await workflow.run(task(workspace), 'goal');
+    assert.deepEqual(readOnlyFlags, { 'scan files': true, 'edit files': false });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('DAG task events report running then completed for each task, and failed when a task throws', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'hiero-dag-'));
+  try {
+    const plan = JSON.stringify({ tasks: [
+      { id: 'ok', goal: 'fine', depends_on: [], read_only: true },
+      { id: 'bad', goal: 'broken', depends_on: ['ok'], read_only: false },
+    ] });
+    const events: Array<{ task_id: string; status: string }> = [];
+    const executor = {
+      planWithCapabilities: async () => ({ response: { content: plan }, tools: [] }),
+      exec: async (_task: TaskContract, goal: string): Promise<ReActResult> => {
+        if (goal.startsWith('broken')) throw new Error('boom');
+        return result('ok-out');
+      },
+    } as unknown as AgentExecutor;
+    const workflow = new AgentWorkflow(new AgentStateMachine(), executor, undefined, undefined, {
+      useDagPlan: true,
+      maxRetries: 0,
+      verify: async () => ({ verified: true, checks: [] }),
+      onDagTask: (event) => events.push({ task_id: event.task_id, status: event.status }),
+    });
+    await workflow.run(task(workspace), 'goal').catch(() => undefined);
+    assert.deepEqual(events, [
+      { task_id: 'ok', status: 'running' },
+      { task_id: 'ok', status: 'completed' },
+      { task_id: 'bad', status: 'running' },
+      { task_id: 'bad', status: 'failed' },
+    ]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('a plan that is not a valid DAG falls back to a single linear Exec', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'hiero-dag-'));
   try {

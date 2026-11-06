@@ -9,8 +9,19 @@ import type { CapabilityRouter } from './capability-router.js';
 import type { ContextCompactor } from './context-compactor.js';
 
 const searchToolsDefinition: ModelToolDefinition = { type: 'function', function: { name: 'search_tools', description: 'Find available tools by capability. Full schemas are returned only for matching tools.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } };
+/** Tools that never change workspace or memory state; the only ones a read-only DAG task may call. */
+export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['read_file', 'list_dir', 'memory_recall']);
 export interface ReActResult { response: ModelResponse; evidence: EvidenceRecord[]; messages: ModelMessage[]; }
 export interface PlanResult { response: ModelResponse; tools: readonly ModelToolDefinition[]; }
+export interface ExecOptions {
+  readOnly?: boolean;
+  /** Called after each tool-call batch with the full history so the run can resume after a restart. */
+  onCheckpoint?: ((messages: readonly ModelMessage[], evidence: readonly EvidenceRecord[]) => void | Promise<void>) | undefined;
+  /** Runs after each tool-call batch. A returned string is fed back to the model as a user message. */
+  onStep?: ((evidence: readonly EvidenceRecord[]) => string | undefined | Promise<string | undefined>) | undefined;
+  /** Continues a previously checkpointed run instead of starting from the goal. */
+  resume?: { messages: readonly unknown[]; evidence: readonly unknown[] };
+}
 export const DAG_PLAN_INSTRUCTION = 'Reply with only a JSON object of the form {"tasks":[{"id":"short-id","goal":"what to do","depends_on":["ids of prerequisite tasks"],"read_only":true|false}]}. Set read_only to true only for tasks that never write files. Keep independent tasks free of depends_on so they can run in parallel.';
 export class HandoffRequiredError extends Error {
   public constructor(public readonly usedTokens: number) { super(`Context reached the handoff threshold at ${usedTokens} tokens.`); this.name = 'HandoffRequiredError'; }
@@ -59,10 +70,14 @@ export class AgentExecutor {
     if (!query) throw error('MOD-004', 'blocker', 'search_tools requires a query.', 'Provide a non-empty capability query.');
     return { response, tools: [...tools, ...await this.capabilityRouter.registerTools(this.toolGateway, query)] };
   }
-  public async exec(task: TaskContract, goal: string, tools: readonly ModelToolDefinition[] = []): Promise<ReActResult> {
-    const messages: ModelMessage[] = [{ role: 'user', content: goal }];
-    const evidence: EvidenceRecord[] = [];
+  /** `readOnly` rejects any tool call whose name is not in `tools`'s read-only subset (see READ_ONLY_TOOL_NAMES). */
+  public async exec(task: TaskContract, goal: string, tools: readonly ModelToolDefinition[] = [], options: ExecOptions = {}): Promise<ReActResult> {
+    const messages: ModelMessage[] = options.resume ? [...(options.resume.messages as ModelMessage[])] : [{ role: 'user', content: goal }];
+    const evidence: EvidenceRecord[] = options.resume ? [...(options.resume.evidence as EvidenceRecord[])] : [];
     const startedAt = Date.now();
+    // Tool calls already executed before a resume; they are replayed from evidence instead of re-run.
+    const completedRecords = new Map<string, EvidenceRecord>();
+    for (const record of evidence) completedRecords.set(record.intent_id, record);
     let lastSignature = '';
     let repeatCount = 0;
     for (let turn = 0; turn < this.maxTurns; turn += 1) {
@@ -86,10 +101,23 @@ export class AgentExecutor {
         if (repeatCount >= MAX_REPEATED_CALLS) {
           throw error('MOD-005', 'blocker', `Tool '${call.function.name}' was called ${repeatCount} times in a row with identical arguments.`, 'Change the arguments or approach instead of repeating the same call.');
         }
+        const replay = call.id ? completedRecords.get(call.id) : undefined;
+        if (replay) {
+          messages.push({ role: 'tool', content: JSON.stringify(replay), tool_call_id: call.id, name: call.function.name });
+          continue;
+        }
+        if (options.readOnly && !READ_ONLY_TOOL_NAMES.has(call.function.name)) {
+          messages.push({ role: 'tool', content: JSON.stringify({ error: `Tool '${call.function.name}' is not allowed in a read-only task.` }), tool_call_id: call.id, name: call.function.name });
+          continue;
+        }
         const record = await this.toolGateway.execute(call.function.name, args, call.id || randomUUID(), task.permission_mode);
         evidence.push(record);
         messages.push({ role: 'tool', content: JSON.stringify(record), tool_call_id: call.id, name: call.function.name });
+        completedRecords.set(record.intent_id, record);
+        await options.onCheckpoint?.(messages, evidence);
       }
+      const stepFeedback = await options.onStep?.(evidence);
+      if (stepFeedback) messages.push({ role: 'user', content: stepFeedback });
     }
     throw error('MOD-004', 'blocker', 'Model exceeded the maximum ReAct turns.', 'Reduce tool-call loops or increase the execution limit.');
   }

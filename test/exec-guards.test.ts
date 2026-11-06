@@ -23,6 +23,15 @@ function echoTools(): ToolGateway {
   return tools;
 }
 
+test('read-only exec rejects tools outside the read-only set without running them', async () => {
+  const gateway = scriptedGateway([toolCallResponse('{"value":"x"}'), { model: 'mock', token_id: 't', content: 'done' } as unknown as ModelResponse]);
+  const result = await new AgentExecutor(gateway, echoTools(), 20).exec(baseTask, 'read only', [], { readOnly: true });
+  assert.equal(result.evidence.length, 0);
+  const rejected = result.messages.find((message) => message.role === 'tool');
+  assert.match(String(rejected?.content), /not allowed in a read-only task/);
+  assert.equal(result.response.content, 'done');
+});
+
 test('stops with MOD-005 when the same tool call repeats three times in a row', async () => {
   const gateway = scriptedGateway([toolCallResponse('{"value":"x"}')]);
   await assert.rejects(new AgentExecutor(gateway, echoTools(), 20).exec(baseTask, 'loop'), /MOD-005/);

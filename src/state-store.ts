@@ -51,6 +51,14 @@ export class StateStore {
         to_state TEXT NOT NULL,
         at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS checkpoints (
+        task_id TEXT NOT NULL REFERENCES tasks(task_id),
+        seq INTEGER NOT NULL,
+        messages_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (task_id, seq)
+      );
     `);
   }
 
@@ -60,6 +68,11 @@ export class StateStore {
       VALUES (?, ?, ?, 'running', 'Plan', ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET status = 'running', updated_at = excluded.updated_at`)
       .run(taskId, workspacePath, goal, now, now);
+  }
+
+  /** Marks an interrupted task as running again, keeping its original goal and workspace. */
+  public resumeTask(taskId: string): void {
+    this.db.prepare(`UPDATE tasks SET status = 'running', updated_at = ? WHERE task_id = ?`).run(new Date().toISOString(), taskId);
   }
 
   public recordTransition(taskId: string, fromState: string | null, toState: string): void {
@@ -77,6 +90,22 @@ export class StateStore {
     const rows = this.db.prepare(`SELECT task_id FROM tasks WHERE status = 'running'`).all() as { task_id: string }[];
     this.db.prepare(`UPDATE tasks SET status = 'interrupted', updated_at = ? WHERE status = 'running'`).run(new Date().toISOString());
     return rows.map((row) => row.task_id);
+  }
+
+  /** Saves the message history after one completed tool-call batch so an interrupted task can resume from it. */
+  public saveCheckpoint(taskId: string, messages: readonly unknown[], evidence: readonly unknown[]): void {
+    const { seq } = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM checkpoints WHERE task_id = ?').get(taskId) as unknown as { seq: number };
+    this.db.prepare('INSERT INTO checkpoints (task_id, seq, messages_json, evidence_json, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(taskId, seq + 1, JSON.stringify(messages), JSON.stringify(evidence), new Date().toISOString());
+  }
+
+  public latestCheckpoint(taskId: string): { messages: unknown[]; evidence: unknown[] } | undefined {
+    const row = this.db.prepare('SELECT messages_json, evidence_json FROM checkpoints WHERE task_id = ? ORDER BY seq DESC LIMIT 1').get(taskId) as { messages_json: string; evidence_json: string } | undefined;
+    return row ? { messages: JSON.parse(row.messages_json) as unknown[], evidence: JSON.parse(row.evidence_json) as unknown[] } : undefined;
+  }
+
+  public getTask(taskId: string): TaskRecord | undefined {
+    return this.db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId) as unknown as TaskRecord | undefined;
   }
 
   public listTasks(limit = 50): TaskRecord[] {

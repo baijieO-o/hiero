@@ -192,6 +192,38 @@ test('sends max_tokens only when configured', async () => {
     server.close();
   }
 });
+test('applies per-model params from config and reports each call', async () => {
+  const bodies: any[] = [];
+  const server = createServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    bodies.push(JSON.parse(raw));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 4, completion_tokens: 2 } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  const calls: unknown[] = [];
+  const params = (model: string | undefined) => (model === 'tuned' ? { temperature: 0.4, top_p: 0.8, max_tokens: 64 } : { temperature: 0.1 });
+  try {
+    const transport = new OpenAICompatibleTransport(`http://127.0.0.1:${port}/v1`, undefined, 512, params);
+    const gateway = new ModelGateway(transport, ['token-a'], () => 0, undefined, undefined, (event) => calls.push(event));
+    const taskFor = (model: string): TaskContract => ({ ...task, model_config: { ...task.model_config, preferred_model: model, fallback_chain: [] } });
+    await gateway.complete(taskFor('tuned'), { prompt: 'hi' });
+    await gateway.complete(taskFor('plain'), { prompt: 'hi' });
+    assert.equal(bodies[0].temperature, 0.4);
+    assert.equal(bodies[0].top_p, 0.8);
+    assert.equal(bodies[0].max_tokens, 64);
+    assert.equal(bodies[1].temperature, 0.1);
+    assert.equal('top_p' in bodies[1], false);
+    assert.equal(bodies[1].max_tokens, 512);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], { model: bodies[0].model, ok: true, inputTokens: 4, outputTokens: 2 });
+  } finally {
+    server.close();
+  }
+});
 test('sends image messages as OpenAI multimodal content parts', async () => {
   let body: any;
   const server = createServer(async (req, res) => {

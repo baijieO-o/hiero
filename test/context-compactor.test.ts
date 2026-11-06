@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentExecutor, HandoffRequiredError } from '../src/agent-executor.js';
-import { ContextCompactor, COMPACT_SUMMARY_PREFIX } from '../src/context-compactor.js';
+import { ContextCompactor, COMPACT_SUMMARY_PREFIX, DEFAULT_KEEP_RECENT } from '../src/context-compactor.js';
 import { ModelGateway, type ModelMessage, type ModelResponse, type ModelTransport } from '../src/model-gateway.js';
 import { ToolGateway } from '../src/tool-gateway.js';
 import { z } from 'zod';
@@ -29,6 +29,26 @@ test('replaces older turns with one summary and keeps recent turns verbatim', as
   assert.equal(seen.length, 1);
   assert.match(seen[0] ?? '', /user: u1/);
   assert.doesNotMatch(seen[0] ?? '', /u2/);
+});
+
+test('rolling compaction feeds the previous summary back into the next summary', async () => {
+  const seen: string[] = [];
+  const compactor = new ContextCompactor(async (_task, transcript) => { seen.push(transcript); return 'rolled summary'; }, 1);
+  const first: ModelMessage[] = [
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'u2' },
+  ];
+  const once = await compactor.compact(task, first);
+  const next: ModelMessage[] = [...once, { role: 'assistant', content: 'a2' }, { role: 'user', content: 'u3' }];
+  const twice = await compactor.compact(task, next);
+  assert.equal(twice[0]?.content, `${COMPACT_SUMMARY_PREFIX}\nrolled summary`);
+  assert.match(seen[1] ?? '', new RegExp(`${COMPACT_SUMMARY_PREFIX}`));
+  assert.match(seen[1] ?? '', /rolled summary|Compacted history/);
+});
+
+test('default keepRecent is shared with the runtime compaction path', () => {
+  assert.equal(DEFAULT_KEEP_RECENT, 6);
 });
 
 test('does not split an assistant tool_calls message from its tool results', async () => {

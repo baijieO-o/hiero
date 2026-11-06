@@ -121,6 +121,20 @@ function decodeOutput(buffer: Buffer): string {
 }
 
 /**
+ * Builds the docker run arguments. The root filesystem is read-only, and only the workspace bind mount is writable,
+ * so commands can edit project files without being able to change the image or the host outside the workspace.
+ */
+export function dockerRunArgs(hostRoot: string, containerCwd: string, command: string): string[] {
+  return [
+    'run', '--rm', '--network', 'none', '--read-only', '--cap-drop=ALL',
+    '--security-opt=no-new-privileges', '--pids-limit=128', '--memory=512m', '--cpus=1',
+    '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
+    '--mount', `type=bind,source=${hostRoot},target=/workspace`,
+    '--workdir', containerCwd, 'node:22-alpine', 'sh', '-lc', command,
+  ];
+}
+
+/**
  * Runs one shell command in the workspace and returns its combined output.
  * This is a one-shot execution, not an interactive terminal session.
  */
@@ -131,13 +145,7 @@ export function runCommand(root: string, command: string, cwd = '', timeoutMs = 
   return new Promise((resolvePromise) => {
     const chunks: Buffer[] = [];
     let timedOut = false;
-    const child = spawn('docker', [
-      'run', '--rm', '--network', 'none', '--read-only', '--cap-drop=ALL',
-      '--security-opt=no-new-privileges', '--pids-limit=128', '--memory=512m', '--cpus=1',
-      '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
-      '--mount', `type=bind,source=${realpathSync(root)},target=/workspace`,
-      '--workdir', containerCwd, 'node:22-alpine', 'sh', '-lc', command,
-    ], { cwd: directory, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('docker', dockerRunArgs(realpathSync(root), containerCwd, command), { cwd: directory, stdio: ['ignore', 'pipe', 'pipe'] });
     const append = (chunk: Buffer) => {
       chunks.push(chunk);
     };

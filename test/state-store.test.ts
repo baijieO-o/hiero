@@ -46,3 +46,36 @@ test('tasks still running after a restart are marked interrupted', () => {
     restarted.close();
   });
 });
+
+test('checkpoints store the latest message history per task', () => {
+  withFileStore((path) => {
+    const store = new StateStore(path);
+    store.startTask('t-cp', 'D:/ws', 'resume me');
+    assert.equal(store.latestCheckpoint('t-cp'), undefined);
+    store.saveCheckpoint('t-cp', [{ role: 'user', content: 'first' }], []);
+    store.saveCheckpoint('t-cp', [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'second' }], [{ kind: 'x' }]);
+    const latest = store.latestCheckpoint('t-cp');
+    assert.deepEqual(latest?.messages, [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'second' }]);
+    assert.deepEqual(latest?.evidence, [{ kind: 'x' }]);
+    store.close();
+  });
+});
+
+test('an interrupted task can be resumed from its checkpoint without changing its goal', () => {
+  withFileStore((path) => {
+    const first = new StateStore(path);
+    first.startTask('t-resume', 'D:/ws', 'original goal');
+    first.saveCheckpoint('t-resume', [{ role: 'user', content: 'original goal' }], []);
+    first.close();
+
+    const restarted = new StateStore(path);
+    restarted.markRunningAsInterrupted();
+    assert.equal(restarted.getTask('t-resume')?.status, 'interrupted');
+    assert.equal(restarted.getTask('t-resume')?.goal, 'original goal');
+    assert.ok(restarted.latestCheckpoint('t-resume'));
+    restarted.resumeTask('t-resume');
+    assert.equal(restarted.getTask('t-resume')?.status, 'running');
+    assert.equal(restarted.getTask('t-resume')?.goal, 'original goal');
+    restarted.close();
+  });
+});

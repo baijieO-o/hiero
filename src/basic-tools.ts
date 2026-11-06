@@ -76,6 +76,34 @@ export function createListDirTool(workspacePath: string): RegisteredTool<z.infer
   };
 }
 
+export const editFileInput = z.object({
+  path: z.string().min(1),
+  /** Exact text to replace. Must occur exactly once in the file, so the edit is unambiguous. */
+  old_string: z.string().min(1),
+  new_string: z.string(),
+});
+
+/** Applies one exact, unique string replacement. Unlike write_file, it never rewrites unrelated content. */
+export function createEditFileTool(workspacePath: string, snapshots?: WriteSnapshotStore): RegisteredTool<z.infer<typeof editFileInput>, { path: string; replacements: number }> {
+  return {
+    name: 'edit_file',
+    inputSchema: editFileInput,
+    irreversible: true,
+    effect: 'workspace',
+    execute: async ({ path, old_string, new_string }) => {
+      const target = resolveWorkspacePath(workspacePath, path);
+      const current = await readFile(target, 'utf8');
+      const occurrences = current.split(old_string).length - 1;
+      if (occurrences === 0) throw new Error(`old_string was not found in "${path}". Read the file and copy the exact text.`);
+      if (occurrences > 1) throw new Error(`old_string matches ${occurrences} places in "${path}". Include more surrounding context so it is unique.`);
+      const next = current.replace(old_string, () => new_string);
+      await writeFile(target, next, 'utf8');
+      snapshots?.recordWrite(target, current, next);
+      return { path: target, replacements: 1 };
+    },
+  };
+}
+
 export function createWriteFileTool(workspacePath: string, snapshots?: WriteSnapshotStore): RegisteredTool<z.infer<typeof writeFileInput>, { path: string; bytes: number }> {
   return {
     name: 'write_file',
