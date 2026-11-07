@@ -3,6 +3,14 @@
   "version": "0.2.3",
   "description": "Hiero: a personal agent workbench with an explicit state machine, objective verification and fail-closed Docker execution.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baijieO-o/hiero.git"
+  },
+  "homepage": "https://github.com/baijieO-o/hiero#readme",
+  "bugs": {
+    "url": "https://github.com/baijieO-o/hiero/issues"
+  },
   "keywords": ["agent", "state-machine", "hiero"],
   "type": "module",
   "bin": {
