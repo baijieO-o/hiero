@@ -1,6 +1,6 @@
 {
   "name": "hiero-agent",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "Hiero: a personal agent workbench with an explicit state machine, objective verification and fail-closed Docker execution.",
   "license": "MIT",
   "keywords": ["agent", "state-machine", "hiero"],
