@@ -308,8 +308,8 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
     <section className="model-config-block">
       <h4>模型管理</h4>
       <label className="settings-field">
-        <span><strong>Model ID</strong><small>默认模型名，例如 gpt-5.6-luna。上下文长度、最大输出、视觉、温度等参数暂未由后端支持，因此不在这里配置。</small></span>
-        <input value={model} onChange={(event) => { setModel(event.target.value); setDirty(true); }} placeholder="gpt-5.6-luna" aria-label="Model ID" />
+        <span><strong>Model ID</strong><small>默认模型名，例如 auto。上下文长度、最大输出、视觉、温度等参数暂未由后端支持，因此不在这里配置。</small></span>
+        <input value={model} onChange={(event) => { setModel(event.target.value); setDirty(true); }} placeholder="auto" aria-label="Model ID" />
       </label>
       <div className="model-config-toolbar">
         <button type="button" className="ghost-button" disabled={modelList.status === 'loading'} onClick={() => onFetchModels({ endpoint, tokens })}>

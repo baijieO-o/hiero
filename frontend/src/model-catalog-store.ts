@@ -1,5 +1,5 @@
 export const MODEL_CATALOG_KEY = 'hiero-model-catalog';
-export const DEFAULT_CHAT_MODEL = 'gpt-5.6-luna';
+export const DEFAULT_CHAT_MODEL = 'auto';
 const DEFAULT_MODEL_KEY = 'hiero-default-model';
 
 export function readStoredModelCatalog(): string[] {

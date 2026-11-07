@@ -496,7 +496,7 @@ export class HieroRuntime {
   /** Summarizes older history on demand. The client keeps the returned summary and drops the messages it covers. */
   private async handleChatCompact(request: ChatCompactRequest, client: WebSocket | undefined): Promise<void> {
    const workspacePath = resolveChatWorkspace(request.workspace);
-   const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna';
+   const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'auto';
    const task: TaskContract = {
      task_id: randomUUID(),
      workspace_path: workspacePath,
@@ -571,7 +571,7 @@ export class HieroRuntime {
     const endpoint = process.env.HIERO_LLM_ENDPOINT ?? '';
     return {
       endpoint,
-      model: process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna',
+      model: process.env.HIERO_LLM_MODEL ?? 'auto',
       token_count: parseTokenList(process.env.HIERO_LLM_TOKENS).length,
     };
   }
@@ -582,7 +582,7 @@ export class HieroRuntime {
    */
   public saveModelSettings(input: ModelSettingsInput, root = process.cwd()): { endpoint: string; model: string; token_count: number } {
     const endpoint = normalizeEndpoint(input.endpoint) || normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? '');
-    const model = input.model.trim() || 'gpt-5.6-luna';
+    const model = input.model.trim() || 'auto';
     const newTokens = parseTokenList(input.tokens);
     const tokens = newTokens.length > 0 ? newTokens : parseTokenList(process.env.HIERO_LLM_TOKENS);
     const values: Record<string, string> = {
@@ -625,7 +625,7 @@ export class HieroRuntime {
   }
 
   public async handleChat(request: RuntimeChatRequest, client?: WebSocket): Promise<void> {
-    const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna';
+    const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'auto';
     const controller = new AbortController();
     this.activeChats.set(request.request_id, controller);
     const run: ChatRunBuffer = { events: [], client, finished: false };
@@ -909,7 +909,7 @@ export class HieroRuntime {
       const task: TaskContract = {
         task_id: checkpoint && resumable ? resumable.task_id : message.task?.task_id ?? randomUUID(),
         workspace_path: resolveChatWorkspace(message.task?.workspace_path),
-        model_config: message.task?.model_config ?? { preferred_model: process.env.HIERO_LLM_MODEL ?? 'gpt-5.6-luna', fallback_chain: [] },
+        model_config: message.task?.model_config ?? { preferred_model: process.env.HIERO_LLM_MODEL ?? 'auto', fallback_chain: [] },
         permission_mode: message.task?.permission_mode ?? 'standard',
         context_mode: message.task?.context_mode ?? 'ephemeral',
         acceptance_criteria: message.task?.acceptance_criteria ?? [],

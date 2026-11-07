@@ -193,3 +193,18 @@ pm test 165/165 通过。
 - 设为默认：settings.tsx 中的按钮会同时写入 .env 的 HIERO_LLM_MODEL。未在浏览器中实测：当前模型列表只有一个模型，按钮不会显示，无法触发。
 - 浏览器验证：页面可加载，控制台无错误，右下角显示 CPU/MEM/GPU 与时间（GPU 显示 —，本机无读数）。未打开 Monaco diff 面板，因此 disposed 修复只是间接验证。
 - 未解决：web_fetch 存在 DNS 重绑定缝隙（先检查 DNS，再由 fetch 二次解析）。
+
+## 交接状态（2026-11-07：八项能力缺口）
+
+- 自主性与断点恢复：每次工具调用前后写检查点（`src/agent-executor.ts`）；中断后按 `intent_id` 重放已完成的调用，不重复执行。Rewind 的文件快照持久化到工作区（`src/write-snapshots.ts`）。端到端断点续跑未验证。
+- 逐步验证：`HIERO_STEP_VERIFY` 开启后，每步工具调用之后执行验证，不再只在任务结束时执行一次。
+- 上下文管理：压缩保留条数前后端统一为 6 条（`src/context-compactor.ts` 的 `DEFAULT_KEEP_RECENT` 与 `frontend/src/compaction.ts` 的 `KEEP_RECENT_MESSAGES`），测试 `test/compaction.test.ts` 已按此重写。滚动摘要未做。
+- 人机协作（HITL）：`src/tool-gateway.ts` 支持按配置的工具名设置断点，命中时触发审批；`auto` 模式跳过审批。
+- 编辑体验：新增 `edit_file`（精确字符串替换，`src/basic-tools.ts`），与快照配合支持回滚。
+- 代码理解：新增 `symbol_search`（`src/code-index.ts`），基于正则的符号级搜索，非语义索引。
+- 沙箱：Docker 工作区挂载改为可写（`dockerRunArgs`，`src/workspace-services.ts`）。本机无 Docker，未做真实容器验证。
+- 多模型与配置：`src/config.ts` 实现 JSON 分层配置（`~/.hiero/config.json` < 工作区 `.hiero/config.json` < 环境变量），模型网关支持按模型调参（`requestParams`）。配置 watcher 目前不监听工作区 `.hiero/config.json`，`logging.file` 不热加载。遥测见 `src/telemetry.ts`。
+- 验证：串行 `node --test --test-concurrency=1 dist/test/*.test.js` 224/224 通过。并行运行偶发失败，应使用串行命令。
+- 未完成：滚动摘要、真实 Docker 运行验证、检查点断点续跑的端到端测试。
+- 模型默认值：代码中的默认模型名由 `gpt-5.6-luna` 替换为 `auto`（仓库公开，避免泄露私人配置）。
+- 发布：npm 上 `hiero-agent` 最新为 0.2.1。仓库中 `v0.2.2` 标签已存在且指向 2026-11-04 的旧提交，因此本次发布版本号需先确认。
