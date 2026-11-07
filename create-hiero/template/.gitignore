@@ -1,0 +1,22 @@
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+hiero-llm.local.ps1
+.env
+
+test/*.js
+test/*.js.map
+test/*.d.ts
+test/*.d.ts.map
+test/*.js
+test/*.js.map
+test/*.d.ts
+test/*.d.ts.map
+.hiero/
+.hiero-backend.*.log
+.fe.*.log
+.server.*.log
+
+# Local runtime memory
+.agent/

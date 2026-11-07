@@ -1,0 +1,26 @@
+{
+  "name": "create-hiero",
+  "version": "0.1.0",
+  "description": "Scaffold a local Hiero personal agent workbench project in the current directory.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baijieO-o/hiero.git"
+  },
+  "homepage": "https://github.com/baijieO-o/hiero#readme",
+  "bugs": {
+    "url": "https://github.com/baijieO-o/hiero/issues"
+  },
+  "keywords": ["create", "scaffold", "hiero", "agent"],
+  "type": "module",
+  "bin": {
+    "create-hiero": "index.js"
+  },
+  "files": [
+    "index.js",
+    "template"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,27 @@
+﻿{
+    "name":  "hiero-local",
+    "version":  "0.2.3",
+    "description":  "Hiero: a personal agent workbench with an explicit state machine, objective verification and fail-closed Docker execution.",
+    "license":  "MIT",
+    "type":  "module",
+    "engines":  {
+                    "node":  "\u003e=22"
+                },
+    "scripts":  {
+                    "build":  "tsc",
+                    "start":  "npm run build \u0026\u0026 node dist/src/server.js",
+                    "test":  "npm run build \u0026\u0026 node --test dist/test/*.test.js",
+                    "dev":  "npm --prefix frontend run dev"
+                },
+    "devDependencies":  {
+                            "@types/node":  "^26.6.6",
+                            "@types/ws":  "^8.18.2",
+                            "typescript":  "^7.0.2"
+                        },
+    "dependencies":  {
+                         "@modelcontextprotocol/sdk":  "^1.32.2",
+                         "ws":  "^8.22.1",
+                         "zod":  "^4.6.7"
+                     },
+    "private":  true
+}
