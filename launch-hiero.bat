@@ -4,19 +4,19 @@ cd /d "%~dp0"
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo 未检测到 Node.js，请先安�?Node.js 22 或更高版本：https://nodejs.org/
+  echo Node.js was not found. Please install Node.js 22 or newer: https://nodejs.org/
   pause
   exit /b 1
 )
 
 if not exist "node_modules\.bin\tsc.cmd" (
-  echo 正在安装后端依赖（首次运行需要几分钟�?..
+  echo Installing backend dependencies. The first run may take a few minutes...
   call npm ci
   if errorlevel 1 goto :fail
 )
 
 if not exist "frontend\node_modules\.bin\vite.cmd" (
-  echo 正在安装前端依赖...
+  echo Installing frontend dependencies...
   call npm ci --prefix frontend
   if errorlevel 1 goto :fail
 )
@@ -41,7 +41,7 @@ exit /b 0
 
 :fail
 echo.
-echo 依赖安装失败，请查看上方错误信息�?
+echo Dependency installation failed. See the error messages above.
 pause
 endlocal
 exit /b 1
