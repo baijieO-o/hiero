@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactElement } from 'react';
+﻿import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactElement } from 'react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { storeDefaultModel } from './model-catalog-store';
 import { buildCustomServer, describeServer, needsEnableConfirmation, type CustomServerInput, type McpServerDraft, type McpTransport } from './mcp-model';
+import { THEME_PRESETS, THEME_VARIABLES, exportTheme, parseThemeFile, sanitizePalette, type ThemePalette } from './theme-model';
 
 type Theme = 'dark' | 'light' | 'system';
 type SendKey = 'enter' | 'mod-enter';
@@ -29,6 +30,9 @@ export interface PreferenceValues {
   animationSpeed: number;
   scrollbarVisibility: ScrollbarVisibility;
   hotEdgeSidebar: boolean;
+  themePreset: string;
+  customPalette: ThemePalette;
+  customCss: string;
 }
 
 type LoaderStyle = 'dots' | 'spinner' | 'pulse' | 'none';
@@ -47,7 +51,21 @@ interface PreferenceField {
   minimum?: number;
   maximum?: number;
   default: PreferenceValues[keyof PreferenceValues];
+  // Rarely-changed settings are folded under「展开高级设置」in their category.
+  advanced?: boolean;
 }
+
+// Sidebar categories. Preference categories map to a schema domain; the rest are custom forms.
+export type SettingsCategoryKey = 'appearance' | 'typography' | 'interaction' | 'motion' | 'subagent' | 'model' | 'mcp';
+export const SETTINGS_CATEGORIES: { key: SettingsCategoryKey; label: string; domain?: string }[] = [
+  { key: 'appearance', label: '外观', domain: '外观' },
+  { key: 'typography', label: '排版', domain: '排版' },
+  { key: 'interaction', label: '交互', domain: '交互' },
+  { key: 'motion', label: '动效', domain: '动效' },
+  { key: 'subagent', label: '子代理' },
+  { key: 'model', label: '模型与网关' },
+  { key: 'mcp', label: 'MCP 服务器' },
+];
 
 // Declarative schema: the form is rendered from this list, so new settings only need a new entry.
 export const PREFERENCE_SCHEMA: PreferenceField[] = [
@@ -55,23 +73,26 @@ export const PREFERENCE_SCHEMA: PreferenceField[] = [
   { key: 'accentColor', domain: '外观', title: '强调色', description: '按钮与高亮颜色', type: 'color', default: DEFAULT_ACCENT },
   { key: 'fontSize', domain: '排版', title: '聊天字号（px）', description: '聊天正文字号', type: 'number', minimum: 12, maximum: 20, default: 14 },
   { key: 'uiFontSize', domain: '排版', title: '界面字号（px）', description: '面板、侧栏等界面文字的基础字号', type: 'number', minimum: 11, maximum: 18, default: 13 },
-  { key: 'bubbleWidth', domain: '排版', title: '消息最大宽度（%）', description: '聊天气泡占聊天区宽度的最大比例', type: 'number', minimum: 40, maximum: 100, default: 78 },
+  { key: 'bubbleWidth', domain: '排版', title: '消息最大宽度（%）', description: '聊天气泡占聊天区宽度的最大比例', type: 'number', minimum: 40, maximum: 100, default: 78, advanced: true },
   { key: 'compact', domain: '外观', title: '紧凑模式', description: '缩小消息之间的间距', type: 'boolean', default: false },
-  { key: 'reduceMotion', domain: '外观', title: '减少动效', description: '关闭过渡动画', type: 'boolean', default: false },
+  { key: 'reduceMotion', domain: '外观', title: '减少动效', description: '关闭过渡动画', type: 'boolean', default: false, advanced: true },
   { key: 'sendKey', domain: '交互', title: '发送快捷键', description: 'Enter 发送，或 Ctrl/Cmd+Enter 发送', type: 'enum', options: [{ value: 'enter', label: 'Enter 发送' }, { value: 'mod-enter', label: 'Ctrl/Cmd+Enter 发送' }], default: 'enter' },
-  { key: 'autoScroll', domain: '交互', title: '流式输出自动吸底', description: '回复生成时自动滚动到底部', type: 'boolean', default: true },
-  { key: 'wrapCode', domain: '交互', title: '代码块自动换行', description: '长代码行换行显示，而不是横向滚动', type: 'boolean', default: false },
+  { key: 'autoScroll', domain: '交互', title: '流式输出自动吸底', description: '回复生成时自动滚动到底部', type: 'boolean', default: true, advanced: true },
+  { key: 'wrapCode', domain: '交互', title: '代码块自动换行', description: '长代码行换行显示，而不是横向滚动', type: 'boolean', default: false, advanced: true },
   { key: 'backgroundImage', domain: '外观', title: '背景图片', description: '图片地址（http(s):// 或 file 可访问的 URL），或上传本地图片；留空则不使用背景图', type: 'text', default: '' },
-  { key: 'backgroundOpacity', domain: '外观', title: '背景透明度（%）', description: '背景图的不透明度，越小越淡', type: 'number', minimum: 5, maximum: 100, default: 35 },
-  { key: 'panelOpacity', domain: '外观', title: '面板不透明度（%）', description: '面板、标签栏、导航和底部栏的不透明度，调低后可透出背景图', type: 'number', minimum: 0, maximum: 100, default: 0 },
-  { key: 'textColor', domain: '外观', title: '文字颜色', description: '界面主要文字颜色，恢复默认请点击「重置」', type: 'color', default: '' },
-  { key: 'panelGradient', domain: '外观', title: '渐变透明', description: '面板背景从上到下渐变为透明（需要面板不透明度低于 100%）', type: 'boolean', default: false },
-  { key: 'panelBlur', domain: '外观', title: '高斯模糊强度（px）', description: '面板背景的模糊半径，0 表示关闭', type: 'number', minimum: 0, maximum: 40, default: 18 },
+  { key: 'backgroundOpacity', domain: '外观', title: '背景透明度（%）', description: '背景图的不透明度，越小越淡', type: 'number', minimum: 5, maximum: 100, default: 35, advanced: true },
+  { key: 'panelOpacity', domain: '外观', title: '面板不透明度（%）', description: '面板、标签栏、导航和底部栏的不透明度，调低后可透出背景图', type: 'number', minimum: 0, maximum: 100, default: 0, advanced: true },
+  { key: 'textColor', domain: '外观', title: '文字颜色', description: '界面主要文字颜色，恢复默认请点击「重置」', type: 'color', default: '', advanced: true },
+  { key: 'panelGradient', domain: '外观', title: '渐变透明', description: '面板背景从上到下渐变为透明（需要面板不透明度低于 100%）', type: 'boolean', default: false, advanced: true },
+  { key: 'panelBlur', domain: '外观', title: '高斯模糊强度（px）', description: '面板背景的模糊半径，0 表示关闭', type: 'number', minimum: 0, maximum: 40, default: 18, advanced: true },
   { key: 'loaderStyle', domain: '动效', title: '加载动画', description: '流式生成中「思考中」的指示器样式', type: 'enum', options: [{ value: 'dots', label: '三点跳动' }, { value: 'spinner', label: '旋转圈' }, { value: 'pulse', label: '脉冲条' }, { value: 'none', label: '无' }], default: 'dots' },
-  { key: 'panelAnimation', domain: '动效', title: '面板动画', description: '面板展开、收起与切换时的过渡效果', type: 'enum', options: [{ value: 'fade', label: '淡入淡出' }, { value: 'slide', label: '滑动' }, { value: 'none', label: '无' }], default: 'fade' },
-  { key: 'animationSpeed', domain: '动效', title: '动画速率（倍率）', description: '1 为默认，大于 1 更快，小于 1 更慢；0 表示关闭动画', type: 'number', minimum: 0, maximum: 3, default: 1 },
+  { key: 'panelAnimation', domain: '动效', title: '面板动画', description: '面板展开、收起与切换时的过渡效果', type: 'enum', options: [{ value: 'fade', label: '淡入淡出' }, { value: 'slide', label: '滑动' }, { value: 'none', label: '无' }], default: 'fade', advanced: true },
+  { key: 'animationSpeed', domain: '动效', title: '动画速率（倍率）', description: '1 为默认，大于 1 更快，小于 1 更慢；0 表示关闭动画', type: 'number', minimum: 0, maximum: 3, default: 1, advanced: true },
   { key: 'scrollbarVisibility', domain: '交互', title: '滚动条显示', description: '始终显示、鼠标悬停时显示，或隐藏（仍可滚动）', type: 'enum', options: [{ value: 'always', label: '始终显示' }, { value: 'hover', label: '悬停时显示' }, { value: 'hidden', label: '隐藏' }], default: 'hover' },
-  { key: 'hotEdgeSidebar', domain: '交互', title: '热边：鼠标靠近左边缘展开侧栏', description: '鼠标移到窗口左边缘时自动展开聊天侧栏，离开后收起', type: 'boolean', default: true },
+  { key: 'hotEdgeSidebar', domain: '交互', title: '热边：鼠标靠近左边缘展开侧栏', description: '鼠标移到窗口左边缘时自动展开聊天侧栏，离开后收起', type: 'boolean', default: true, advanced: true },
+  { key: 'themePreset', domain: '外观', title: '配色预设', description: '内置配色方案，选择后可在「自定义配色」中继续微调', type: 'enum', options: THEME_PRESETS.map((preset) => ({ value: preset.id, label: preset.name })), default: 'default-dark' },
+  { key: 'customPalette', domain: '外观', title: '自定义配色', description: '覆盖预设的颜色变量，留空项使用预设值；支持导入/导出 JSON 主题', type: 'text', default: {}, advanced: true },
+  { key: 'customCss', domain: '外观', title: '自定义 CSS', description: '全局样式覆盖，作用于整个界面，请谨慎使用', type: 'text', default: '', advanced: true },
   ];
 
 const DEFAULT_PREFERENCES = Object.fromEntries(PREFERENCE_SCHEMA.map((field) => [field.key, field.default])) as unknown as PreferenceValues;
@@ -160,6 +181,38 @@ export function applyPreferenceTheme(values: PreferenceValues): void {
   root.dataset.panelAnim = values.panelAnimation;
   root.dataset.scrollbar = values.scrollbarVisibility;
   root.dataset.hotEdge = values.hotEdgeSidebar ? 'on' : 'off';
+  applyThemePalette(root, values);
+  applyCustomCss(values.customCss);
+}
+
+// Clears every theme variable first so switching presets never leaves stale colors behind.
+function applyThemePalette(root: HTMLElement, values: PreferenceValues): void {
+  const preset = THEME_PRESETS.find((item) => item.id === values.themePreset) ?? THEME_PRESETS[0];
+  const merged = { ...preset.palette, ...sanitizePalette(values.customPalette) };
+  // --accent is owned by the accentColor setting, so only the preset's accent is used as a fallback.
+  for (const name of THEME_VARIABLES) {
+    if (name !== '--accent') root.style.removeProperty(name);
+  }
+  for (const [name, value] of Object.entries(merged)) {
+    if (name === '--accent' && values.accentColor !== DEFAULT_ACCENT) continue;
+    root.style.setProperty(name, value);
+  }
+}
+
+const CUSTOM_CSS_STYLE_ID = 'hiero-custom-css';
+
+function applyCustomCss(css: string): void {
+  let style = document.getElementById(CUSTOM_CSS_STYLE_ID) as HTMLStyleElement | null;
+  if (!css.trim()) {
+    style?.remove();
+    return;
+  }
+  if (!style) {
+    style = document.createElement('style');
+    style.id = CUSTOM_CSS_STYLE_ID;
+    document.head.appendChild(style);
+  }
+  style.textContent = css;
 }
 
 const BACKGROUND_ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
@@ -215,6 +268,74 @@ function BackgroundImageControl({ value, onChange }: { value: string; onChange: 
   </div>;
 }
 
+const THEME_VARIABLE_LABELS: Record<(typeof THEME_VARIABLES)[number], string> = {
+  '--bg': '页面背景',
+  '--input-bg': '输入框背景',
+  '--surface': '面板背景',
+  '--surface-2': '次级面板',
+  '--surface-3': '悬停/选中背景',
+  '--border': '边框',
+  '--text-strong': '标题文字',
+  '--text': '正文文字',
+  '--text-muted': '次要文字',
+  '--accent': '强调色（同「强调色」设置）',
+  '--accent-text': '强调文字',
+  '--accent-contrast': '强调色上的文字',
+};
+
+function ThemePaletteControl({ palette, onChange }: { palette: ThemePalette; onChange: (value: ThemePalette) => void }): ReactElement {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [message, setMessage] = useState('');
+
+  const setVariable = (name: (typeof THEME_VARIABLES)[number], color: string) => onChange({ ...palette, [name]: color });
+  const clearVariable = (name: (typeof THEME_VARIABLES)[number]) => {
+    const next = { ...palette };
+    delete next[name];
+    onChange(next);
+  };
+
+  const exportCurrent = () => {
+    const blob = new Blob([exportTheme('自定义主题', palette)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'hiero-theme.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setMessage('已导出');
+  };
+
+  const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    const parsed = parseThemeFile(await file.text());
+    if (!parsed) {
+      setMessage('文件不是有效的 Hiero 主题（需要 format: hiero-theme 且包含合法颜色）');
+      return;
+    }
+    onChange(parsed.palette);
+    setMessage(`已导入「${parsed.name}」`);
+  };
+
+  return <div className="settings-palette-control">
+    <div className="settings-palette-grid">
+      {THEME_VARIABLES.map((name) => <label key={name} className="settings-palette-item">
+        <input type="color" value={palette[name] ?? '#808080'} onChange={(event) => setVariable(name, event.target.value)} aria-label={THEME_VARIABLE_LABELS[name]} />
+        <span>{THEME_VARIABLE_LABELS[name]}</span>
+        {palette[name] && <button type="button" className="ghost-button" onClick={() => clearVariable(name)}>还原</button>}
+      </label>)}
+    </div>
+    <div className="settings-palette-actions">
+      <button type="button" className="ghost-button" onClick={() => fileInput.current?.click()}>导入主题</button>
+      <button type="button" className="ghost-button" onClick={exportCurrent}>导出主题</button>
+      {Object.keys(palette).length > 0 && <button type="button" className="ghost-button" onClick={() => onChange({})}>清空自定义配色</button>}
+      <input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={importFile} aria-label="选择主题文件" />
+    </div>
+    {message && <small role="status">{message}</small>}
+  </div>;
+}
+
 function PreferenceControl({ field, value, onChange }: { field: PreferenceField; value: PreferenceValues[keyof PreferenceValues]; onChange: (value: PreferenceValues[keyof PreferenceValues]) => void }): ReactElement {
   if (field.type === 'boolean') {
     return <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} aria-label={field.title} />;
@@ -235,6 +356,12 @@ function PreferenceControl({ field, value, onChange }: { field: PreferenceField;
   }
   if (field.key === 'backgroundImage') {
     return <BackgroundImageControl value={String(value)} onChange={onChange} />;
+  }
+  if (field.key === 'customPalette') {
+    return <ThemePaletteControl palette={(value as ThemePalette) ?? {}} onChange={onChange} />;
+  }
+  if (field.key === 'customCss') {
+    return <textarea className="settings-custom-css" value={String(value)} spellCheck={false} placeholder={'例如：\n.chat-main { letter-spacing: 0.01em; }'} onChange={(event) => onChange(event.target.value)} aria-label={field.title} />;
   }
   if (field.type === 'text') {
     return <input type="text" value={String(value)} placeholder="https://..." onChange={(event) => onChange(event.target.value)} aria-label={field.title} />;
@@ -515,57 +642,92 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList
   const updateSubagent = useSubagentPreferences((state) => state.update);
   const resetSubagent = useSubagentPreferences((state) => state.reset);
   const [query, setQuery] = useState('');
+  const [category, setCategory] = useState<SettingsCategoryKey>('appearance');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
-  const fields = useMemo(() => PREFERENCE_SCHEMA.filter((field) => `${field.domain}${field.title}${field.description}`.toLowerCase().includes(query.trim().toLowerCase())), [query]);
-  const domains = Array.from(new Set(fields.map((field) => field.domain)));
+  const normalizedQuery = query.trim().toLowerCase();
+  const searching = normalizedQuery.length > 0;
+  const matches = (text: string) => text.toLowerCase().includes(normalizedQuery);
+  const matchedFields = useMemo(() => PREFERENCE_SCHEMA.filter((field) => matches(`${field.domain}${field.title}${field.description}`)), [normalizedQuery]);
+  const subagentMatches = matches('子代理 委派 subagent 调研 并发 轮数');
+  const modelMatches = matches('模型 网关 提供商 endpoint token');
+  const mcpMatches = matches('mcp 服务器 工具');
+
+  const isVisible = (key: SettingsCategoryKey) => searching ? (key === 'subagent' ? subagentMatches : key === 'model' ? modelMatches : key === 'mcp' ? mcpMatches : matchedFields.some((field) => field.domain === SETTINGS_CATEGORIES.find((item) => item.key === key)?.domain)) : category === key;
+  const noResults = searching && matchedFields.length === 0 && !subagentMatches && !modelMatches && !mcpMatches;
+
+  const renderFields = (fields: PreferenceField[]) => fields.map((field) => <div className="settings-row" key={field.key}>
+    <span><strong>{field.title}</strong><small>{field.description}</small></span>
+    <PreferenceControl field={field} value={values[field.key]} onChange={(next) => update(field.key, next)} />
+  </div>);
+
+  // Advanced rows stay folded unless the user expands them or is searching.
+  const renderDomainBody = (domain: string) => {
+    const basicFields = matchedFields.filter((field) => field.domain === domain && !field.advanced);
+    const advancedFields = matchedFields.filter((field) => field.domain === domain && field.advanced);
+    return <>
+      {renderFields(basicFields)}
+      {advancedFields.length > 0 && (searching || advancedOpen)
+        ? renderFields(advancedFields)
+        : advancedFields.length > 0 && <button type="button" className="ghost-button settings-advanced-toggle" onClick={() => setAdvancedOpen(true)}>展开高级设置（{advancedFields.length} 项）</button>}
+    </>;
+  };
+
+  const showCategory = (key: SettingsCategoryKey) => isVisible(key);
+  const preferenceCategories = SETTINGS_CATEGORIES.filter((item) => item.domain);
 
   return <section className="settings-panel" aria-label="设置">
     <div className="settings-toolbar">
       <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索设置……" aria-label="搜索设置" />
       <button type="button" className="ghost-button" onClick={reset}>恢复默认</button>
     </div>
-    {domains.map((domain) => <div className="settings-domain" key={domain}>
-      <h3>{domain}</h3>
-      {fields.filter((field) => field.domain === domain).map((field) => <label className="settings-row" key={field.key}>
-        <span><strong>{field.title}</strong><small>{field.description}</small></span>
-        <PreferenceControl field={field} value={values[field.key]} onChange={(next) => update(field.key, next)} />
-      </label>)}
-    </div>)}
-    <div className="settings-domain">
-      <h3>子代理</h3>
-      <label className="settings-row">
-        <span><strong>启用只读子代理</strong><small>允许模型把调研任务交给只读子代理（只能读文件、列目录、查记忆）。关闭后模型不再看到 delegate_read 工具。</small></span>
-        <input type="checkbox" checked={subagent.enabled} onChange={(event) => updateSubagent('enabled', event.target.checked)} aria-label="启用只读子代理" />
-      </label>
-      <label className="settings-row">
-        <span><strong>最大轮数</strong><small>子代理最多调用模型几轮（1–10）。越大越能深入调研，耗时和成本也越高。</small></span>
-        <input type="number" value={subagent.maxTurns} min={1} max={10} onChange={(event) => updateSubagent('maxTurns', Number(event.target.value))} aria-label="子代理最大轮数" />
-      </label>
-      <label className="settings-row">
-        <span><strong>结果长度上限（字符）</strong><small>子代理返回给主对话的摘要最长字符数（500–20000）。</small></span>
-        <input type="number" value={subagent.resultLimit} min={500} max={20000} step={100} onChange={(event) => updateSubagent('resultLimit', Number(event.target.value))} aria-label="子代理结果长度上限" />
-      </label>
-      <label className="settings-row">
-        <span><strong>每轮最多子代理调用数</strong><small>模型一次回复中最多同时委派几个子代理（1–4），超出的调用会被拒绝。</small></span>
-        <input type="number" value={subagent.maxConcurrent} min={1} max={4} onChange={(event) => updateSubagent('maxConcurrent', Number(event.target.value))} aria-label="每轮最多子代理调用数" />
-      </label>
-      <label className="settings-row">
-        <span><strong>每次聊天最多子代理调用数</strong><small>一次对话请求中子代理总调用次数上限（1–20），防止失控委派。</small></span>
-        <input type="number" value={subagent.maxPerChat} min={1} max={20} onChange={(event) => updateSubagent('maxPerChat', Number(event.target.value))} aria-label="每次聊天最多子代理调用数" />
-      </label>
-      <div className="settings-form-actions">
-        <button type="button" className="ghost-button" onClick={resetSubagent}>恢复子代理默认值</button>
+    <div className="settings-layout">
+      <nav className="settings-nav" aria-label="设置分类">
+        {SETTINGS_CATEGORIES.map((item) => <button key={item.key} type="button" className={!searching && category === item.key ? 'active' : ''} aria-current={!searching && category === item.key ? 'page' : undefined} onClick={() => { setQuery(''); setCategory(item.key); setAdvancedOpen(false); }}>{item.label}</button>)}
+      </nav>
+      <div className="settings-content">
+        {noResults && <p className="chat-empty">没有匹配的设置。</p>}
+        {preferenceCategories.filter((item) => showCategory(item.key)).map((item) => <div className="settings-domain" key={item.key}>
+          <h3>{item.label}</h3>
+          {renderDomainBody(item.domain!)}
+        </div>)}
+        {showCategory('subagent') && <div className="settings-domain">
+          <h3>子代理</h3>
+          <label className="settings-row">
+            <span><strong>启用只读子代理</strong><small>允许模型把调研任务交给只读子代理（只能读文件、列目录、查记忆）。关闭后模型不再看到 delegate_read 工具。</small></span>
+            <input type="checkbox" checked={subagent.enabled} onChange={(event) => updateSubagent('enabled', event.target.checked)} aria-label="启用只读子代理" />
+          </label>
+          <label className="settings-row">
+            <span><strong>最大轮数</strong><small>子代理最多调用模型几轮（1–10）。越大越能深入调研，耗时和成本也越高。</small></span>
+            <input type="number" value={subagent.maxTurns} min={1} max={10} onChange={(event) => updateSubagent('maxTurns', Number(event.target.value))} aria-label="子代理最大轮数" />
+          </label>
+          <label className="settings-row">
+            <span><strong>结果长度上限（字符）</strong><small>子代理返回给主对话的摘要最长字符数（500–20000）。</small></span>
+            <input type="number" value={subagent.resultLimit} min={500} max={20000} step={100} onChange={(event) => updateSubagent('resultLimit', Number(event.target.value))} aria-label="子代理结果长度上限" />
+          </label>
+          <label className="settings-row">
+            <span><strong>每轮最多子代理调用数</strong><small>模型一次回复中最多同时委派几个子代理（1–4），超出的调用会被拒绝。</small></span>
+            <input type="number" value={subagent.maxConcurrent} min={1} max={4} onChange={(event) => updateSubagent('maxConcurrent', Number(event.target.value))} aria-label="每轮最多子代理调用数" />
+          </label>
+          <label className="settings-row">
+            <span><strong>每次聊天最多子代理调用数</strong><small>一次对话请求中子代理总调用次数上限（1–20），防止失控委派。</small></span>
+            <input type="number" value={subagent.maxPerChat} min={1} max={20} onChange={(event) => updateSubagent('maxPerChat', Number(event.target.value))} aria-label="每次聊天最多子代理调用数" />
+          </label>
+          <div className="settings-form-actions">
+            <button type="button" className="ghost-button" onClick={resetSubagent}>恢复子代理默认值</button>
+          </div>
+        </div>}
+        {showCategory('model') && <div className="settings-domain">
+          <h3>模型与网关</h3>
+          {modelSettings
+            ? <ModelGatewayForm modelSettings={modelSettings} saveState={saveState} onSave={onSaveModel} modelList={modelList} onFetchModels={onFetchModels} />
+            : <p className="chat-empty">正在读取后端配置……</p>}
+        </div>}
+        {showCategory('mcp') && <div className="settings-domain">
+          <h3>MCP 服务器</h3>
+          <McpServersForm config={mcpConfig} saveState={mcpSaveState} onSave={onSaveMcp} />
+        </div>}
       </div>
-    </div>
-    <div className="settings-domain">
-      <h3>模型与网关</h3>
-      {modelSettings
-        ? <ModelGatewayForm modelSettings={modelSettings} saveState={saveState} onSave={onSaveModel} modelList={modelList} onFetchModels={onFetchModels} />
-        : <p className="chat-empty">正在读取后端配置……</p>}
-    </div>
-    <div className="settings-domain">
-      <h3>MCP 服务器</h3>
-      <McpServersForm config={mcpConfig} saveState={mcpSaveState} onSave={onSaveMcp} />
     </div>
   </section>;
 }
