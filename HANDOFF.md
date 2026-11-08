@@ -208,3 +208,12 @@ pm test 165/165 通过。
 - 未完成：滚动摘要、真实 Docker 运行验证、检查点断点续跑的端到端测试。
 - 模型默认值：代码中的默认模型名由 `gpt-5.6-luna` 替换为 `auto`（仓库公开，避免泄露私人配置）。
 - 发布：npm 上 `hiero-agent` 最新为 0.2.1。仓库中 `v0.2.2` 标签已存在且指向 2026-11-04 的旧提交，因此本次发布版本号需先确认。
+
+## 交接状态（2026-11-08）
+
+- hiero-agent：GitHub 标签 v0.2.3（指向 581bfb0）与 npm latest 0.2.3 一致。v0.2.2 标签未动，仍指向旧提交。
+- create-hiero 脚手架：已发布到 npm，latest 为 0.1.0，源码在 create-hiero/（提交 e4778e5）。用户可用 `npm create hiero` 或 `npx create-hiero` 在空目录生成完整项目（需要 Node 22+）。端到端验证已通过：生成后 launch-hiero.bat 存在，后端 build 与前端 tsc 均通过。
+- 发布流程：publish.yml 由标签触发，使用 npm 信任发布（OIDC），npm CLI 需 >= 11.5.1，package.json 的 repository.url 必须与 GitHub 仓库一致。
+- 注意：npm 对新包可能进入暂存（staged）状态，需要在网页批准；批准前重复 publish 会返回 E409。
+- 遗留：frontend/src/App.tsx 第 585 行与 test/frontend-models.test.ts 仍含本机路径；GitHub Actions 仍用 checkout@v4 / setup-node@v4（Node 20 弃用警告）；D:\DevData\temp 下有旧的 hiero-chat-* 残留。
+- 下一步建议：清理上述遗留；确认是否需要 create-hiero 的后续版本；补充真实 Docker 运行验证。
