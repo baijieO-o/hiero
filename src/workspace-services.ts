@@ -72,6 +72,8 @@ export async function readTextFile(root: string, relPath: string): Promise<{ pat
 export function pickFolder(initialPath?: string): Promise<string | null> {
   if (process.platform !== 'win32') return Promise.reject(new Error('文件夹选择对话框仅支持 Windows，请手动输入路径。'));
   const script = [
+    // Child stdout defaults to the console code page (GBK on zh-CN); force UTF-8 so Node decodes non-ASCII paths correctly.
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
     'Add-Type -AssemblyName System.Windows.Forms',
     '[System.Windows.Forms.Application]::EnableVisualStyles()',
     '$owner = New-Object System.Windows.Forms.Form',

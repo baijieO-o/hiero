@@ -20,6 +20,20 @@ describe('workspace-services', () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it('lists and reads non-ASCII folder and file names without mojibake', async () => {
+    const cjkRoot = await mkdtemp(join(tmpdir(), 'hiero-ws-cjk-'));
+    try {
+      await mkdir(join(cjkRoot, '利维坦读书分享'));
+      await writeFile(join(cjkRoot, '利维坦读书分享', '笔记.md'), '中文内容');
+      const { entries } = await listDirectory(cjkRoot, '利维坦读书分享');
+      assert.deepEqual(entries.map((entry) => entry.name), ['笔记.md']);
+      const file = await readTextFile(cjkRoot, '利维坦读书分享/笔记.md');
+      assert.equal(file.content, '中文内容');
+    } finally {
+      await rm(cjkRoot, { recursive: true, force: true });
+    }
+  });
+
   it('sorts folders first and names by natural number order', async () => {
     const { entries } = await listDirectory(root, '');
     assert.equal(entries[0]?.name, 'sub');
