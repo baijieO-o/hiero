@@ -582,7 +582,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
-    options: { model: readStoredDefaultModel(), permission: readStoredPermission(), workspace: 'D:\\hiero', contextMode: '临时会话' },
+    options: { model: readStoredDefaultModel(), permission: readStoredPermission(), workspace: '', contextMode: '临时会话' },
     setOption: (key, value) => set((state) => ({ options: { ...state.options, [key]: value } })),
     newConversation: () => {
       if (get().pending) return;

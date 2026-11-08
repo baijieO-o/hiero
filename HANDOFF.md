@@ -1,11 +1,11 @@
-# Hiero 交接文档（精简版）
+﻿# Hiero 交接文档（精简版）
 
 更新时间：2026-11-05
 完整历史记录：会话目录 `files/HANDOFF-full.md`。
 
 ## 1. 项目
 
-Hiero 是位于 `D:\hiero` 的个人 Agent 工作台。
+Hiero 是位于本机仓库根目录的个人 Agent 工作台。
 - 后端：Node + TypeScript，WebSocket `ws://localhost:8080`
 - 前端：React + Vite，`http://localhost:5173/`
 - 核心：状态机（Plan / Exec / Verify / Handoff / Rewind）、工具网关、模型网关（令牌池）、MCP / Skill 路由、系统代理子进程
@@ -14,11 +14,11 @@ Hiero 是位于 `D:\hiero` 的个人 Agent 工作台。
 
 ```powershell
 # 后端
-cd D:\hiero; npx tsc -p .; node dist\src\server.js
+cd <仓库根目录>; npx tsc -p .; node dist\src\server.js
 # 前端
-cd D:\hiero\frontend; npm run dev
+cd <仓库根目录>\frontend; npm run dev
 # 一键启动
-D:\hiero\launch-hiero.bat
+<仓库根目录>\launch-hiero.bat
 ```
 
 - 后端测试：`npm test`（= `tsc && node --test dist/test/*.test.js`）
@@ -27,7 +27,7 @@ D:\hiero\launch-hiero.bat
 
 ## 3. 已完成
 - WebSocket 安全：仅接受回环地址连接；浏览器 Origin 必须是 localhost / 127.0.0.1 / [::1]（无 Origin 的非浏览器客户端允许）。实现：`src/ws-guard.ts`，测试 `test/ws-guard.test.ts`。默认地址仍为 `ws://localhost:8080`，可用前端环境变量 `VITE_HIERO_WS_URL` 覆盖。
-- MCP 默认根目录随聊天工作区（`defaultMcpConfig(root)`），不再写死 `D:\new`。
+- MCP 默认根目录随聊天工作区（`defaultMcpConfig(root)`），不再写死固定目录。
 - MCP 传输：支持 stdio、sse、http（远程需 `url`，可选 `headers`）。`${VAR}` 占位符在连接时从环境变量展开，凭据不写入 `mcp.json`。
 - MCP 预设（文件系统、GitHub、Postgres）：前端一键添加，默认禁用，需手动启用后保存。
 - 令牌用量：模型网关记录 `usage`（流式请求带 `stream_options.include_usage`）；聊天回复显示模型调用次数、输入/输出 tokens、耗时。价格估算与成本未实现。
@@ -79,7 +79,7 @@ D:\hiero\launch-hiero.bat
 - 工作区已统一：聊天、任务、文件管理器、终端共用同一个工作区（前端 `options.workspace`），后端按 `resolveChatWorkspace` 校验；无效路径报错，不再回落到 Hiero 根目录。UI 端到端尚未在界面上确认（WebSocket 层已验证）
 - 删除对话的内联"确认删除/取消"流程
 - Tile 上下文栏、关闭 Buffer
-- 聊天端到端："列出工作区里有什么"在 `D:\new` 下的真实模型调用（需要 LLM，未验证）
+- 聊天端到端："列出工作区里有什么"在固定测试目录下的真实模型调用（需要 LLM，未验证）
 - 子代理每次聊天上限的端到端检查（`maxPerChat` 生效）：两次尝试均返回 `MOD-003 No model token is currently available`。这是令牌冷却（`cooldownMs` 60 秒，属于可重试错误），不是 401。等待冷却后重试，请求成功返回，但模型没有调用任何委派工具（工具列表为空），且回复提示中文编码异常。因此端到端仍未被真实调用验证。下次检查应使用更明确的提示，并在脚本中用 UTF-8 发送。配额判定已抽为 `canDelegate`（`src/read-only-subagent.ts`）并有单元测试覆盖（当前 `npm test` 114 项通过）。
 - 跳转面板的界面视觉效果（构建通过，未逐项检查）
 - 系统主题（`system`）模式的浏览器表现
@@ -96,9 +96,9 @@ D:\hiero\launch-hiero.bat
 - PowerShell 中用 `node -e` 传含引号的脚本容易出错，建议写入临时 `.mjs` 文件执行（import 需用 `file:///` 绝对 URL）。
 - 独立脚本使用 `.env` 前需调用 `loadLocalLlmEnv()`。
 - 改动后端后需 `npx tsc -p .` 并重启。
-- 重启后端用 `Start-Process -FilePath "D:\baiji\node.exe" -ArgumentList "dist/src/server.js"`，`node` 不在 PATH 中。结束进程只用 `Stop-Process -Id`。
+- 重启后端用 `Start-Process -FilePath "<node 可执行文件路径>" -ArgumentList "dist/src/server.js"`，`node` 不在 PATH 中。结束进程只用 `Stop-Process -Id`。
 - `Get-NetTCPConnection` 在本机结果不准，判断端口占用看进程命令行与日志中的 `EADDRINUSE`。
-- MCP 配置文件位于 `D:\hiero\.hiero\mcp.json`（相对于启动目录 `process.cwd()`）。手工编辑后需在设置面板点「保存并连接」或重启后端。
+- MCP 配置文件位于 `<仓库根目录>\.hiero\mcp.json`（相对于启动目录 `process.cwd()`）。手工编辑后需在设置面板点「保存并连接」或重启后端。
 - 代码仓库：本地已 `git init`（分支 `main`，初始提交 `1a70f09`），尚未推送到 GitHub。本机无 GitHub 凭据，`gh` CLI 未安装。
 - 前端 Monaco 的 "TextModel got disposed" 报错是既有问题，与当前改动无关。
 - `.env` 含令牌，**不要把令牌值写入任何文档或提交**。
@@ -215,5 +215,5 @@ pm test 165/165 通过。
 - create-hiero 脚手架：已发布到 npm，latest 为 0.1.0，源码在 create-hiero/（提交 e4778e5）。用户可用 `npm create hiero` 或 `npx create-hiero` 在空目录生成完整项目（需要 Node 22+）。端到端验证已通过：生成后 launch-hiero.bat 存在，后端 build 与前端 tsc 均通过。
 - 发布流程：publish.yml 由标签触发，使用 npm 信任发布（OIDC），npm CLI 需 >= 11.5.1，package.json 的 repository.url 必须与 GitHub 仓库一致。
 - 注意：npm 对新包可能进入暂存（staged）状态，需要在网页批准；批准前重复 publish 会返回 E409。
-- 遗留：frontend/src/App.tsx 第 585 行与 test/frontend-models.test.ts 仍含本机路径；GitHub Actions 仍用 checkout@v4 / setup-node@v4（Node 20 弃用警告）；D:\DevData\temp 下有旧的 hiero-chat-* 残留。
+- 已清理：App.tsx 默认工作区改为空、测试样例路径改为占位、Actions 升级到 checkout@v5 / setup-node@v5。
 - 下一步建议：清理上述遗留；确认是否需要 create-hiero 的后续版本；补充真实 Docker 运行验证。
