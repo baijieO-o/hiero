@@ -132,7 +132,30 @@ Hiero 使用 OpenAI Chat Completions 兼容协议，可连接 Ollama、vLLM 等�
 
 不要把真实密钥提交到仓库。本地配置可参考 `hiero-llm.local.example.ps1`。
 
-## 13. 已知限制
+## 13. 快捷键
+
+| 快捷键 | 功能 |
+| --- | --- |
+| `Ctrl+Space` | 打开空缓存窗口 |
+| `Ctrl+Shift+Y` | 新建对话 |
+| `Ctrl+Shift+L` | 聚焦对话输入框 |
+| `Ctrl+Shift+P` | 聚焦命令栏 |
+| `Ctrl+Shift+E` | 显示/隐藏快捷栏 |
+| `Ctrl+Shift+,` | 打开设置 |
+| `Ctrl+Shift+U` | 打开文档 |
+
+Mac 上可用 `Cmd` 代替 `Ctrl`。避开了浏览器保留的组合键（如 `Ctrl+Shift+N`、`Ctrl+Shift+B`、`Ctrl+Shift+D`）。
+
+## 13.1 主题
+
+在设置中可以调整外观，所有配置保存在本地浏览器（`localStorage` 的 `hiero-preferences`）。
+
+- **内置预设**：默认深色、默认浅色、Nord、Solarized 深色、高对比度。
+- **自定义配色**：逐项修改页面背景、文字等 CSS 变量，每项可单独还原。
+- **导入 / 导出**：导出为 `hiero-theme.json`，导入时校验文件格式，无效文件会提示错误。
+- **自定义 CSS**：直接输入样式规则，清空后即移除。
+
+## 14. 已知限制
 
 - 断线期间错过的事件不回放，只靠 `SNAPSHOT` 对齐当前状态。
 - 上下文用量为估算值。
@@ -142,7 +165,7 @@ Hiero 使用 OpenAI Chat Completions 兼容协议，可连接 Ollama、vLLM 等�
 - 错误码文档为手工整理的静态内容，错误码变化时需同步更新。
 - 本文未在真实模型上逐项验证。
 
-## 14. 验证状态
+## 15. 验证状态
 
 - 技能的 `load_skill` 路径有单元测试覆盖，未在真实模型上端到端验证。
 - 文档面板已在浏览器中打开检查。其他面板的界面未逐一复核。
