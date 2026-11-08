@@ -2,7 +2,7 @@
 
 Hiero 是一个个人自用、开源的 Agent 工作台。它用显式状态机驱动任务执行，用确定性的工具网关记录证据，并通过 WebSocket 把状态实时同步到网页界面。当前定位是**可验证的 Agent 编排骨架**，还不是生产级自主编码代理。
 
-完整功能说明见 [docs/FEATURES.md](docs/FEATURES.md)，架构见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+完整功能说明见 [docs/FEATURES.md](docs/FEATURES.md)，架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，二次开发（添加工具、扩展点）见 [docs/DEVELOPING.md](docs/DEVELOPING.md)。
 
 ## 功能特性
 
