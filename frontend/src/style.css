@@ -787,3 +787,7 @@ button, textarea, select { font: inherit; }
 .settings-error { color: #e5484d; font-size: 11px; }
 .settings-hint { color: var(--text-muted); font-size: 11px; }
 .settings-schedule-form .settings-row { grid-template-columns: 1fr; }
+
+.update-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 1000; display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--accent, #2563eb); color: #fff; font-size: 14px; }
+.update-banner code { background: rgba(255, 255, 255, 0.2); padding: 1px 6px; border-radius: 4px; }
+.update-banner button { margin-left: auto; color: #fff; }

@@ -24,6 +24,7 @@ import { modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
 import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
 import { ApprovalBroker } from './approval-broker.js';
+import { checkForUpdate, type UpdateStatus } from './update-check.js';
 import { AskUserBroker, type AskUserField, type AskUserResult } from './ask-user-broker.js';
 import { createScheduledTask, defaultSchedulesPath, dueTasks, loadSchedules, nextRunAfter, saveSchedules, type ScheduledTask } from './scheduled-tasks.js';
 
@@ -384,6 +385,10 @@ function isSettingsRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'settings_get';
 }
 
+function isUpdateCheckRequest(message: unknown): boolean {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'update_check';
+}
+
 function isModelListRequest(message: unknown): message is { type: 'model_list'; request_id: string; payload?: Partial<ModelSettingsInput> } {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'model_list';
 }
@@ -485,6 +490,7 @@ export class HieroRuntime {
       else if (isTaskHistoryRequest(message)) this.runtime.send({ type: 'TASK_HISTORY', payload: { tasks: this.stateStore.listTasks() } }, client);
       else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: resolveChatWorkspace(message.workspace), traces: await listChatTraces(resolveChatWorkspace(message.workspace)) } }, client);
       else if (isSettingsRequest(message)) this.runtime.send({ type: 'SETTINGS', payload: this.readModelSettings() }, client);
+      else if (isUpdateCheckRequest(message)) void this.broadcastUpdateStatus(client);
       else if (isScheduleRequest(message)) this.handleScheduleRequest(message, client);
       else if (isModelListRequest(message)) await this.handleModelList(message, client);
       else if (isMcpConfigGet(message)) this.sendMcpConfig(client);
@@ -739,6 +745,15 @@ export class HieroRuntime {
   }
 
   /** Connects enabled MCP servers from the saved config. Runs in the background so a slow server never blocks startup. */
+  /** Checks the remote for a newer tag and sends the result to one client, or to everyone when no client is given. */
+  public async broadcastUpdateStatus(client?: WebSocket): Promise<UpdateStatus> {
+    const status = await checkForUpdate();
+    const event = { type: 'UPDATE_STATUS' as const, payload: status };
+    if (client) this.runtime.send(event, client);
+    else this.runtime.broadcast(event);
+    return status;
+  }
+
   public startMcpServers(): void {
     try {
       const enabled = readMcpConfig().servers.filter((server) => server.enabled).map(toClientConfig);

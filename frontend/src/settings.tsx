@@ -2,6 +2,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { storeDefaultModel } from './model-catalog-store';
+import { RUNTIME_WS_URL } from './runtime-url';
 import { buildCustomServer, describeServer, needsEnableConfirmation, type CustomServerInput, type McpServerDraft, type McpTransport } from './mcp-model';
 import { THEME_PRESETS, THEME_VARIABLES, exportTheme, parseThemeFile, sanitizePalette, type ThemePalette } from './theme-model';
 
@@ -662,6 +663,42 @@ export function McpServersForm({ config, saveState, onSave }: { config: McpConfi
 
 export type SaveState = { status: 'idle' } | { status: 'saving' } | { status: 'saved'; tokenCount: number } | { status: 'error'; message: string };
 
+type UpdateCheckResult = { ok: boolean; current_version: string; latest_version?: string; update_available?: boolean; message?: string };
+
+/** Asks the backend to compare the local version with the latest GitHub tag on demand. */
+function UpdateCheckSection(): ReactElement {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<UpdateCheckResult | null>(null);
+
+  const check = () => {
+    setBusy(true);
+    setResult(null);
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    const finish = (value: UpdateCheckResult) => { setResult(value); setBusy(false); socket.close(); };
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'update_check' }));
+    socket.onmessage = (event) => {
+      const message = JSON.parse(String(event.data)) as { type?: string; payload?: UpdateCheckResult };
+      if (message.type === 'UPDATE_STATUS' && message.payload) finish(message.payload);
+    };
+    socket.onerror = () => finish({ ok: false, current_version: '', message: '无法连接到运行时' });
+  };
+
+  return <div className="settings-domain">
+    <h3>版本更新</h3>
+    <div className="settings-row">
+      <span><strong>检查 GitHub 新版本</strong><small>对比本地版本与仓库最新版本标签（需要本机安装 git）。发现新版本时只提示，不会自动更新代码。</small></span>
+      <button type="button" className="ghost-button" onClick={check} disabled={busy}>{busy ? '检查中……' : '检查更新'}</button>
+    </div>
+    {result && <p className="chat-empty" role="status">
+      {!result.ok
+        ? `检查失败：${result.message ?? '未知错误'}`
+        : result.update_available
+          ? `发现新版本 v${result.latest_version}（当前 v${result.current_version}）。更新方式：在项目目录执行 git pull 后 npm install 并重新 npm run build。`
+          : `已是最新版本 v${result.current_version}。`}
+    </p>}
+  </div>;
+}
+
 export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList, onFetchModels, mcpConfig, mcpSaveState, onSaveMcp }: { modelSettings: ModelSettings | null; saveState: SaveState; onSaveModel: (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void; mcpConfig: McpConfigState | null; mcpSaveState: McpSaveState; onSaveMcp: (servers: McpServerEntry[]) => void }): ReactElement {
   const values = usePreferences((state) => state.values);
   const update = usePreferences((state) => state.update);
@@ -755,6 +792,7 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList
           <h3>MCP 服务器</h3>
           <McpServersForm config={mcpConfig} saveState={mcpSaveState} onSave={onSaveMcp} />
         </div>}
+        <UpdateCheckSection />
       </div>
     </div>
   </section>;

@@ -1788,6 +1788,39 @@ function AskUserModal(): ReactElement | null {
   return <AskUserDialog key={current.ask_id} request={current} onRespond={respond} />;
 }
 
+interface UpdateStatus {
+  ok: boolean;
+  current_version: string;
+  latest_version?: string;
+  update_available: boolean;
+  message?: string;
+}
+
+/** Shows a banner when the remote has a newer version tag. The check runs on connect, so a broadcast sent before the socket opened is not missed. */
+function UpdateBanner(): ReactElement | null {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'update_check' }));
+    socket.onmessage = (event) => {
+      let message: RuntimeMessage;
+      try { message = JSON.parse(String(event.data)) as RuntimeMessage; } catch { return; }
+      if (!active || message.type !== 'UPDATE_STATUS' || !message.payload) return;
+      setStatus(message.payload as unknown as UpdateStatus);
+    };
+    return () => { active = false; socket.close(); };
+  }, []);
+
+  if (dismissed || !status?.update_available) return null;
+  return <div className="update-banner" role="status">
+    发现新版本 v{status.latest_version}（当前 v{status.current_version}）。请在项目目录执行 <code>git pull</code> 后运行 <code>npm install</code> 并重启。
+    <button type="button" className="ghost-button" onClick={() => setDismissed(true)}>关闭</button>
+  </div>;
+}
+
 /** Listens for APPROVAL_REQUIRED on a persistent socket and answers with approval_response. */
 function ApprovalModal(): ReactElement | null {
   const [queue, setQueue] = useState<ApprovalRequest[]>([]);
@@ -2696,6 +2729,7 @@ function App(): ReactElement {
   return <main className="app-shell">
     <ApprovalModal />
     <AskUserModal />
+    <UpdateBanner />
     <header className="topbar">
       <div className="brand"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>HIERO</span></div>
       <nav className="screen-tabs" aria-label="工作区">

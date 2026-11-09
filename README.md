@@ -34,6 +34,21 @@ Set-Location frontend
 npm install
 ```
 
+### 检查与更新版本
+
+启动后，界面顶部会在发现 GitHub 仓库有新版本标签时显示提示；也可以在「设置 → 版本更新」中手动点击「检查更新」。
+
+- 检查方式：通过 `git ls-remote --tags` 读取远程 `v*` 标签，需要本机安装 git。
+- 仅提示，不会自动修改代码。更新时在项目目录执行：
+
+```powershell
+git pull
+npm install
+npm run build
+```
+
+- 设置环境变量 `HIERO_UPDATE_CHECK=0` 可关闭启动时的自动检查。
+
 ## 快速开始
 
 1. 配置模型（见下方[配置](#配置)）。
