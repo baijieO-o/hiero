@@ -1,5 +1,5 @@
 import type { TaskContract } from './contracts.js';
-import type { ModelGateway, ModelMessage, ModelResponse, ModelToolDefinition } from './model-gateway.js';
+import type { CompletionGateway, ModelMessage, ModelResponse, ModelToolDefinition } from './model-gateway.js';
 import type { ToolGateway } from './tool-gateway.js';
 
 export const SUBAGENT_MAX_TURNS = 4;
@@ -83,7 +83,7 @@ export const DELEGATE_TASK_TOOL_DEFINITION: ModelToolDefinition = {
 };
 
 export interface ReadOnlySubagentOptions {
-  modelGateway: ModelGateway;
+  modelGateway: CompletionGateway;
   toolGateway: ToolGateway;
   /** Tool names the sub-agent may call. Must be read-effect tools; the caller enforces this. */
   allowedTools: readonly ModelToolDefinition[];

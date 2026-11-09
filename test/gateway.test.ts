@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { z } from 'zod';
 import { createServer } from 'node:http';
-import { ModelGateway, OpenAICompatibleTransport, parseTokenList, type ModelTransport } from '../src/model-gateway.js';
+import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type ModelTransport } from '../src/model-gateway.js';
 import { parseEnvText } from '../src/llm-env.js';
 import { ToolGateway } from '../src/tool-gateway.js';
 import type { TaskContract } from '../src/contracts.js';
@@ -118,6 +118,36 @@ test('ModelGateway reports a clear error when every token is rejected', async ()
 test('parseTokenList splits comma, semicolon and newline separators', () => {
   assert.deepEqual(parseTokenList(' a , b;c\n\n d ,'), ['a', 'b', 'c', 'd']);
   assert.deepEqual(parseTokenList(undefined), []);
+});
+
+test('parseProviderList reads providers and rejects malformed config', () => {
+  assert.deepEqual(parseProviderList(undefined), []);
+  assert.deepEqual(parseProviderList('[{"name":"p","endpoint":"https://x.test/v1","tokens":["k1"],"models":["m1"]}]'), [
+    { name: 'p', endpoint: 'https://x.test/v1', tokens: ['k1'], models: ['m1'] },
+  ]);
+  assert.throws(() => parseProviderList('{not json'), /不是合法的 JSON/);
+  assert.throws(() => parseProviderList('{"endpoint":"x"}'), /必须是 JSON 数组/);
+  assert.throws(() => parseProviderList('[{"endpoint":"x"}]'), /缺少 models/);
+  assert.throws(() => parseProviderList('[{"models":["m"]}]'), /缺少 endpoint/);
+});
+
+test('RoutedModelGateway sends each model to the provider that lists it, with its own key', async () => {
+  const seen: string[] = [];
+  const makeGateway = (label: string) => new ModelGateway({
+    complete: async (request, token) => {
+      seen.push(`${label}:${request.model}:${token}`);
+      return { model: request.model ?? 'unknown', token_id: token, content: label };
+    },
+  }, [`${label}-key`], () => 0);
+  const fallback = makeGateway('default');
+  const router = new RoutedModelGateway(fallback, [
+    { config: { name: 'other', endpoint: 'unused', tokens: [], models: ['other-model'] }, gateway: makeGateway('other') },
+  ]);
+  const routed = await router.complete({ ...task, model_config: { preferred_model: 'other-model', fallback_chain: [] } }, { prompt: 'hi' });
+  assert.equal(routed.content, 'other');
+  const unlisted = await router.complete(task, { prompt: 'hi' });
+  assert.equal(unlisted.content, 'default');
+  assert.deepEqual(seen, ['other:other-model:other-key', 'default:primary:default-key']);
 });
 
 test('parseEnvText reads PowerShell and dotenv style assignments', () => {

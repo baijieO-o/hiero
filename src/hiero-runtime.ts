@@ -8,7 +8,7 @@ import { breakdownContextUsage, type ContextUsageBreakdown } from './context-usa
 import { AgentWorkflow, type WorkflowOptions } from './agent-workflow.js';
 import { AgentStateMachine, AgentState } from './state-machine.js';
 import { StateStore } from './state-store.js';
-import { ModelGateway, OpenAICompatibleTransport, parseTokenList } from './model-gateway.js';
+import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type CompletionGateway } from './model-gateway.js';
 import { ToolGateway } from './tool-gateway.js';
 import { CapabilityRouter } from './capability-router.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig } from './mcp-config.js';
@@ -21,19 +21,36 @@ import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
 import { diffSnapshots, snapshotTextFiles } from './workspace-diff.js';
 import { modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
 import { ApprovalBroker } from './approval-broker.js';
+import { createScheduledTask, defaultSchedulesPath, dueTasks, loadSchedules, nextRunAfter, saveSchedules, type ScheduledTask } from './scheduled-tasks.js';
+
+/** Result of one agent run, returned so scheduled tasks can record their report. */
+export interface TaskRunResult { task_id: string; status: 'completed' | 'failed'; summary: string }
 
 export interface ModelSettingsInput {
   endpoint: string;
   model: string;
   tokens: string;
+  /** Optional manual model per task kind. Missing or blank kinds fall back to auto selection. */
+  task_models?: TaskModelOverrides;
 }
 
 function isModelSettingsSave(message: unknown): message is { type: 'settings_save'; payload: ModelSettingsInput } {
   if (typeof message !== 'object' || message === null) return false;
   const candidate = message as { type?: unknown; payload?: Partial<ModelSettingsInput> };
-  return candidate.type === 'settings_save' && typeof candidate.payload?.endpoint === 'string' && typeof candidate.payload?.model === 'string' && typeof candidate.payload?.tokens === 'string';
+  const taskModels = candidate.payload?.task_models;
+  const taskModelsValid = taskModels === undefined || (typeof taskModels === 'object' && taskModels !== null && !Array.isArray(taskModels) && Object.values(taskModels).every((value) => value === undefined || typeof value === 'string'));
+  return candidate.type === 'settings_save' && typeof candidate.payload?.endpoint === 'string' && typeof candidate.payload?.model === 'string' && typeof candidate.payload?.tokens === 'string' && taskModelsValid;
+}
+
+/** Model candidates for task-kind selection: every model listed in HIERO_LLM_PROVIDERS, plus HIERO_LLM_MODEL when it is a concrete id. */
+function taskModelCandidates(): string[] {
+  const names = parseProviderList(process.env.HIERO_LLM_PROVIDERS).flatMap((provider) => provider.models);
+  const main = process.env.HIERO_LLM_MODEL;
+  if (main && main !== 'auto') names.push(main);
+  return [...new Set(names)];
 }
 import { createEditFileTool, createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
 import { createWebFetchTool, createWebSearchTool } from './web-tools.js';
@@ -52,6 +69,8 @@ import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, sea
 import { createEmbedder, embeddingConfigFromEnv } from './embedding.js';
 import type { ExtensionReady, SystemAgentError } from './system_agent.js';
 import type { WebSocket } from 'ws';
+
+const DEFAULT_MAX_CONTEXT_TOKENS = 32_000;
 
 export interface RuntimeTaskRequest {
   goal?: string;
@@ -287,6 +306,17 @@ function isWriteRollbackRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'write_rollback';
 }
 
+export type ScheduleRequest =
+  | { type: 'SCHEDULE'; action: 'list' }
+  | { type: 'SCHEDULE'; action: 'create'; payload: { name?: unknown; goal?: unknown; interval_minutes?: unknown; run_now?: unknown } }
+  | { type: 'SCHEDULE'; action: 'delete' | 'toggle'; id: string };
+
+function isScheduleRequest(message: unknown): message is ScheduleRequest {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as { type?: unknown; action?: unknown };
+  return candidate.type === 'SCHEDULE' && (candidate.action === 'list' || candidate.action === 'create' || candidate.action === 'delete' || candidate.action === 'toggle');
+}
+
 function isSettingsRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'settings_get';
 }
@@ -347,7 +377,7 @@ export function hitlBreakpointsFromEnv(env: NodeJS.ProcessEnv = process.env): st
 
 export class HieroRuntime {
   private readonly machine = new AgentStateMachine();
-  private gateway: ModelGateway;
+  private gateway: CompletionGateway;
   private readonly runtime: RuntimeWebSocketServer;
   private workflow: AgentWorkflow;
   private readonly systemAgent = new SystemAgentClient();
@@ -361,10 +391,18 @@ export class HieroRuntime {
   private readonly chatRuns = new Map<string, ChatRunBuffer>();
   private readonly stateStore: StateStore;
   private currentTaskId: string | undefined;
+  private readonly schedulesPath: string;
+  private schedules: ScheduledTask[] = [];
+  private scheduleTimer: NodeJS.Timeout | undefined;
+  private scheduleRunning = false;
 
-  public constructor(port = 8080, storePath?: string) {
+  public constructor(port = 8080, storePath?: string, schedulesPath = defaultSchedulesPath()) {
     this.stateStore = new StateStore(storePath);
     this.stateStore.markRunningAsInterrupted();
+    this.schedulesPath = schedulesPath;
+    this.schedules = loadSchedules(schedulesPath);
+    this.scheduleTimer = setInterval(() => void this.runDueSchedules(), 60_000);
+    this.scheduleTimer.unref();
     this.runtime = new RuntimeWebSocketServer(this.machine, port);
     this.runtime.onTransition = (transition) => this.currentTaskId && this.stateStore.recordTransition(this.currentTaskId, transition.from, transition.to);
     this.approvals = new ApprovalBroker((request) => this.runtime.broadcast({ type: 'APPROVAL_REQUIRED', payload: request }));
@@ -381,6 +419,7 @@ export class HieroRuntime {
       else if (isTaskHistoryRequest(message)) this.runtime.send({ type: 'TASK_HISTORY', payload: { tasks: this.stateStore.listTasks() } }, client);
       else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: resolveChatWorkspace(message.workspace), traces: await listChatTraces(resolveChatWorkspace(message.workspace)) } }, client);
       else if (isSettingsRequest(message)) this.runtime.send({ type: 'SETTINGS', payload: this.readModelSettings() }, client);
+      else if (isScheduleRequest(message)) this.handleScheduleRequest(message, client);
       else if (isModelListRequest(message)) await this.handleModelList(message, client);
       else if (isMcpConfigGet(message)) this.sendMcpConfig(client);
       else if (isMcpConfigSave(message)) await this.handleMcpConfigSave(message.payload, client);
@@ -447,24 +486,35 @@ export class HieroRuntime {
     }
   }
 
-  private createGateway(): ModelGateway {
+  private createGateway(): CompletionGateway {
     const tokens = parseTokenList(process.env.HIERO_LLM_TOKENS);
     if (tokens.length === 0) console.info('[hiero] HIERO_LLM_TOKENS is empty; using unauthenticated OpenAI-compatible endpoint (suitable for local Ollama/vLLM).');
     const embeddingConfig = embeddingConfigFromEnv();
     setDeepMemoryEmbedder(embeddingConfig ? createEmbedder(embeddingConfig) : undefined);
     const maxTokens = Number.parseInt(process.env.HIERO_LLM_MAX_TOKENS ?? '', 10);
-    const transport = new OpenAICompatibleTransport(
-      normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? ''),
-      undefined,
-      Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : undefined,
-      (model) => paramsForModel(this.configWatcher.current(), model),
-    );
-    return new ModelGateway(transport, tokens, undefined, undefined, undefined, (event) => this.telemetry.record({ name: 'model.call', ...event }));
+    const outputLimit = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : undefined;
+    const paramsFor = (model: string | undefined) => paramsForModel(this.configWatcher.current(), model);
+    const onCall = (event: { model: string; ok: boolean; inputTokens?: number; outputTokens?: number }) => this.telemetry.record({ name: 'model.call', ...event });
+    const gateway = new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? ''), undefined, outputLimit, paramsFor), tokens, undefined, undefined, undefined, onCall);
+
+    const providers = parseProviderList(process.env.HIERO_LLM_PROVIDERS);
+    if (providers.length === 0) return gateway;
+    const routed = providers.map((config) => ({
+      config,
+      gateway: new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(config.endpoint), undefined, outputLimit, paramsFor), config.tokens, undefined, undefined, undefined, onCall),
+    }));
+    console.info(`[hiero] Routing models across ${providers.length} extra provider(s): ${providers.map((provider) => provider.name).join(', ')}.`);
+    return new RoutedModelGateway(gateway, routed);
   }
 
-  /** Summarizes older history with HIERO_COMPACT_MODEL (a cheap or local model) when set, otherwise the main model. */
+  /** Resolves the model for a task kind from the saved overrides and auto selection. Undefined keeps the caller's default. */
+  private modelForKind(kind: TaskModelKind): string | undefined {
+    return resolveTaskModel(kind, parseTaskModelOverrides(process.env.HIERO_LLM_TASK_MODELS), taskModelCandidates());
+  }
+
+  /** Summarizes older history with HIERO_COMPACT_MODEL (a cheap or local model) when set, otherwise the task-kind model. */
   private createCompactor(keepRecent = DEFAULT_KEEP_RECENT): ContextCompactor {
-    const compactModel = process.env.HIERO_COMPACT_MODEL || undefined;
+    const compactModel = process.env.HIERO_COMPACT_MODEL || this.modelForKind('compaction');
     return new ContextCompactor(async (task, transcript) => {
       const summaryTask: TaskContract = { ...task, model_config: { preferred_model: compactModel ?? task.model_config.preferred_model, fallback_chain: [] } };
       const response = await this.gateway.complete(summaryTask, { prompt: transcript });
@@ -504,7 +554,7 @@ export class HieroRuntime {
      permission_mode: 'standard',
      context_mode: 'ephemeral',
      acceptance_criteria: [],
-     budget_envelope: { max_tokens: 4000, max_time_ms: 120_000 },
+     budget_envelope: { max_tokens: DEFAULT_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 },
    };
    try {
      const tools = chatToolDefinitions(normalizeSubagentSettings(undefined));
@@ -567,12 +617,14 @@ export class HieroRuntime {
   }
 
   /** Returns model settings for display. API tokens are never returned, only their count. */
-  public readModelSettings(): { endpoint: string; model: string; token_count: number } {
+  public readModelSettings(): { endpoint: string; model: string; token_count: number; task_models: TaskModelOverrides; model_candidates: string[] } {
     const endpoint = process.env.HIERO_LLM_ENDPOINT ?? '';
     return {
       endpoint,
       model: process.env.HIERO_LLM_MODEL ?? 'auto',
       token_count: parseTokenList(process.env.HIERO_LLM_TOKENS).length,
+      task_models: parseTaskModelOverrides(process.env.HIERO_LLM_TASK_MODELS),
+      model_candidates: taskModelCandidates(),
     };
   }
 
@@ -580,15 +632,21 @@ export class HieroRuntime {
    * Writes endpoint/model/tokens to the local .env file and applies them to the running process.
    * An empty token field keeps the existing tokens so the UI never has to echo them back.
    */
-  public saveModelSettings(input: ModelSettingsInput, root = process.cwd()): { endpoint: string; model: string; token_count: number } {
+  public saveModelSettings(input: ModelSettingsInput, root = process.cwd()): ReturnType<HieroRuntime['readModelSettings']> {
     const endpoint = normalizeEndpoint(input.endpoint) || normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? '');
     const model = input.model.trim() || 'auto';
     const newTokens = parseTokenList(input.tokens);
     const tokens = newTokens.length > 0 ? newTokens : parseTokenList(process.env.HIERO_LLM_TOKENS);
+    const taskModels: TaskModelOverrides = {};
+    for (const kind of TASK_MODEL_KINDS) {
+      const value = input.task_models?.[kind]?.trim();
+      if (value) taskModels[kind] = value;
+    }
     const values: Record<string, string> = {
       HIERO_LLM_ENDPOINT: endpoint,
       HIERO_LLM_MODEL: model,
       HIERO_LLM_TOKENS: tokens.join(','),
+      HIERO_LLM_TASK_MODELS: Object.keys(taskModels).length > 0 ? JSON.stringify(taskModels) : '',
     };
     writeLocalEnv(values, root);
     for (const [key, value] of Object.entries(values)) process.env[key] = value;
@@ -700,7 +758,7 @@ export class HieroRuntime {
       permission_mode: parsePermissionMode(request.permission, 'standard'),
       context_mode: 'ephemeral',
       acceptance_criteria: [],
-      budget_envelope: { max_tokens: 4000, max_time_ms: 120_000 },
+      budget_envelope: { max_tokens: DEFAULT_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 },
     };
     const subagent = normalizeSubagentSettings(request.subagent);
     const toolDefinitions = chatToolDefinitions(subagent);
@@ -894,14 +952,14 @@ export class HieroRuntime {
     }
   }
 
-  public async handleMessage(message: RuntimeTaskRequest): Promise<void> {
+  public async handleMessage(message: RuntimeTaskRequest): Promise<TaskRunResult | undefined> {
     if (message.extension?.github_url) {
       const result = await this.systemAgent.install(message.extension.github_url, message.extension.install_root).catch((cause): SystemAgentError => ({ type: 'ERROR', request_id: 'unknown', error: { code: 'SYS-001', level: 'blocker', message: cause instanceof Error ? cause.message : String(cause), suggestion: 'Inspect the extension repository and retry.' } }));
       if (result.type === 'ERROR') this.runtime.broadcast({ type: 'ERROR', payload: result.error as ErrorRecord });
       else this.runtime.broadcast({ type: 'EXTENSION_READY', payload: { request_id: result.request_id, plugin_path: result.plugin_path, mcp_config_path: result.mcp_config_path } });
-      return;
+      return undefined;
     }
-    if (!message.goal?.trim()) return;
+    if (!message.goal?.trim()) return undefined;
     try {
       const resumable = message.resume_task_id ? this.stateStore.getTask(message.resume_task_id) : undefined;
       const checkpoint = resumable?.status === 'interrupted' ? this.stateStore.latestCheckpoint(resumable.task_id) : undefined;
@@ -909,18 +967,18 @@ export class HieroRuntime {
       const task: TaskContract = {
         task_id: checkpoint && resumable ? resumable.task_id : message.task?.task_id ?? randomUUID(),
         workspace_path: resolveChatWorkspace(message.task?.workspace_path),
-        model_config: message.task?.model_config ?? { preferred_model: process.env.HIERO_LLM_MODEL ?? 'auto', fallback_chain: [] },
+        model_config: message.task?.model_config ?? { preferred_model: this.modelForKind('execution') ?? process.env.HIERO_LLM_MODEL ?? 'auto', fallback_chain: [] },
         permission_mode: message.task?.permission_mode ?? 'standard',
         context_mode: message.task?.context_mode ?? 'ephemeral',
         acceptance_criteria: message.task?.acceptance_criteria ?? [],
-        budget_envelope: message.task?.budget_envelope ?? { max_tokens: 4000, max_time_ms: 120_000 },
+        budget_envelope: message.task?.budget_envelope ?? { max_tokens: DEFAULT_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 },
       };
       await this.capabilityRouter.discoverSkills(task.workspace_path);
       if (message.handoff) {
         const document = await this.createWorkflow(task.workspace_path).handoff(task, message.goal, message.handoff);
         this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: { ...document } });
         this.runtime.completeState(AgentState.Handoff);
-        return;
+        return undefined;
       }
       const goal = resumable ? resumable.goal : message.goal;
       this.machine.beginTask();
@@ -937,21 +995,66 @@ export class HieroRuntime {
       if ('handoff' in outcome) {
         this.runtime.completeState(AgentState.Handoff);
         this.stateStore.finishTask(task.task_id, 'completed');
-        return;
+        return { task_id: task.task_id, status: 'completed', summary: '已转入交接，无正文汇报' };
       }
       const after = await snapshotTextFiles(task.workspace_path);
       for (const diff of await diffSnapshots(before, after)) this.runtime.broadcast({ type: 'FILE_DIFF', payload: diff });
       this.runtime.completeState(AgentState.Verify);
       this.stateStore.finishTask(task.task_id, 'completed');
+      return { task_id: task.task_id, status: 'completed', summary: outcome.response.content ?? '' };
     } catch (cause) {
-      if (this.currentTaskId) this.stateStore.finishTask(this.currentTaskId, 'failed');
+      const failedTaskId = this.currentTaskId;
+      if (failedTaskId) this.stateStore.finishTask(failedTaskId, 'failed');
       this.runtime.reportError(cause);
+      return failedTaskId ? { task_id: failedTaskId, status: 'failed', summary: cause instanceof Error ? cause.message : String(cause) } : undefined;
     } finally {
       this.currentTaskId = undefined;
     }
   }
 
+  /** Adds, removes, enables/disables, or lists scheduled prompts. Every change is persisted immediately. */
+  private handleScheduleRequest(message: ScheduleRequest, client: WebSocket): void {
+    try {
+      if (message.action === 'create') {
+        this.schedules.push(createScheduledTask(message.payload ?? {}));
+        if (message.payload?.run_now === true) void this.runDueSchedules();
+      } else if (message.action === 'delete') {
+        this.schedules = this.schedules.filter((task) => task.id !== message.id);
+      } else if (message.action === 'toggle') {
+        this.schedules = this.schedules.map((task) => task.id === message.id ? { ...task, enabled: !task.enabled, next_run_at: nextRunAfter(new Date(), task.interval_minutes) } : task);
+      }
+      if (message.action !== 'list') saveSchedules(this.schedulesPath, this.schedules);
+      this.runtime.send({ type: 'SCHEDULES', payload: { ok: true, tasks: this.schedules } }, client);
+    } catch (cause) {
+      this.runtime.send({ type: 'SCHEDULES', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause), tasks: this.schedules } }, client);
+    }
+  }
+
+  /** Runs every enabled schedule that is due, then advances its next run time. Runs are sequential to avoid overlapping agent tasks. */
+  private async runDueSchedules(): Promise<void> {
+    if (this.currentTaskId || this.scheduleRunning) return;
+    const due = dueTasks(this.schedules);
+    if (due.length === 0) return;
+    this.scheduleRunning = true;
+    try {
+      for (const task of due) {
+        const now = new Date();
+        this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_run_at: now.toISOString(), next_run_at: nextRunAfter(now, item.interval_minutes) } : item);
+        saveSchedules(this.schedulesPath, this.schedules);
+        const result = await this.handleMessage({ goal: task.goal });
+        if (result) {
+          this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_task_id: result.task_id, last_status: result.status, last_summary: result.summary } : item);
+          saveSchedules(this.schedulesPath, this.schedules);
+          this.runtime.broadcast({ type: 'SCHEDULES', payload: { ok: true, tasks: this.schedules } });
+        }
+      }
+    } finally {
+      this.scheduleRunning = false;
+    }
+  }
+
   public async close(): Promise<void> {
+    if (this.scheduleTimer) clearInterval(this.scheduleTimer);
     await this.runtime.close();
     await this.systemAgent.close();
     this.stateStore.close();

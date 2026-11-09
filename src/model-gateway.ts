@@ -218,6 +218,69 @@ export function parseTokenList(raw: string | undefined): string[] {
     .filter((token) => token.length > 0);
 }
 
+/** One OpenAI-compatible provider with its own endpoint and keys, used for the models listed in `models`. */
+export interface ModelProviderConfig {
+  name: string;
+  endpoint: string;
+  tokens: string[];
+  models: string[];
+}
+
+/**
+ * Parses HIERO_LLM_PROVIDERS, a JSON array such as
+ * [{"name":"openai","endpoint":"https://api.openai.com/v1","tokens":["sk-a","sk-b"],"models":["gpt-4o"]}].
+ * Empty or unset input means no extra providers.
+ */
+export function parseProviderList(raw: string | undefined): ModelProviderConfig[] {
+  const text = (raw ?? '').trim();
+  if (!text) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error('HIERO_LLM_PROVIDERS 不是合法的 JSON 数组。');
+  }
+  if (!Array.isArray(parsed)) throw new Error('HIERO_LLM_PROVIDERS 必须是 JSON 数组。');
+  return parsed.map((item, index) => {
+    const entry = (typeof item === 'object' && item !== null ? item : {}) as Record<string, unknown>;
+    const name = typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : `provider-${index + 1}`;
+    const endpoint = typeof entry.endpoint === 'string' ? entry.endpoint.trim() : '';
+    const tokens = Array.isArray(entry.tokens) ? entry.tokens.filter((token): token is string => typeof token === 'string' && token.trim() !== '').map((token) => token.trim()) : [];
+    const models = Array.isArray(entry.models) ? entry.models.filter((model): model is string => typeof model === 'string' && model.trim() !== '').map((model) => model.trim()) : [];
+    if (!endpoint) throw new Error(`HIERO_LLM_PROVIDERS 中的供应商 ${name} 缺少 endpoint。`);
+    if (models.length === 0) throw new Error(`HIERO_LLM_PROVIDERS 中的供应商 ${name} 缺少 models。`);
+    return { name, endpoint, tokens, models };
+  });
+}
+
+/**
+ * Routes each request to the gateway whose provider lists the requested model.
+ * Models not listed by any provider go to the default gateway (the HIERO_LLM_ENDPOINT / HIERO_LLM_TOKENS pool).
+ */
+/** Anything that can complete a task; implemented by ModelGateway and RoutedModelGateway. */
+export interface CompletionGateway {
+  complete(task: TaskContract, request: Omit<ModelRequest, 'model'>): Promise<ModelResponse>;
+}
+
+export class RoutedModelGateway implements CompletionGateway {
+  private readonly routes = new Map<string, ModelGateway>();
+
+  public constructor(
+    private readonly fallback: ModelGateway,
+    providers: readonly { config: ModelProviderConfig; gateway: ModelGateway }[] = [],
+  ) {
+    for (const { config, gateway } of providers) {
+      for (const model of config.models) this.routes.set(model, gateway);
+    }
+  }
+
+  public async complete(task: TaskContract, request: Omit<ModelRequest, 'model'>): Promise<ModelResponse> {
+    const model = task.model_config.preferred_model;
+    const target = this.routes.get(model) ?? this.fallback;
+    return target.complete(task, request);
+  }
+}
+
 function toWireMessage(message: ModelMessage): Record<string, unknown> {
   const { images, ...rest } = message;
   if (!images || images.length === 0) return rest;

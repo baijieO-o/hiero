@@ -765,3 +765,17 @@ button, textarea, select { font: inherit; }
 .code-block-lang { font-family: 'JetBrains Mono', Consolas, monospace; text-transform: lowercase; }
 .code-copy { border: 1px solid var(--border); border-radius: 4px; background: transparent; color: inherit; font-size: 11px; padding: 2px 8px; cursor: pointer; }
 .code-copy:hover { color: var(--text-strong); }
+
+.settings-schedule-form { display: grid; gap: 8px; margin: 8px 0 14px; }
+.settings-schedule-form textarea { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--input-bg); font: inherit; font-size: 12px; box-sizing: border-box; }
+.settings-schedule-form input { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--input-bg); font: inherit; font-size: 12px; box-sizing: border-box; }
+.settings-schedule-form .primary-button { margin-top: 4px; }
+.settings-schedule-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.settings-schedule-list li.settings-row { grid-template-columns: 1fr auto; }
+.settings-schedule-list li.settings-row > span:first-child { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.settings-schedule-actions { display: flex; gap: 6px; }
+.settings-schedule-report { font-size: 12px; }
+.settings-schedule-report pre { white-space: pre-wrap; max-height: 320px; overflow: auto; margin: 6px 0 0; padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--input-bg); font: inherit; font-size: 12px; }
+.settings-error { color: #e5484d; font-size: 11px; }
+.settings-hint { color: var(--text-muted); font-size: 11px; }
+.settings-schedule-form .settings-row { grid-template-columns: 1fr; }

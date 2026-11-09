@@ -113,6 +113,9 @@ HIERO_LLM_TOKENS=EMPTY
 | `HIERO_LLM_ENDPOINT` | 模型服务的 Chat Completions 地址 |
 | `HIERO_LLM_MODEL` | 模型名 |
 | `HIERO_LLM_TOKENS` | 令牌，多个令牌用逗号分隔 |
+| `HIERO_LLM_PROVIDERS` | 可选，多供应商多 key 共存：JSON 数组，每项含 `name`、`endpoint`、`tokens`、`models`；按模型名路由，未匹配的模型使用默认端点和 `HIERO_LLM_TOKENS` |
+| `HIERO_LLM_TASK_MODELS` | 可选，按任务类型指定模型（chat / planning / execution / subagent / compaction），JSON 对象；未填的类型自动从 `HIERO_LLM_PROVIDERS` 中选择。也可在设置面板中修改 |
+| 定时任务 | 运行时每分钟检查一次到期任务，持久化到 `~/.hiero/schedules.json`；按固定间隔（分钟）发送预设 prompt，结果写入任务历史 |
 | `HIERO_LLM_MAX_TOKENS` | 可选，单次回复的最大输出 token 数 |
 | `HIERO_COMPACT_MODEL` | 可选，用于压缩总结的模型，未设置时使用主模型 |
 | `HIERO_BRAVE_API_KEY` | 可选，启用 Brave Search；未设置时使用 DuckDuckGo |

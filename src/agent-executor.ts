@@ -2,7 +2,7 @@
 import { error, type EvidenceRecord, type TaskContract } from './contracts.js';
 import { memoryContext } from './memory-store.js';
 import { deepRecallContext } from './deep-memory.js';
-import type { ModelGateway, ModelMessage, ModelResponse, ModelToolDefinition } from './model-gateway.js';
+import type { CompletionGateway, ModelMessage, ModelResponse, ModelToolDefinition } from './model-gateway.js';
 import type { ToolGateway } from './tool-gateway.js';
 import { ContextManager } from './context-manager.js';
 import type { CapabilityRouter } from './capability-router.js';
@@ -30,7 +30,7 @@ function estimateTokenCount(text: string): number { return Math.ceil(text.length
 const MAX_REPEATED_CALLS = 3;
 
 export class AgentExecutor {
-  public constructor(private readonly modelGateway: ModelGateway, private readonly toolGateway: ToolGateway, private readonly maxTurns = 8, private readonly capabilityRouter?: CapabilityRouter, private readonly contextThreshold = 0.8, private readonly compactor?: ContextCompactor) {
+  public constructor(private readonly modelGateway: CompletionGateway, private readonly toolGateway: ToolGateway, private readonly maxTurns = 8, private readonly capabilityRouter?: CapabilityRouter, private readonly contextThreshold = 0.8, private readonly compactor?: ContextCompactor) {
     if (contextThreshold <= 0 || contextThreshold > 1) throw error('CTX-003', 'blocker', 'Invalid context threshold.', 'Use a threshold in the range (0, 1].');
   }
   private usedTokens(messages: readonly ModelMessage[], prompt: string, tools: readonly ModelToolDefinition[]): number {

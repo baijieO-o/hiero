@@ -143,10 +143,22 @@ export const useSubagentPreferences = create<SubagentState>()(persist((set) => (
   },
 }));
 
+export const TASK_MODEL_KIND_ORDER = ['chat', 'planning', 'execution', 'subagent', 'compaction'] as const;
+export type TaskModelKindId = (typeof TASK_MODEL_KIND_ORDER)[number];
+export const TASK_MODEL_KIND_TEXT: Record<TaskModelKindId, string> = {
+  chat: '对话回复（聊天里的模型选择优先）',
+  planning: '任务规划',
+  execution: '工具执行 / 编码',
+  subagent: '只读调研子任务',
+  compaction: '上下文压缩',
+};
+
 export interface ModelSettings {
   endpoint: string;
   model: string;
   token_count: number;
+  task_models?: Partial<Record<TaskModelKindId, string>>;
+  model_candidates?: string[];
 }
 
 export function applyPreferenceTheme(values: PreferenceValues): void {
@@ -371,16 +383,19 @@ function PreferenceControl({ field, value, onChange }: { field: PreferenceField;
 
 export type ModelListState = { status: 'idle' } | { status: 'loading' } | { status: 'ready'; models: string[] } | { status: 'error'; message: string };
 
-export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, onFetchModels }: { modelSettings: ModelSettings | null; saveState: SaveState; onSave: (input: { endpoint: string; model: string; tokens: string }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void }): ReactElement {
+export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, onFetchModels }: { modelSettings: ModelSettings | null; saveState: SaveState; onSave: (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void }): ReactElement {
   const [endpoint, setEndpoint] = useState('');
   const [model, setModel] = useState('');
   const [tokens, setTokens] = useState('');
+  const [taskModels, setTaskModels] = useState<Partial<Record<TaskModelKindId, string>>>({});
   const [dirty, setDirty] = useState(false);
+  const candidates = modelSettings?.model_candidates ?? [];
 
   useEffect(() => {
     if (!modelSettings || dirty) return;
     setEndpoint(modelSettings.endpoint);
     setModel(modelSettings.model);
+    setTaskModels(modelSettings.task_models ?? {});
   }, [modelSettings, dirty]);
 
   useEffect(() => {
@@ -392,7 +407,7 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onSave({ endpoint, model, tokens });
+    onSave({ endpoint, model, tokens, task_models: taskModels });
   };
 
   const statusText = saveState.status === 'saving'
@@ -452,10 +467,23 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
           {modelList.models.map((id) => <tr key={id} className={id === model ? 'model-config-current' : undefined}>
             <td><code>{id}</code></td>
             <td>openai-compatible</td>
-            <td><button type="button" className="ghost-button" onClick={() => { setModel(id); storeDefaultModel(id); onSave({ endpoint, model: id, tokens: '' }); }}>{id === model ? '当前' : '设为默认'}</button></td>
+            <td><button type="button" className="ghost-button" onClick={() => { setModel(id); storeDefaultModel(id); onSave({ endpoint, model: id, tokens: '', task_models: taskModels }); }}>{id === model ? '当前' : '设为默认'}</button></td>
           </tr>)}
         </tbody>
       </table> : null}
+    </section>
+
+    <section className="model-config-block">
+      <h4>按任务选择模型</h4>
+      <p className="settings-mcp-hint">留空为自动选择：从 HIERO_LLM_PROVIDERS 配置的模型中按任务类型挑选。选了具体模型则以它为准。</p>
+      {candidates.length === 0 ? <p className="settings-mcp-hint">尚无候选模型。请在 .env 中配置 HIERO_LLM_PROVIDERS，并在上面设置默认模型。</p> : null}
+      {TASK_MODEL_KIND_ORDER.map((kind) => <label className="settings-field" key={kind}>
+        <span><strong>{TASK_MODEL_KIND_TEXT[kind]}</strong></span>
+        <select value={taskModels[kind] ?? ''} aria-label={TASK_MODEL_KIND_TEXT[kind]} onChange={(event) => { const value = event.target.value; setTaskModels((current) => ({ ...current, [kind]: value || undefined })); setDirty(true); }}>
+          <option value="">自动</option>
+          {candidates.map((id) => <option key={id} value={id}>{id}</option>)}
+        </select>
+      </label>)}
     </section>
 
     <div className="settings-form-actions">
@@ -634,7 +662,7 @@ export function McpServersForm({ config, saveState, onSave }: { config: McpConfi
 
 export type SaveState = { status: 'idle' } | { status: 'saving' } | { status: 'saved'; tokenCount: number } | { status: 'error'; message: string };
 
-export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList, onFetchModels, mcpConfig, mcpSaveState, onSaveMcp }: { modelSettings: ModelSettings | null; saveState: SaveState; onSaveModel: (input: { endpoint: string; model: string; tokens: string }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void; mcpConfig: McpConfigState | null; mcpSaveState: McpSaveState; onSaveMcp: (servers: McpServerEntry[]) => void }): ReactElement {
+export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList, onFetchModels, mcpConfig, mcpSaveState, onSaveMcp }: { modelSettings: ModelSettings | null; saveState: SaveState; onSaveModel: (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void; mcpConfig: McpConfigState | null; mcpSaveState: McpSaveState; onSaveMcp: (servers: McpServerEntry[]) => void }): ReactElement {
   const values = usePreferences((state) => state.values);
   const update = usePreferences((state) => state.update);
   const reset = usePreferences((state) => state.reset);

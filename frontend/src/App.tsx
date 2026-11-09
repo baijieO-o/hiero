@@ -4,7 +4,8 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
 import type { ReactElement } from 'react';
-import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState } from './settings';
+import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState, type TaskModelKindId } from './settings';
+import { SchedulesPanel } from './schedules-panel';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { handleCodeCopy, renderMarkdown, renderPartialMarkdown, splitStreamingBlocks } from './markdown';
 import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
@@ -41,7 +42,7 @@ function connectRuntime(onMessage: (message: RuntimeMessage) => void): () => voi
 
 const BROADCAST_TYPES = ['SNAPSHOT', 'STATE_CHANGE', 'VERIFY_RESULT', 'REWIND_RESULT', 'FILE_DIFF', 'HANDOFF_TRIGGERED'];
 
-type PanelKind = 'chat' | 'mission' | 'debug' | 'todo' | 'review' | 'handoff' | 'settings' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
+type PanelKind = 'chat' | 'mission' | 'debug' | 'todo' | 'review' | 'handoff' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
 
 const PANEL_TITLES: Record<PanelKind, string> = {
   chat: '对话',
@@ -51,6 +52,7 @@ const PANEL_TITLES: Record<PanelKind, string> = {
   review: '代码审查',
   handoff: '交接文档',
   settings: '设置',
+  schedules: '定时任务',
   browser: '浏览器',
   terminal: '终端',
   files: '文件管理器',
@@ -1569,7 +1571,7 @@ function SettingsBuffer(): ReactElement {
     setModelList({ status: 'loading' });
     socket.send(JSON.stringify({ type: 'model_list', request_id: 'model-list', payload: input }));
   };
-  const saveModel = (input: { endpoint: string; model: string; tokens: string }) => {
+  const saveModel = (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setSaveState({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端再保存。' });
@@ -1634,7 +1636,7 @@ function SettingsBuffer(): ReactElement {
       socket.close();
     };
   }, []);
-  return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} modelList={modelList} onFetchModels={fetchModels} mcpConfig={mcpConfig} mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} modelList={modelList} onFetchModels={fetchModels} mcpConfig={mcpConfig}   mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
 }
 
 function normalizeBrowserUrl(input: string): string | null {
@@ -2393,7 +2395,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
   </div>;
 }
 
-const panelComponents = { chat: ChatPanel, mission: MissionControl, debug: DebugConsole, todo: TodoList, review: CodeReview, handoff: HandoffPanel, settings: SettingsBuffer, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
+const panelComponents = { chat: ChatPanel, mission: MissionControl, debug: DebugConsole, todo: TodoList, review: CodeReview, handoff: HandoffPanel, settings: SettingsBuffer, schedules: () => <SchedulesPanel wsUrl={RUNTIME_WS_URL} />, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
 
 function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
   const [maximized, setMaximized] = useState(() => api.isMaximized());
