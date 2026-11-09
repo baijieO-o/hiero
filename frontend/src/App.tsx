@@ -12,6 +12,7 @@ import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
 import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
 import { TaskCard } from './task-card';
 import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
+import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
 import { DocsCenter } from './docs-center';
 import { clarifyComplete, clarifyQuestions, type ClarifyAnswers } from './clarify-model';
 import { ClarifyWizard } from './clarify-wizard';
@@ -1754,6 +1755,39 @@ function DeleteConversationConfirm({ title, onConfirm, onCancel }: { title: stri
   </div>;
 }
 
+/** Listens for ASK_USER_REQUIRED on a persistent socket and answers with ask_user_response. */
+function AskUserModal(): ReactElement | null {
+  const [queue, setQueue] = useState<AskUserRequest[]>([]);
+  const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    socketRef.current = socket;
+    socket.onmessage = (event) => {
+      let message: RuntimeMessage;
+      try { message = JSON.parse(String(event.data)) as RuntimeMessage; } catch { return; }
+      if (!active || message.type !== 'ASK_USER_REQUIRED' || !message.payload) return;
+      const payload = message.payload as unknown as AskUserRequest;
+      setQueue((current) => [...current, payload]);
+    };
+    return () => { active = false; socketRef.current = null; socket.close(); };
+  }, []);
+
+  const current = queue[0];
+  const askId = current?.ask_id;
+  const respond = useCallback((answer: { status: 'submitted'; values: Record<string, unknown> } | { status: 'declined' }) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN && askId) {
+      socket.send(JSON.stringify({ type: 'ask_user_response', payload: { ask_id: askId, ...answer } }));
+    }
+    setQueue((rest) => rest.slice(1));
+  }, [askId]);
+  if (!current) return null;
+
+  return <AskUserDialog key={current.ask_id} request={current} onRespond={respond} />;
+}
+
 /** Listens for APPROVAL_REQUIRED on a persistent socket and answers with approval_response. */
 function ApprovalModal(): ReactElement | null {
   const [queue, setQueue] = useState<ApprovalRequest[]>([]);
@@ -2661,6 +2695,7 @@ function App(): ReactElement {
 
   return <main className="app-shell">
     <ApprovalModal />
+    <AskUserModal />
     <header className="topbar">
       <div className="brand"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>HIERO</span></div>
       <nav className="screen-tabs" aria-label="工作区">

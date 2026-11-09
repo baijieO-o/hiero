@@ -41,6 +41,7 @@ export type RuntimeEvent =
   | { type: 'MCP_CONFIG_SAVE_RESULT'; payload: { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string } }
   | { type: 'WORKSPACE_RESULT'; payload: Record<string, unknown> & { request_id: string; kind: string } }
   | { type: 'APPROVAL_REQUIRED'; payload: { approval_id: string; tool_name: string; summary: string; input: unknown } }
+  | { type: 'ASK_USER_REQUIRED'; payload: { ask_id: string; message: string; fields: unknown[] } }
   | { type: 'ROLLBACK_RESULT'; payload: { ok: true; restored: string[]; skipped: string[]; warning?: unknown } | { ok: false; message: string } };
 
 /** Sent once on connect. Lets a (re)connected panel rebuild its state node instead of waiting for the next transition. */

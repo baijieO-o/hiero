@@ -24,6 +24,7 @@ import { modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
 import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
 import { ApprovalBroker } from './approval-broker.js';
+import { AskUserBroker, type AskUserField, type AskUserResult } from './ask-user-broker.js';
 import { createScheduledTask, defaultSchedulesPath, dueTasks, loadSchedules, nextRunAfter, saveSchedules, type ScheduledTask } from './scheduled-tasks.js';
 
 /** Result of one agent run, returned so scheduled tasks can record their report. */
@@ -96,7 +97,7 @@ export interface RuntimeChatRequest {
   subagent?: Partial<SubagentSettings>;
 }
 
-const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative.';
+const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative. When the user asks you to ask them something (e.g. "问我", "询问我", "弹窗问我") or when you need the user to choose among options or supply missing details, you MUST call the ask_user tool instead of asking in plain text.';
 const CHAT_TOOL_ROUNDS = 5;
 /** Chat has no per-task token cap, so compaction triggers at a fixed estimated size. */
 const CHAT_COMPACT_TOKENS = 24_000;
@@ -208,8 +209,43 @@ export function resolveChatWorkspace(workspace: string | undefined): string {
   return candidate;
 }
 
+/** ask_user is only offered in interactive chat. Scheduled tasks use a separate tool list, so they never see it. */
+const ASK_USER_TOOL_DEFINITION: ModelToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'ask_user',
+    description: 'Ask the user a structured question with 1-8 form fields and wait for the answer. Use it when a decision or missing detail blocks progress. Field types: string, number, integer, boolean, enum (single choice), multi (multiple choice, needs options). Each enum/multi field needs options. If the user declines or times out, continue without the answer and say so.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        message: { type: 'string', description: 'The question or context shown above the form.' },
+        fields: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              key: { type: 'string' },
+              type: { type: 'string', enum: ['string', 'number', 'integer', 'boolean', 'enum', 'multi'] },
+              title: { type: 'string' },
+              description: { type: 'string' },
+              options: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { value: { type: 'string' }, label: { type: 'string' } }, required: ['value', 'label'] } },
+            },
+            required: ['key', 'type', 'title'],
+          },
+        },
+      },
+      required: ['message', 'fields'],
+    },
+  },
+};
+
 function chatToolDefinitions(subagent: SubagentSettings): ModelToolDefinition[] {
-  return subagent.enabled ? CHAT_TOOL_DEFINITIONS : CHAT_TOOL_DEFINITIONS.filter((tool) => !SUBAGENT_TOOL_NAMES.has(tool.function.name));
+  const base = subagent.enabled ? CHAT_TOOL_DEFINITIONS : CHAT_TOOL_DEFINITIONS.filter((tool) => !SUBAGENT_TOOL_NAMES.has(tool.function.name));
+  return [...base, ASK_USER_TOOL_DEFINITION];
 }
 
 /**
@@ -302,6 +338,33 @@ function isApprovalResponse(message: unknown): message is ApprovalResponse {
   return candidate.type === 'approval_response' && typeof candidate.payload?.approval_id === 'string' && typeof candidate.payload?.approved === 'boolean';
 }
 
+interface AskUserResponse { type: 'ask_user_response'; payload: { ask_id: string; status: 'submitted' | 'declined'; values?: Record<string, unknown> } }
+
+function isAskUserResponse(message: unknown): message is AskUserResponse {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as { type?: unknown; payload?: { ask_id?: unknown; status?: unknown } };
+  return candidate.type === 'ask_user_response' && typeof candidate.payload?.ask_id === 'string' && (candidate.payload?.status === 'submitted' || candidate.payload?.status === 'declined');
+}
+
+/** Parses the model's ask_user arguments into fields the dialog can render. Returns undefined when the shape is invalid. */
+function parseAskUserArgs(rawArguments: string): { message: string; fields: AskUserField[] } | undefined {
+  let args: { message?: unknown; fields?: unknown };
+  try { args = JSON.parse(rawArguments) as typeof args; } catch { return undefined; }
+  if (typeof args.message !== 'string' || !Array.isArray(args.fields) || args.fields.length === 0 || args.fields.length > 8) return undefined;
+  const fields: AskUserField[] = [];
+  for (const item of args.fields as Record<string, unknown>[]) {
+    if (typeof item.key !== 'string' || typeof item.title !== 'string') return undefined;
+    const type = item.type;
+    if (type !== 'string' && type !== 'number' && type !== 'integer' && type !== 'boolean' && type !== 'enum' && type !== 'multi') return undefined;
+    const options = Array.isArray(item.options)
+      ? (item.options as { value?: unknown; label?: unknown }[]).filter((opt): opt is { value: string; label: string } => typeof opt.value === 'string' && typeof opt.label === 'string')
+      : undefined;
+    if ((type === 'enum' || type === 'multi') && (!options || options.length === 0)) return undefined;
+    fields.push({ key: item.key, type, title: item.title, ...(typeof item.description === 'string' ? { description: item.description } : {}), ...(options ? { options } : {}) });
+  }
+  return { message: args.message, fields };
+}
+
 function isWriteRollbackRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'write_rollback';
 }
@@ -383,6 +446,7 @@ export class HieroRuntime {
   private readonly systemAgent = new SystemAgentClient();
   private readonly capabilityRouter = new CapabilityRouter();
   private readonly approvals: ApprovalBroker;
+  private readonly askUsers: AskUserBroker;
   private readonly writeSnapshots = new WriteSnapshotStore(join(homedir(), '.hiero', 'write-snapshots.json'));
   private readonly codeIndexes = new Map<string, CodeIndex>();
   private readonly configWatcher = new ConfigWatcher({ home: homedir() });
@@ -406,10 +470,12 @@ export class HieroRuntime {
     this.runtime = new RuntimeWebSocketServer(this.machine, port);
     this.runtime.onTransition = (transition) => this.currentTaskId && this.stateStore.recordTransition(this.currentTaskId, transition.from, transition.to);
     this.approvals = new ApprovalBroker((request) => this.runtime.broadcast({ type: 'APPROVAL_REQUIRED', payload: request }));
+    this.askUsers = new AskUserBroker((request) => this.runtime.broadcast({ type: 'ASK_USER_REQUIRED', payload: request }));
     this.gateway = this.createGateway();
     this.workflow = this.createWorkflow();
     this.runtime.onMessage(async (message, client) => {
       if (isApprovalResponse(message)) this.approvals.respond(message.payload.approval_id, message.payload.approved);
+      else if (isAskUserResponse(message)) this.askUsers.respond(message.payload.ask_id, message.payload.status === 'submitted' ? { status: 'submitted', values: message.payload.values ?? {} } : { status: 'declined' });
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) this.cancelChat(message.request_id, client);
@@ -811,6 +877,8 @@ export class HieroRuntime {
           if (isDelegate) {
             const mode = call.function.name === 'delegate_task' ? 'general' : call.function.name === 'delegate_write' ? 'write' : 'read';
             result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent);
+          } else if (call.function.name === 'ask_user') {
+            result = await this.runAskUser(call.function.arguments, signal);
           } else {
             result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode);
           }
@@ -909,6 +977,16 @@ export class HieroRuntime {
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
     tools.setBreakpoints(hitlBreakpointsFromEnv());
     return tools;
+  }
+
+  /** Pauses the chat turn until the operator answers the ask_user form. The answer is returned to the model as the tool result. */
+  private async runAskUser(rawArguments: string, signal: AbortSignal): Promise<string> {
+    const parsed = parseAskUserArgs(rawArguments);
+    if (!parsed) return JSON.stringify({ error: 'ask_user requires message and 1-8 valid fields; enum/multi fields need options.' });
+    const answer: AskUserResult = await this.askUsers.ask(parsed.message, parsed.fields);
+    if (signal.aborted) return JSON.stringify({ status: 'cancelled' });
+    if (answer.status === 'submitted') return JSON.stringify({ status: 'submitted', values: answer.values });
+    return JSON.stringify({ status: answer.status });
   }
 
   /**
