@@ -10,6 +10,7 @@ import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { isAllowedOrigin, isLoopbackAddress } from './ws-guard.js';
 import { SystemStatsSampler, type SystemStats } from './system-stats.js';
+import type { ScheduledTask } from './scheduled-tasks.js';
 export type RuntimeEvent =
   | { type: 'SYSTEM_STATS'; payload: SystemStats & { timestamp: string } }
   | { type: 'STATE_CHANGE'; payload: { node: AgentState; status: 'running' | 'completed' } }
@@ -35,10 +36,13 @@ export type RuntimeEvent =
   | { type: 'CHAT_COMPACTED'; payload: { request_id: string; summary: string; before_tokens: number; after_tokens: number; kept_messages: number } | { request_id: string; ok: false; message: string } }
   | { type: 'SETTINGS'; payload: { endpoint: string; model: string; token_count: number } }
   | { type: 'SETTINGS_SAVE_RESULT'; payload: { ok: true; settings: { endpoint: string; model: string; token_count: number } } | { ok: false; message: string } }
+  | { type: 'SCHEDULES'; payload: { ok: true; tasks: ScheduledTask[] } | { ok: false; message: string; tasks: ScheduledTask[] } }
   | { type: 'MCP_CONFIG'; payload: { servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } }
   | { type: 'MCP_CONFIG_SAVE_RESULT'; payload: { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string } }
   | { type: 'WORKSPACE_RESULT'; payload: Record<string, unknown> & { request_id: string; kind: string } }
   | { type: 'APPROVAL_REQUIRED'; payload: { approval_id: string; tool_name: string; summary: string; input: unknown } }
+  | { type: 'ASK_USER_REQUIRED'; payload: { ask_id: string; message: string; fields: unknown[] } }
+  | { type: 'UPDATE_STATUS'; payload: import('./update-check.js').UpdateStatus }
   | { type: 'ROLLBACK_RESULT'; payload: { ok: true; restored: string[]; skipped: string[]; warning?: unknown } | { ok: false; message: string } };
 
 /** Sent once on connect. Lets a (re)connected panel rebuild its state node instead of waiting for the next transition. */

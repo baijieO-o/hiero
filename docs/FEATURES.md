@@ -20,6 +20,8 @@
 - **自动滚动**：生成时跟随底部。用户向上滚动后自动跟随暂停，并出现「回到底部」按钮。
 - **长回复保存**：没有调用工具、且超过 4000 字符的回复，会保存到工作区 `.hiero/replies/<时间>-<请求ID>.md`，聊天里只显示摘要和文件路径。
 - **停止生成**：生成过程中可以取消当前请求。
+- **浏览器共享**：内置浏览器点击「分享给智能体」会在输入框上方添加一个可移除的链接标签。发送时后端会抓取该页面正文并附加到用户消息中（最多 3 个页面；仅允许公网 http(s)，不支持 localhost）。跨域 iframe 内容不会直接从界面提取。
+- **智能体浏览器工具**：智能体可以使用独立的 Playwright 浏览器（默认 headed Edge，`visible` 模式，用户可以看到窗口）：`browser_open`、`browser_snapshot`（无障碍树）、`browser_screenshot`（仅返回元数据，模型看不到图片）、`browser_click`、`browser_type`（点击和输入每次需要用户确认）。`headless_extract` 使用无头浏览器提取正文；设置 `HIERO_HEADLESS_CDP_URL` 可接入外部 CDP 引擎（如 Lightpanda，尚未在 Windows 上验证）。该浏览器没有用户登录状态，也不共享用户的 DOM 或 Cookie。子智能体不能使用这些工具。审批弹窗和链接标签尚未在界面中端到端验证。
 - **上下文用量**：按约 4 字符一个 token 估算，并非精确值。
 - **历史压缩**：历史过长时，把旧消息压缩为摘要。可通过 `HIERO_COMPACT_MODEL` 指定压缩模型，未设置则使用主模型。
 
@@ -121,16 +123,26 @@
 
 Hiero 使用 OpenAI Chat Completions 兼容协议，可连接 Ollama、vLLM 等服务。模型需要支持 function calling。
 
+配置优先级从高到低：环境变量 → 工作区 `.hiero/config.json` → 用户 `~/.hiero/config.json`。
+
 | 变量 | 说明 |
 | --- | --- |
 | `HIERO_LLM_ENDPOINT` | 兼容接口地址，如 `http://localhost:11434/v1/chat/completions` |
 | `HIERO_LLM_MODEL` | 模型名 |
 | `HIERO_LLM_TOKENS` | 访问令牌，多个用逗号分隔；本地服务可留空 |
+| `HIERO_LLM_PROVIDERS` | 可选，多供应商多 key：JSON 数组，每项含 `name`、`endpoint`、`tokens`、`models`；按模型名路由，未匹配的模型使用默认端点和 `HIERO_LLM_TOKENS` |
+| `HIERO_LLM_TASK_MODELS` | 可选，按任务类型指定模型（chat / planning / execution / subagent / compaction），JSON 对象；也可在设置面板修改 |
 | `HIERO_LLM_MAX_TOKENS` | 单次回复的最大 token 数 |
-| `HIERO_COMPACT_MODEL` | 历史压缩使用的模型，可选 |
-| `HIERO_BRAVE_API_KEY` | Brave Search 密钥，可选 |
+| `HIERO_COMPACT_MODEL` | 历史压缩使用的模型，未设置则使用主模型 |
+| `HIERO_BRAVE_API_KEY` | 可选，启用 Brave Search；未设置时使用 DuckDuckGo |
+| `HIERO_STEP_VERIFY` | 可选，设为 `1` 后每个写入步骤之后都执行验收 |
+| `HIERO_HITL_TOOLS` | 可选，逗号分隔的工具名，调用前需要人工审批 |
+| `HIERO_LOG_FILE` | 可选，遥测日志文件路径 |
+| `HIERO_EMBED_ENDPOINT` / `HIERO_EMBED_MODEL` / `HIERO_EMBED_TOKENS` | 可选，启用深层记忆的向量检索 |
+| `HIERO_UI_PORT` | 可选，前端端口，默认 5173 |
+| `HIERO_UPDATE_CHECK` | 设为 `0` 可关闭启动时的版本检查 |
 
-不要把真实密钥提交到仓库。本地配置可参考 `hiero-llm.local.example.ps1`。
+不要把真实密钥提交到仓库。完整模板见 [.env.example](../.env.example)，本地配置可参考 `hiero-llm.local.example.ps1`。`.env` 与 `hiero-llm.local.ps1` 已加入 `.gitignore`。
 
 ## 13. 快捷键
 
@@ -157,12 +169,19 @@ Mac 上可用 `Cmd` 代替 `Ctrl`。避开了浏览器保留的组合键（如 `
 
 ## 14. 已知限制
 
-- 断线期间错过的事件不回放，只靠 `SNAPSHOT` 对齐当前状态。
-- 上下文用量为估算值。
-- `read_only` 标记由模型自报，不具备安全效力。
-- Docker 只覆盖终端和验收命令，不是完整沙箱。
-- 快照只在内存中，重启后无法回滚。
-- 错误码文档为手工整理的静态内容，错误码变化时需同步更新。
+- **不是完整的安全沙箱**：Docker 只覆盖终端和 `cmd:` 验收命令，不覆盖整个 Agent。SystemAgent 扩展依赖仍可能在宿主机执行。
+- **Docker 沙箱未在真实环境端到端验证**：挂载与容器限制由单元测试检查参数。
+- **写入安全**：`write_file` 与 `edit_file` 限制在工作区内并拒绝绝对路径，但没有显式的符号链接逃逸防护。写入同名文件会覆盖原内容。Rewind 快照是全局回滚，不能只回滚单个文件。快照只在内存中，重启后失效。
+- **断点恢复**：基于工具调用级别的检查点，不是整个会话的快照。
+- **事件总线**：断线期间错过的事件不回放，重连后只靠 `SNAPSHOT` 对齐当前状态。
+- **`read_only` 标记**：由模型自报，只用于调度分组，不具备安全效力。
+- **代码搜索**：`symbol_search` 是正则实现，没有类型解析，也没有全库索引。
+- **Token 计量**：按字符数估算（约 4 字符/token），不是模型专用的 tokenizer。
+- **工具结果截断**：单次工具结果超过 8,000 字符时保留头部 70% 和尾部 30%，中间部分丢弃。对任务成功率的影响尚未用真实模型验证。
+- **历史压缩**：压缩摘要保留首条用户消息原文作为锚点，以及未完成的待办和精确路径。压缩模型的摘要质量未用真实模型逐项验证。
+- **深层记忆**：未配置 `HIERO_EMBED_*` 时只支持关键词检索。
+- **MCP**：服务器自动发现和严格的 JSON Schema → Zod 转换尚未完整闭环。
+- **错误码文档**为手工整理的静态内容，错误码变化时需同步更新。
 - 本文未在真实模型上逐项验证。
 
 ## 15. 验证状态

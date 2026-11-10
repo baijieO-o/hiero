@@ -307,6 +307,9 @@ interface ChatState {
   contextUsage: Record<string, ContextUsageView>;
   requestContextUsage: (conversationId: string) => void;
   compactConversation: (conversationId: string) => void;
+  browserPageToShare: string | null;
+  shareBrowserPage: (url: string) => void;
+  takeBrowserPageShare: () => string | null;
   options: ChatOptions;
   setOption: <K extends keyof ChatOptions>(key: K, value: ChatOptions[K]) => void;
   newConversation: () => void;
@@ -314,7 +317,7 @@ interface ChatState {
   renameConversation: (id: string, title: string) => void;
   deleteConversation: (id: string) => void;
   rewindConversation: (messageIndex: number) => void;
-  send: (text: string, images?: string[]) => void;
+  send: (text: string, images?: string[], sharedUrls?: string[]) => void;
   cancel: () => void;
 }
 
@@ -561,6 +564,13 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     error: null,
     compacting: false,
     contextUsage: {},
+    browserPageToShare: null,
+    shareBrowserPage: (url) => set({ browserPageToShare: url }),
+    takeBrowserPageShare: () => {
+      const url = get().browserPageToShare;
+      if (url) set({ browserPageToShare: null });
+      return url;
+    },
     requestContextUsage: (conversationId) => {
       const conversation = get().conversations.find((conv) => conv.id === conversationId);
       if (!conversation) return;
@@ -628,10 +638,10 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       });
       set({ error: null });
     },
-    send: (text, images = []) => {
+    send: (text, images = [], sharedUrls = []) => {
       const trimmed = text.trim();
       const state = get();
-      if ((!trimmed && images.length === 0) || state.pending) return;
+    if ((!trimmed && images.length === 0 && sharedUrls.length === 0) || state.pending) return;
       const conversation = state.conversations.find((conv) => conv.id === state.activeId);
       if (!conversation) return;
       const message: ChatMessage = { role: 'user', content: trimmed, ...(images.length > 0 ? { images } : {}) };
@@ -652,7 +662,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const target = ensureSocket();
       const { model, permission, workspace, contextMode } = state.options;
       const subagent = useSubagentPreferences.getState().values;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent });
+      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent, ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
@@ -1021,8 +1031,10 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, cancel: state.cancel })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, cancel: state.cancel })));
   const [draft, setDraft] = useState('');
+  const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
   const [folderPicking, setFolderPicking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
@@ -1074,6 +1086,12 @@ function ChatPanel(): ReactElement {
   const logRef = useRef<HTMLDivElement>(null);
   const active = conversations.find((conv) => conv.id === activeId) ?? conversations[0];
   const messages = active?.messages ?? [];
+  useEffect(() => {
+    const sharedUrl = takeBrowserPageShare();
+    if (!sharedUrl) return;
+    setSharedPageUrls((current) => current.includes(sharedUrl) ? current : [...current, sharedUrl]);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }, [browserPageToShare, takeBrowserPageShare]);
   const [scrolledUp, setScrolledUp] = useState(false);
   useEffect(() => {
     const log = logRef.current;
@@ -1158,8 +1176,8 @@ function ChatPanel(): ReactElement {
     addFileRefs(otherFiles);
   };
   const submit = async () => {
-    if (!draft.trim() && images.length === 0 && fileRefs.length === 0) return;
-    if (images.length === 0 && fileRefs.length === 0 && draft.trim() === '/compact') {
+    if (!draft.trim() && images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0) return;
+    if (images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0 && draft.trim() === '/compact') {
       setDraft('');
       if (activeId) compactConversation(activeId);
       return;
@@ -1170,7 +1188,8 @@ function ChatPanel(): ReactElement {
       return `[附件: ${ref.name}]\n\`\`\`\n${content}\n\`\`\``;
     }));
     const text = [draft, ...refBlocks].filter((part) => part.trim()).join('\n\n');
-    send(text, images);
+    send(text, images, sharedPageUrls);
+    setSharedPageUrls([]);
     setDraft('');
     setImages([]);
     setImageError(null);
@@ -1283,6 +1302,12 @@ function ChatPanel(): ReactElement {
         />}
         <div className="chat-composer" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={onDrop}>
           <div className="chat-input-box">
+            {sharedPageUrls.length > 0 && <div className="chat-file-refs">
+              {sharedPageUrls.map((url) => <span key={url} className="chat-file-ref" title={url}>
+                <span className="chat-file-ref-name">🌐 {url}</span>
+                <button type="button" aria-label="移除分享页面" title="移除" onClick={() => setSharedPageUrls((current) => current.filter((item) => item !== url))}>✕</button>
+              </span>)}
+            </div>}
             {fileRefs.length > 0 && <div className="chat-file-refs">
               {fileRefs.map((item) => <FileRefChip key={item.id} item={item} onPreview={() => setPreviewRef(item)} onRemove={() => setFileRefs((current) => current.filter((ref) => ref.id !== item.id))} />)}
             </div>}
@@ -1294,7 +1319,7 @@ function ChatPanel(): ReactElement {
               </div>)}
               {imageError && <span className="chat-attachment-error">{imageError}</span>}
             </div>}
-            <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="发送消息给 Hiero……（可粘贴或拖入图片）" />
+            <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="发送消息给 Hiero……（可粘贴或拖入图片）" />
             <div className="chat-toolbar">
               <input ref={fileInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImageFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
               <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
@@ -1317,7 +1342,7 @@ function ChatPanel(): ReactElement {
                 ? <button className="chat-send-round chat-stop-round" type="button" onClick={cancel} title="停止生成" aria-label="停止生成">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
                   </button>
-                : <button className="chat-send-round" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0 && fileRefs.length === 0} title={!draft.trim() && images.length === 0 && fileRefs.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">
+                : <button className="chat-send-round" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0} title={!draft.trim() && images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
                   </button>}
             </div>
@@ -1538,6 +1563,7 @@ function HandoffField({ label, value }: { label: string; value: unknown }): Reac
 
 
 let openBufferFromPanel: ((kind: PanelKind) => void) | null = null;
+let openChatFromPanel: (() => void) | null = null;
 
 function BlankBuffer(): ReactElement {
   const [command, setCommand] = useState('');
@@ -1678,6 +1704,7 @@ function BrowserBuffer({ api }: { api: { id: string } }): ReactElement {
       <button type="button" onClick={() => setReloadKey((key) => key + 1)} disabled={!url} aria-label="刷新">↻</button>
       <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="输入链接，例如 example.com" aria-label="浏览器地址" />
       <button type="submit">前往</button>
+      <button type="button" onClick={() => { useChatStore.getState().shareBrowserPage(url); if (openChatFromPanel) openChatFromPanel(); else openBufferFromPanel?.('chat'); }} disabled={!url}>分享给智能体</button>
       {url && <a href={url} target="_blank" rel="noreferrer">外部打开</a>}
     </form>
     {error && <p className="browser-error">{error}</p>}
@@ -2588,6 +2615,13 @@ function App(): ReactElement {
 
   useEffect(() => {
     openBufferFromPanel = openBuffer;
+    openChatFromPanel = () => {
+      const state = useWorkspaceStore.getState();
+      const chatBuffer = state.buffers.find((buffer) => buffer.kind === 'chat' && buffer.workspaceId === state.activeScreen);
+      const panel = api?.panels.find((item) => item.id === 'chat' || item.id === chatBuffer?.id);
+      if (panel) panel.api.setActive();
+      else openBuffer('chat');
+    };
   });
 
   useEffect(() => {

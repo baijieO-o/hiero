@@ -154,6 +154,9 @@ interface ErrorRecord {
 - 多轮对话（流式输出、历史会话）
 - 模型与网关设置，界面偏好第一版
 - 窗口化界面（Screen、Buffer、命令栏、布局持久化）
+- 子代理：只读/写入委托与 `delegate_task`，有并发与每聊天上限（`src/read-only-subagent.ts`）
+- Skill：`load_skill` 按需读取完整 `SKILL.md`（`src/skill-tool.ts`）
+- 记忆第 0、1 层，及第 2 层混合检索（`src/deep-memory.ts`、`src/memory-store.ts`）
 
 **未验证**
 - 浏览器中完整聊天，包括 `read_file` 工具调用分支
@@ -163,11 +166,9 @@ interface ErrorRecord {
 **未实现**
 - 交接文档的自动生成与自动恢复
 - 沙箱与审批设置域
-- 共享浏览器、语音与视觉、澄清向导
-- Skill 路由与 MCP 延迟加载
+- 共享浏览器（部分完成：智能体 Playwright 浏览器工具与 CDP 接入已实现，画面流、人机接管未实现；详见 [HANDOFF.md](./HANDOFF.md)）、语音与视觉、澄清向导
+- Skill 路由（按任务自动匹配）与 MCP 延迟加载
 - 系统代理的自动构建
-- 三层记忆
-- 子代理
 - 桌面化形态
 
 **已补充验证（自动化测试）**

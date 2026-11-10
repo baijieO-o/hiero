@@ -4,13 +4,16 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
 import type { ReactElement } from 'react';
-import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState } from './settings';
+import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState, type TaskModelKindId } from './settings';
+import { SchedulesPanel } from './schedules-panel';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { handleCodeCopy, renderMarkdown, renderPartialMarkdown, splitStreamingBlocks } from './markdown';
 import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
 import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
 import { TaskCard } from './task-card';
 import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
+import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
+import { DocsCenter } from './docs-center';
 import { clarifyComplete, clarifyQuestions, type ClarifyAnswers } from './clarify-model';
 import { ClarifyWizard } from './clarify-wizard';
 import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
@@ -23,6 +26,7 @@ import { TerminalView, type TerminalWriteLine } from './terminal-view';
 import { MAX_TEXT_PREVIEW_BYTES, classifyFile, folderNameFromEntry } from './dropped-files';
 import { FileRefChip, FilePreviewDialog, type DroppedFileRef } from './file-ref';
 import { compactionBoundary, insertDivider, sendableMessages } from './compaction';
+import { shortcutFromEvent, type ShortcutAction } from './shortcut-model';
 
 type TodoStatus = 'done' | 'active' | 'pending';
 
@@ -39,7 +43,7 @@ function connectRuntime(onMessage: (message: RuntimeMessage) => void): () => voi
 
 const BROADCAST_TYPES = ['SNAPSHOT', 'STATE_CHANGE', 'VERIFY_RESULT', 'REWIND_RESULT', 'FILE_DIFF', 'HANDOFF_TRIGGERED'];
 
-type PanelKind = 'chat' | 'mission' | 'debug' | 'todo' | 'review' | 'handoff' | 'settings' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
+type PanelKind = 'chat' | 'mission' | 'debug' | 'todo' | 'review' | 'handoff' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
 
 const PANEL_TITLES: Record<PanelKind, string> = {
   chat: '对话',
@@ -49,6 +53,7 @@ const PANEL_TITLES: Record<PanelKind, string> = {
   review: '代码审查',
   handoff: '交接文档',
   settings: '设置',
+  schedules: '定时任务',
   browser: '浏览器',
   terminal: '终端',
   files: '文件管理器',
@@ -302,6 +307,9 @@ interface ChatState {
   contextUsage: Record<string, ContextUsageView>;
   requestContextUsage: (conversationId: string) => void;
   compactConversation: (conversationId: string) => void;
+  browserPageToShare: string | null;
+  shareBrowserPage: (url: string) => void;
+  takeBrowserPageShare: () => string | null;
   options: ChatOptions;
   setOption: <K extends keyof ChatOptions>(key: K, value: ChatOptions[K]) => void;
   newConversation: () => void;
@@ -309,7 +317,7 @@ interface ChatState {
   renameConversation: (id: string, title: string) => void;
   deleteConversation: (id: string) => void;
   rewindConversation: (messageIndex: number) => void;
-  send: (text: string, images?: string[]) => void;
+  send: (text: string, images?: string[], sharedUrls?: string[]) => void;
   cancel: () => void;
 }
 
@@ -556,6 +564,13 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     error: null,
     compacting: false,
     contextUsage: {},
+    browserPageToShare: null,
+    shareBrowserPage: (url) => set({ browserPageToShare: url }),
+    takeBrowserPageShare: () => {
+      const url = get().browserPageToShare;
+      if (url) set({ browserPageToShare: null });
+      return url;
+    },
     requestContextUsage: (conversationId) => {
       const conversation = get().conversations.find((conv) => conv.id === conversationId);
       if (!conversation) return;
@@ -623,10 +638,10 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       });
       set({ error: null });
     },
-    send: (text, images = []) => {
+    send: (text, images = [], sharedUrls = []) => {
       const trimmed = text.trim();
       const state = get();
-      if ((!trimmed && images.length === 0) || state.pending) return;
+    if ((!trimmed && images.length === 0 && sharedUrls.length === 0) || state.pending) return;
       const conversation = state.conversations.find((conv) => conv.id === state.activeId);
       if (!conversation) return;
       const message: ChatMessage = { role: 'user', content: trimmed, ...(images.length > 0 ? { images } : {}) };
@@ -647,7 +662,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const target = ensureSocket();
       const { model, permission, workspace, contextMode } = state.options;
       const subagent = useSubagentPreferences.getState().values;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent });
+      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent, ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
@@ -1016,8 +1031,10 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, cancel: state.cancel })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, cancel: state.cancel })));
   const [draft, setDraft] = useState('');
+  const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
   const [folderPicking, setFolderPicking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
@@ -1069,6 +1086,12 @@ function ChatPanel(): ReactElement {
   const logRef = useRef<HTMLDivElement>(null);
   const active = conversations.find((conv) => conv.id === activeId) ?? conversations[0];
   const messages = active?.messages ?? [];
+  useEffect(() => {
+    const sharedUrl = takeBrowserPageShare();
+    if (!sharedUrl) return;
+    setSharedPageUrls((current) => current.includes(sharedUrl) ? current : [...current, sharedUrl]);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }, [browserPageToShare, takeBrowserPageShare]);
   const [scrolledUp, setScrolledUp] = useState(false);
   useEffect(() => {
     const log = logRef.current;
@@ -1153,8 +1176,8 @@ function ChatPanel(): ReactElement {
     addFileRefs(otherFiles);
   };
   const submit = async () => {
-    if (!draft.trim() && images.length === 0 && fileRefs.length === 0) return;
-    if (images.length === 0 && fileRefs.length === 0 && draft.trim() === '/compact') {
+    if (!draft.trim() && images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0) return;
+    if (images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0 && draft.trim() === '/compact') {
       setDraft('');
       if (activeId) compactConversation(activeId);
       return;
@@ -1165,7 +1188,8 @@ function ChatPanel(): ReactElement {
       return `[附件: ${ref.name}]\n\`\`\`\n${content}\n\`\`\``;
     }));
     const text = [draft, ...refBlocks].filter((part) => part.trim()).join('\n\n');
-    send(text, images);
+    send(text, images, sharedPageUrls);
+    setSharedPageUrls([]);
     setDraft('');
     setImages([]);
     setImageError(null);
@@ -1278,6 +1302,12 @@ function ChatPanel(): ReactElement {
         />}
         <div className="chat-composer" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={onDrop}>
           <div className="chat-input-box">
+            {sharedPageUrls.length > 0 && <div className="chat-file-refs">
+              {sharedPageUrls.map((url) => <span key={url} className="chat-file-ref" title={url}>
+                <span className="chat-file-ref-name">🌐 {url}</span>
+                <button type="button" aria-label="移除分享页面" title="移除" onClick={() => setSharedPageUrls((current) => current.filter((item) => item !== url))}>✕</button>
+              </span>)}
+            </div>}
             {fileRefs.length > 0 && <div className="chat-file-refs">
               {fileRefs.map((item) => <FileRefChip key={item.id} item={item} onPreview={() => setPreviewRef(item)} onRemove={() => setFileRefs((current) => current.filter((ref) => ref.id !== item.id))} />)}
             </div>}
@@ -1289,7 +1319,7 @@ function ChatPanel(): ReactElement {
               </div>)}
               {imageError && <span className="chat-attachment-error">{imageError}</span>}
             </div>}
-            <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="发送消息给 Hiero……（可粘贴或拖入图片）" />
+            <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="发送消息给 Hiero……（可粘贴或拖入图片）" />
             <div className="chat-toolbar">
               <input ref={fileInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImageFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
               <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
@@ -1312,7 +1342,7 @@ function ChatPanel(): ReactElement {
                 ? <button className="chat-send-round chat-stop-round" type="button" onClick={cancel} title="停止生成" aria-label="停止生成">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
                   </button>
-                : <button className="chat-send-round" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0 && fileRefs.length === 0} title={!draft.trim() && images.length === 0 && fileRefs.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">
+                : <button className="chat-send-round" type="button" onClick={submit} disabled={!draft.trim() && images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0} title={!draft.trim() && images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0 ? '请先输入内容或添加图片' : '发送'} aria-label="发送">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
                   </button>}
             </div>
@@ -1533,6 +1563,7 @@ function HandoffField({ label, value }: { label: string; value: unknown }): Reac
 
 
 let openBufferFromPanel: ((kind: PanelKind) => void) | null = null;
+let openChatFromPanel: (() => void) | null = null;
 
 function BlankBuffer(): ReactElement {
   const [command, setCommand] = useState('');
@@ -1567,7 +1598,7 @@ function SettingsBuffer(): ReactElement {
     setModelList({ status: 'loading' });
     socket.send(JSON.stringify({ type: 'model_list', request_id: 'model-list', payload: input }));
   };
-  const saveModel = (input: { endpoint: string; model: string; tokens: string }) => {
+  const saveModel = (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setSaveState({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端再保存。' });
@@ -1632,7 +1663,7 @@ function SettingsBuffer(): ReactElement {
       socket.close();
     };
   }, []);
-  return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} modelList={modelList} onFetchModels={fetchModels} mcpConfig={mcpConfig} mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
+  return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} modelList={modelList} onFetchModels={fetchModels} mcpConfig={mcpConfig}   mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
 }
 
 function normalizeBrowserUrl(input: string): string | null {
@@ -1673,6 +1704,7 @@ function BrowserBuffer({ api }: { api: { id: string } }): ReactElement {
       <button type="button" onClick={() => setReloadKey((key) => key + 1)} disabled={!url} aria-label="刷新">↻</button>
       <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="输入链接，例如 example.com" aria-label="浏览器地址" />
       <button type="submit">前往</button>
+      <button type="button" onClick={() => { useChatStore.getState().shareBrowserPage(url); if (openChatFromPanel) openChatFromPanel(); else openBufferFromPanel?.('chat'); }} disabled={!url}>分享给智能体</button>
       {url && <a href={url} target="_blank" rel="noreferrer">外部打开</a>}
     </form>
     {error && <p className="browser-error">{error}</p>}
@@ -1747,6 +1779,72 @@ function DeleteConversationConfirm({ title, onConfirm, onCancel }: { title: stri
       <button ref={cancelRef} type="button" className="chat-delete-cancel" onClick={onCancel}>保留</button>
       <button type="button" className="chat-delete-danger" onClick={onConfirm}>删除对话</button>
     </div>
+  </div>;
+}
+
+/** Listens for ASK_USER_REQUIRED on a persistent socket and answers with ask_user_response. */
+function AskUserModal(): ReactElement | null {
+  const [queue, setQueue] = useState<AskUserRequest[]>([]);
+  const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    socketRef.current = socket;
+    socket.onmessage = (event) => {
+      let message: RuntimeMessage;
+      try { message = JSON.parse(String(event.data)) as RuntimeMessage; } catch { return; }
+      if (!active || message.type !== 'ASK_USER_REQUIRED' || !message.payload) return;
+      const payload = message.payload as unknown as AskUserRequest;
+      setQueue((current) => [...current, payload]);
+    };
+    return () => { active = false; socketRef.current = null; socket.close(); };
+  }, []);
+
+  const current = queue[0];
+  const askId = current?.ask_id;
+  const respond = useCallback((answer: { status: 'submitted'; values: Record<string, unknown> } | { status: 'declined' }) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN && askId) {
+      socket.send(JSON.stringify({ type: 'ask_user_response', payload: { ask_id: askId, ...answer } }));
+    }
+    setQueue((rest) => rest.slice(1));
+  }, [askId]);
+  if (!current) return null;
+
+  return <AskUserDialog key={current.ask_id} request={current} onRespond={respond} />;
+}
+
+interface UpdateStatus {
+  ok: boolean;
+  current_version: string;
+  latest_version?: string;
+  update_available: boolean;
+  message?: string;
+}
+
+/** Shows a banner when the remote has a newer version tag. The check runs on connect, so a broadcast sent before the socket opened is not missed. */
+function UpdateBanner(): ReactElement | null {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'update_check' }));
+    socket.onmessage = (event) => {
+      let message: RuntimeMessage;
+      try { message = JSON.parse(String(event.data)) as RuntimeMessage; } catch { return; }
+      if (!active || message.type !== 'UPDATE_STATUS' || !message.payload) return;
+      setStatus(message.payload as unknown as UpdateStatus);
+    };
+    return () => { active = false; socket.close(); };
+  }, []);
+
+  if (dismissed || !status?.update_available) return null;
+  return <div className="update-banner" role="status">
+    发现新版本 v{status.latest_version}（当前 v{status.current_version}）。请在项目目录执行 <code>git pull</code> 后运行 <code>npm install</code> 并重启。
+    <button type="button" className="ghost-button" onClick={() => setDismissed(true)}>关闭</button>
   </div>;
 }
 
@@ -2391,71 +2489,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
   </div>;
 }
 
-type ErrorDocLevel = 'blocker' | 'degradation' | 'warning';
-
-const ERROR_DOCS: { group: string; rows: { code: string; level: ErrorDocLevel; message: string; causes: string; suggestion: string }[] }[] = [
-  { group: 'MOD · 模型调用', rows: [
-    { code: 'MOD-001', level: 'blocker', message: '当前请求没有可用模型。', causes: '未配置首选模型或回退链，或所有模型通道都不可用。', suggestion: '检查模型配置、令牌健康状况与回退通道。' },
-    { code: 'MOD-002', level: 'blocker', message: '模型通道失败且无可恢复回退。', causes: '未设置 HIERO_LLM_ENDPOINT，或端点不可达。', suggestion: '检查 HIERO_LLM_ENDPOINT 与传输层及回退配置。' },
-    { code: 'MOD-003', level: 'blocker', message: '令牌池为空，或所有令牌被拒绝（401）。', causes: 'HIERO_LLM_TOKENS 未配置或已失效。', suggestion: '替换 HIERO_LLM_TOKENS 中失效的令牌，或使用无需认证的本地模型。' },
-    { code: 'MOD-003', level: 'degradation', message: '当前没有可用的模型令牌，正在冷却等待。', causes: '令牌进入冷却期，最近的请求持续失败。', suggestion: '等待冷却结束，检查端点，或配置其他令牌。' },
-    { code: 'MOD-004', level: 'blocker', message: '模型响应格式无效，或工具调用参数无法解析。', causes: '服务商返回的 JSON 结构不符合预期，或模型生成的工具参数不是合法 JSON。', suggestion: '检查服务商的响应结构；必要时换用更稳定的模型。' },
-    { code: 'MOD-005', level: 'blocker', message: '同一工具以相同参数被连续调用多次。', causes: '模型陷入重复调用循环。', suggestion: '更换参数或思路，而不是重复同一调用。' },
-    { code: 'MOD-006', level: 'blocker', message: '任务超出时间预算。', causes: '目标过大，或 budget_envelope.max_time_ms 设置过小。', suggestion: '缩小目标范围，或调大 budget_envelope.max_time_ms。' },
-    { code: 'MOD-007', level: 'degradation', message: '模型请求已被用户取消。', causes: '用户主动中止了当前回复。', suggestion: '重新发送消息即可继续。' },
-  ] },
-  { group: 'CTX · 上下文', rows: [
-    { code: 'CTX-002', level: 'blocker', message: '交接文档校验失败或文件不可读。', causes: '交接文档结构被改坏，或文件已被删除。', suggestion: '重新生成交接文档。' },
-    { code: 'CTX-003', level: 'blocker', message: '上下文阈值无效。', causes: '阈值不在 (0, 1] 范围内。', suggestion: '使用 (0, 1] 之间的阈值。' },
-    { code: 'CTX-004', level: 'blocker', message: '上下文预算无效。', causes: 'maxTokens 非正数，或 usedTokens 为负数。', suggestion: '提供正数 maxTokens 与非负数 usedTokens。' },
-  ] },
-  { group: 'GOV · 工具治理', rows: [
-    { code: 'GOV-001', level: 'blocker', message: '工具未注册、需要审批，或被操作者拒绝。', causes: '工具名拼写错误，工具未注册；不可逆操作未获批准；或审批被拒绝。', suggestion: '注册工具，获取人工审批，或换用允许的权限模式与方法。' },
-    { code: 'GOV-002', level: 'blocker', message: '工具参数不符合 schema。', causes: '调用参数缺失或类型不对。', suggestion: '按工具 schema 修正参数。' },
-    { code: 'GOV-003', level: 'degradation', message: '工具执行失败。', causes: '网络错误、接口返回错误、搜索被验证码拦截，或未配置 HIERO_BRAVE_API_KEY 导致回退到 DuckDuckGo 而被拦截。', suggestion: '查看工具证据，确认安全后重试；搜索失败可配置 HIERO_BRAVE_API_KEY。' },
-  ] },
-  { group: 'MCP · 外部工具服务', rows: [
-    { code: 'MCP-001', level: 'blocker', message: 'MCP 服务器发现失败。', causes: '服务器的 command、args 或 cwd 配置错误，或进程启动失败。', suggestion: '在设置面板中检查该服务器的 command、args 与 cwd。' },
-    { code: 'MCP-003', level: 'blocker', message: 'MCP 工具未找到。', causes: '工具名不存在，或对应服务器未连接。', suggestion: '先搜索已连接的 MCP 服务器再执行。' },
-  ] },
-  { group: 'ORG · 状态机', rows: [
-    { code: 'ORG-001', level: 'warning', message: '执行仍在进行中。', causes: '在上一步执行未结束时尝试推进。', suggestion: '先完成验证，再推进到下一步。' },
-    { code: 'ORG-002', level: 'blocker', message: '开始下一个计划前需要验证。', causes: '上一次验证没有成功，或尚未验证。', suggestion: '提供一次成功的验证结果。' },
-    { code: 'ORG-003', level: 'blocker', message: '非法的状态转换。', causes: '当前状态不允许直接跳转到目标状态，或任务在执行中被重复启动。', suggestion: '按明确的状态图推进，等待当前任务到达 Verify 或 Handoff。' },
-    { code: 'ORG-005', level: 'blocker', message: '状态机内部异常。', causes: '状态机在处理事件时抛出了未预期的错误。', suggestion: '查看状态机事件日志。' },
-  ] },
-  { group: 'SYS · 扩展安装', rows: [
-    { code: 'SYS-001', level: 'blocker', message: '扩展安装失败。', causes: '仓库地址无效、网络不可达，或扩展构建失败。', suggestion: '检查仓库地址，查看扩展构建日志后重试。' },
-  ] },
-  { group: 'RBK · 回滚', rows: [
-    { code: 'RBK-006', level: 'warning', message: '人工修改过的文件未被回滚，已保留。', causes: '智能体写入之后，文件又被人工修改。', suggestion: '手动检查列出的文件。' },
-  ] },
-  { group: 'MEM · 记忆', rows: [
-    { code: 'MEM-001', level: 'blocker', message: '记忆内容超过字符上限。', causes: '单条或整体记忆超过 MEMORY_LIMIT_CHARS / DEEP_MEMORY_ENTRY_LIMIT_CHARS。', suggestion: '精简记忆内容后保存。' },
-  ] },
-];
-
-function ErrorDocBuffer(): ReactElement {
-  return <div className="panel-content error-doc">
-    <header className="panel-header"><span className="eyebrow">DOCS · 错误码</span><h2>错误码与常见报错原因</h2></header>
-    <p className="error-doc-note">级别：<b>blocker</b> 阻断任务；<b>degradation</b> 降级但可继续；<b>warning</b> 提示注意。</p>
-    {ERROR_DOCS.map((section) => <section key={section.group} className="error-doc-group">
-      <h3>{section.group}</h3>
-      <table className="error-doc-table">
-        <thead><tr><th>错误码</th><th>级别</th><th>含义</th><th>常见原因</th><th>处理建议</th></tr></thead>
-        <tbody>{section.rows.map((row) => <tr key={`${row.code}-${row.level}`}>
-          <td><code>{row.code}</code></td>
-          <td><span className={`error-doc-level ${row.level}`}>{row.level}</span></td>
-          <td>{row.message}</td>
-          <td>{row.causes}</td>
-          <td>{row.suggestion}</td>
-        </tr>)}</tbody>
-      </table>
-    </section>)}
-  </div>;
-}
-
-const panelComponents = { chat: ChatPanel, mission: MissionControl, debug: DebugConsole, todo: TodoList, review: CodeReview, handoff: HandoffPanel, settings: SettingsBuffer, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: ErrorDocBuffer, blank: BlankBuffer };
+const panelComponents = { chat: ChatPanel, mission: MissionControl, debug: DebugConsole, todo: TodoList, review: CodeReview, handoff: HandoffPanel, settings: SettingsBuffer, schedules: () => <SchedulesPanel wsUrl={RUNTIME_WS_URL} />, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
 
 function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
   const [maximized, setMaximized] = useState(() => api.isMaximized());
@@ -2500,7 +2534,15 @@ function addBufferPanel(api: DockviewApi, id: string, kind: PanelKind): void {
   api.addPanel({ id, component: kind, title: PANEL_TITLES[kind] });
   const panel = api.getPanel(id);
   if (!panel) return;
-  api.addFloatingGroup(panel, { x: 160 + offset, y: 120 + offset, width: 520, height: 380 });
+  const host = document.querySelector('.dockview-host')?.getBoundingClientRect();
+  const areaWidth = Math.min(host?.width || window.innerWidth, window.innerWidth - (host?.left ?? 0));
+  const areaHeight = Math.min(host?.height || window.innerHeight, window.innerHeight - (host?.top ?? 0));
+  const size = kind === 'docs'
+    ? { width: Math.min(1100, Math.max(280, areaWidth - 16)), height: Math.min(820, Math.max(260, areaHeight - 16)) }
+    : { width: 520, height: 380 };
+  const x = Math.max(0, Math.min(160 + offset, areaWidth - size.width - 8));
+  const y = Math.max(0, Math.min(120 + offset, areaHeight - size.height - 8));
+  api.addFloatingGroup(panel, { x, y, ...size });
 }
 
 function CommandBar({ onRun }: { onRun: (kind: PanelKind) => void }): ReactElement {
@@ -2573,6 +2615,13 @@ function App(): ReactElement {
 
   useEffect(() => {
     openBufferFromPanel = openBuffer;
+    openChatFromPanel = () => {
+      const state = useWorkspaceStore.getState();
+      const chatBuffer = state.buffers.find((buffer) => buffer.kind === 'chat' && buffer.workspaceId === state.activeScreen);
+      const panel = api?.panels.find((item) => item.id === 'chat' || item.id === chatBuffer?.id);
+      if (panel) panel.api.setActive();
+      else openBuffer('chat');
+    };
   });
 
   useEffect(() => {
@@ -2580,12 +2629,44 @@ function App(): ReactElement {
     return usePreferences.subscribe((state) => applyPreferenceTheme(state.values));
   }, []);
 
+  const runShortcut = (action: ShortcutAction): void => {
+    switch (action) {
+      case 'newChat':
+        if (!api) return;
+        openBuffer('chat');
+        useChatStore.getState().newConversation();
+        return;
+      case 'focusChatInput':
+        document.querySelector<HTMLTextAreaElement>('.chat-main textarea')?.focus();
+        return;
+      case 'focusCommand':
+        document.querySelector<HTMLInputElement>('.command-bar input')?.focus();
+        return;
+      case 'toggleRail':
+        toggleRail();
+        return;
+      case 'openSettings':
+        if (api) openBuffer('settings');
+        return;
+      case 'openDocs':
+        if (api) openBuffer('docs');
+        return;
+    }
+  };
+  const shortcutRef = useRef(runShortcut);
+  shortcutRef.current = runShortcut;
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.code === 'Space') {
         event.preventDefault();
         if (api) openBuffer('blank');
+        return;
       }
+      const action = shortcutFromEvent(event);
+      if (!action) return;
+      event.preventDefault();
+      shortcutRef.current(action);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -2681,6 +2762,8 @@ function App(): ReactElement {
 
   return <main className="app-shell">
     <ApprovalModal />
+    <AskUserModal />
+    <UpdateBanner />
     <header className="topbar">
       <div className="brand"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>HIERO</span></div>
       <nav className="screen-tabs" aria-label="工作区">

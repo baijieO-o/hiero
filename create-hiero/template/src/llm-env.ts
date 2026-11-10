@@ -17,6 +17,9 @@ export function modelsEndpoint(raw: string): string {
   return base ? `${base}/models` : '';
 }
 
+/** Multi-provider config is edited by hand in .env, so the settings form must not erase it. */
+const PRESERVED_KEYS = new Set(['HIERO_LLM_PROVIDERS']);
+
 /**
  * Rewrites HIERO_LLM_* lines in .env, keeping every other line untouched.
  * .env is gitignored, so tokens stay out of version control.
@@ -24,7 +27,10 @@ export function modelsEndpoint(raw: string): string {
 export function writeLocalEnv(values: Record<string, string>, root = process.cwd()): void {
   const path = join(root, SAVE_FILE);
   const existing = existsSync(path) ? readFileSync(path, 'utf8').split(/\r?\n/) : [];
-  const kept = existing.filter((line) => !/^\s*HIERO_LLM_[A-Z_]+\s*=/.test(line));
+  const kept = existing.filter((line) => {
+    const match = /^\s*(HIERO_LLM_[A-Z_]+)\s*=/.exec(line);
+    return !match || PRESERVED_KEYS.has(match[1] ?? '');
+  });
   while (kept.length > 0 && kept.at(-1)?.trim() === '') kept.pop();
   const lines = Object.entries(values).map(([key, value]) => `${key}=${value}`);
   writeFileSync(path, [...kept, ...lines].join('\n') + '\n', 'utf8');

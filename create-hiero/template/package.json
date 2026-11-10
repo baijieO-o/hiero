@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "hiero-local",
     "version":  "0.2.3",
     "description":  "Hiero: a personal agent workbench with an explicit state machine, objective verification and fail-closed Docker execution.",
@@ -20,6 +20,7 @@
                         },
     "dependencies":  {
                          "@modelcontextprotocol/sdk":  "^1.32.2",
+                         "playwright-core":  "^1.65.0",
                          "ws":  "^8.22.1",
                          "zod":  "^4.6.7"
                      },

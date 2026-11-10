@@ -55,7 +55,8 @@ function taskModelCandidates(): string[] {
   return [...new Set(names)];
 }
 import { createEditFileTool, createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
-import { createWebFetchTool, createWebSearchTool } from './web-tools.js';
+import { createWebFetchTool, createWebSearchTool, fetchWebPage } from './web-tools.js';
+import { BrowserSessions, createBrowserActionTools, createBrowserReadTools } from './browser-session.js';
 import { LOAD_SKILL_TOOL_DEFINITION, registerLoadSkillTool } from './skill-tool.js';
 import { CodeIndex, createSymbolSearchTool } from './code-index.js';
 import { paramsForModel, ConfigWatcher } from './config.js';
@@ -96,6 +97,34 @@ export interface RuntimeChatRequest {
   context_mode?: string;
   /** Sub-agent preferences chosen in the settings page; normalised by the backend before use. */
   subagent?: Partial<SubagentSettings>;
+  /** Web pages shared from the built-in browser; fetched server-side and attached to the latest user message. */
+  shared_urls?: string[];
+}
+
+const MAX_SHARED_PAGES = 3;
+
+/** Fetches shared browser pages and renders them as text the model can read. Failures become notes, not errors. */
+async function sharedPagesContext(urls: unknown): Promise<string> {
+  if (!Array.isArray(urls)) return '';
+  const targets = urls.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, MAX_SHARED_PAGES);
+  if (targets.length === 0) return '';
+  const blocks = await Promise.all(targets.map(async (url) => {
+    try {
+      const page = await fetchWebPage(url);
+      return `[分享的网页: ${page.url}]\n${page.text}${page.truncated ? '\n（内容已截断）' : ''}`;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return `[分享的网页: ${url}]\n（无法读取：${reason}）`;
+    }
+  }));
+  return blocks.join('\n\n');
+}
+
+/** Returns a copy of the history whose last user message carries the shared page text; the stored history is unchanged. */
+function withSharedContext(history: RuntimeChatRequest['messages'], sharedContext: string): RuntimeChatRequest['messages'] {
+  const index = history.map((item) => item.role).lastIndexOf('user');
+  if (index < 0) return history;
+  return history.map((item, i) => i === index ? { ...item, content: `${item.content}\n\n${sharedContext}` } : item);
 }
 
 const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative. When the user asks you to ask them something (e.g. "问我", "询问我", "弹窗问我") or when you need the user to choose among options or supply missing details, you MUST call the ask_user tool instead of asking in plain text.';
@@ -156,6 +185,54 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
       name: 'web_fetch',
       description: 'Fetch a public http(s) web page and return its readable text (truncated to 20000 characters). Private, local, and credentialed URLs are refused. Requires user approval outside auto mode.',
       parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' } }, required: ['url'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_open',
+      description: 'Open a public http(s) page in an agent-controlled browser. mode "visible" shows a real Edge window the user can watch; mode "headless" runs without a window. Returns the page title and URL.',
+      parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' }, mode: { type: 'string', enum: ['visible', 'headless'] } }, required: ['url'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_snapshot',
+      description: 'Return the accessibility tree of the current agent-browser page (roles, names, states). Use it to find elements before clicking or typing.',
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: 'Report the current agent-browser page URL, title and screenshot size. The image itself is not returned; use browser_snapshot for the page structure.',
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'headless_extract',
+      description: 'Load a public page in the headless browser and return its visible text. Use it for bulk extraction where no human needs to watch.',
+      parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' } }, required: ['url'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: 'Click an element in the agent-browser page, identified by its ARIA role and exact accessible name (from browser_snapshot). Requires user approval for each click.',
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] }, role: { type: 'string' }, name: { type: 'string' } }, required: ['role', 'name'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_type',
+      description: 'Type text into an input identified by its ARIA role and exact accessible name (from browser_snapshot). Requires user approval for each input.',
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] }, role: { type: 'string' }, name: { type: 'string' }, text: { type: 'string' } }, required: ['role', 'name', 'text'] },
     },
   },
   {
@@ -452,6 +529,9 @@ export class HieroRuntime {
   private readonly capabilityRouter = new CapabilityRouter();
   private readonly approvals: ApprovalBroker;
   private readonly askUsers: AskUserBroker;
+  private readonly browserSessions = new BrowserSessions({
+    headlessCdpUrl: process.env.HIERO_HEADLESS_CDP_URL || undefined,
+  });
   private readonly writeSnapshots = new WriteSnapshotStore(join(homedir(), '.hiero', 'write-snapshots.json'));
   private readonly codeIndexes = new Map<string, CodeIndex>();
   private readonly configWatcher = new ConfigWatcher({ home: homedir() });
@@ -633,14 +713,15 @@ export class HieroRuntime {
      const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
      const beforeTokens = estimateTokens(messages, tools);
      const compacted = await this.createCompactor().compact(task, messages);
-     const summaryMessage = compacted[1];
-     if (compacted.length === messages.length || summaryMessage?.role !== 'user' || !summaryMessage.content.startsWith(COMPACT_SUMMARY_PREFIX)) {
+     const summaryMessage = compacted.find((message) => message.role === 'user' && message.content.startsWith(COMPACT_SUMMARY_PREFIX));
+     if (compacted.length === messages.length || !summaryMessage) {
        throw new Error('历史太短，没有可压缩的内容。');
      }
      const summary = summaryMessage.content.slice(COMPACT_SUMMARY_PREFIX.length).trim();
+     const keptMessages = compacted.filter((message) => message.role !== 'system' && message !== summaryMessage).length;
      this.runtime.send({
        type: 'CHAT_COMPACTED',
-       payload: { request_id: request.request_id, summary, before_tokens: beforeTokens, after_tokens: estimateTokens(compacted, tools), kept_messages: compacted.length - 2 },
+       payload: { request_id: request.request_id, summary, before_tokens: beforeTokens, after_tokens: estimateTokens(compacted, tools), kept_messages: keptMessages },
      }, client);
    } catch (cause) {
      this.runtime.send({ type: 'CHAT_COMPACTED', payload: { request_id: request.request_id, ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
@@ -844,7 +925,8 @@ export class HieroRuntime {
     const subagent = normalizeSubagentSettings(request.subagent);
     const toolDefinitions = chatToolDefinitions(subagent);
     await this.capabilityRouter.discoverSkills(workspacePath).catch(() => undefined);
-    const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata());
+    const sharedContext = await sharedPagesContext(request.shared_urls);
+    const messages = await buildChatMessages(workspacePath, sharedContext ? withSharedContext(request.messages, sharedContext) : request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata());
     const trace = new ChatTrace();
     const sendTrace = () => emit({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } });
     try {
@@ -958,6 +1040,8 @@ export class HieroRuntime {
     tools.register(createEditFileTool(workspacePath, this.writeSnapshots));
     tools.register(createWebSearchTool(process.env.HIERO_BRAVE_API_KEY));
     tools.register(createWebFetchTool());
+    for (const tool of createBrowserReadTools(this.browserSessions)) tools.register(tool);
+    for (const tool of createBrowserActionTools(this.browserSessions)) tools.register(tool);
     registerLoadSkillTool(tools, this.capabilityRouter);
     tools.register(createSymbolSearchTool(this.codeIndexFor(workspacePath)));
     tools.register({
@@ -1149,6 +1233,7 @@ export class HieroRuntime {
   public async close(): Promise<void> {
     if (this.scheduleTimer) clearInterval(this.scheduleTimer);
     await this.runtime.close();
+    await this.browserSessions.close();
     await this.systemAgent.close();
     this.stateStore.close();
   }

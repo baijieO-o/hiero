@@ -121,26 +121,7 @@ HIERO_LLM_TOKENS=EMPTY
 
 如果 vLLM 启用了 API key，把 `HIERO_LLM_TOKENS` 设为对应密钥。设置面板也可以填写这些字段。
 
-### 环境变量
-
-| 变量 | 说明 |
-| --- | --- |
-| `HIERO_LLM_ENDPOINT` | 模型服务的 Chat Completions 地址 |
-| `HIERO_LLM_MODEL` | 模型名 |
-| `HIERO_LLM_TOKENS` | 令牌，多个令牌用逗号分隔 |
-| `HIERO_LLM_PROVIDERS` | 可选，多供应商多 key 共存：JSON 数组，每项含 `name`、`endpoint`、`tokens`、`models`；按模型名路由，未匹配的模型使用默认端点和 `HIERO_LLM_TOKENS` |
-| `HIERO_LLM_TASK_MODELS` | 可选，按任务类型指定模型（chat / planning / execution / subagent / compaction），JSON 对象；未填的类型自动从 `HIERO_LLM_PROVIDERS` 中选择。也可在设置面板中修改 |
-| 定时任务 | 运行时每分钟检查一次到期任务，持久化到 `~/.hiero/schedules.json`；按固定间隔（分钟）发送预设 prompt，结果写入任务历史 |
-| `HIERO_LLM_MAX_TOKENS` | 可选，单次回复的最大输出 token 数 |
-| `HIERO_COMPACT_MODEL` | 可选，用于压缩总结的模型，未设置时使用主模型 |
-| `HIERO_BRAVE_API_KEY` | 可选，启用 Brave Search；未设置时使用 DuckDuckGo |
-| `HIERO_STEP_VERIFY` | 可选，设为 `1` 后每个写入步骤之后都执行验收 |
-| `HIERO_HITL_TOOLS` | 可选，逗号分隔的工具名，调用前需要人工审批 |
-| `HIERO_LOG_FILE` | 可选，遥测日志文件路径 |
-| `HIERO_EMBED_ENDPOINT` / `HIERO_EMBED_MODEL` / `HIERO_EMBED_TOKENS` | 可选，启用深层记忆的向量检索 |
-| `HIERO_UI_PORT` | 可选，前端端口，默认 5173 |
-
-完整模板见 [.env.example](.env.example)。`.env` 与 `hiero-llm.local.ps1` 已加入 `.gitignore`。
+全部环境变量及其说明见 [docs/FEATURES.md 第 12 节](docs/FEATURES.md#12-模型配置)，这里不再重复。
 
 ## 项目结构
 
@@ -148,7 +129,7 @@ HIERO_LLM_TOKENS=EMPTY
 src/             后端：状态机、Agent 执行器、工具网关、模型网关、运行时
 frontend/src/    前端：React + Vite 工作台、设置面板、终端、运行时事件
 test/            后端测试
-examples/        真实 API 测试脚本（需要自行提供模型配置）
+examples/        示例：real-test.ts（真实 API 调用，需自行配置模型）、custom-tool/（自定义工具示例）
 docs/            功能说明
 ```
 
@@ -174,7 +155,7 @@ npm run build:frontend
 npm test
 ```
 
-当前共有 224 项后端测试。并行运行偶尔会出现不稳定的失败，建议串行运行：
+当前共有 59 个测试文件、256 个后端测试用例。并行运行偶尔会出现不稳定的失败，建议串行运行：
 
 ```powershell
 node --test --test-concurrency=1 dist/test/*.test.js
@@ -189,16 +170,7 @@ npm run build
 
 ## 已知限制
 
-- **不是完整的安全沙箱**：Docker 只用于终端命令和 `cmd:` 验收命令，不覆盖整个 Agent。SystemAgent 扩展依赖仍可能在宿主机执行。
-- **Docker 沙箱未在真实环境验证**：挂载与容器限制由单元测试检查参数，尚未在真实容器中端到端运行。
-- **写入安全**：`write_file` 与 `edit_file` 都限制在工作区内，并拒绝绝对路径，但没有显式的符号链接逃逸防护。写入同名文件会覆盖原内容。Rewind 的快照是全局回滚，不能只回滚单个文件。
-- **断点恢复**：基于工具调用级别的检查点，不是整个会话的快照。
-- **事件总线**：断线期间错过的事件不会回放，重连后只通过 SNAPSHOT 重新对齐当前状态。
-- **DAG 的只读标记**：任务的 `read_only` 由模型自报，只用于调度分组，不是安全边界。
-- **代码搜索**：`symbol_search` 是正则实现，没有类型解析，也没有全库索引。
-- **Token 计量**：按字符数估算（约 4 字符/token），不是模型专用的 tokenizer。
-- **深层记忆**：未配置 `HIERO_EMBED_*` 时只支持关键词检索。
-- **MCP**：服务器自动发现和严格的 JSON Schema → Zod 转换尚未完整闭环。
+完整列表见 [docs/FEATURES.md 第 14 节](docs/FEATURES.md#14-已知限制)。最需要注意的是：Docker 沙箱只覆盖终端和 `cmd:` 验收命令，不是完整安全沙箱。
 
 ## 贡献
 

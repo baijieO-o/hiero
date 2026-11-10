@@ -91,7 +91,8 @@ function linkCard(href: string, text: string): string | undefined {
   } catch {
     return undefined;
   }
-  return `<a class="chat-link-card" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"><span class="chat-link-domain">${escapeHtml(domain)}</span><span class="chat-link-title">${escapeHtml(text)}</span></a>`;
+  const initial = escapeHtml((domain.charAt(0) || '?').toUpperCase());
+  return `<span class="chat-link-wrap"><a class="chat-link-card" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"><span class="chat-link-icon" aria-hidden="true">${initial}</span><span class="chat-link-title">${escapeHtml(text)}</span><span class="chat-link-domain">${escapeHtml(domain)}</span></a><span class="chat-link-tooltip" role="tooltip"><span class="chat-link-tooltip-title">${escapeHtml(text)}</span><span class="chat-link-tooltip-url">${escapeHtml(href)}</span></span></span>`;
 }
 
 export function renderMarkdown(source: string): string {

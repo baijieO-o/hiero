@@ -28,6 +28,16 @@ export class HandoffRequiredError extends Error {
 }
 function estimateTokenCount(text: string): number { return Math.ceil(text.length / 4); }
 const MAX_REPEATED_CALLS = 3;
+/** Cap on one tool result sent back to the model. The full record stays in evidence and checkpoints. */
+const MAX_TOOL_RESULT_CHARS = 8_000;
+
+/** Keeps the head and tail of an oversized tool result so the model sees both the start and the final status. */
+function clipToolResult(serialized: string): string {
+  if (serialized.length <= MAX_TOOL_RESULT_CHARS) return serialized;
+  const head = Math.ceil(MAX_TOOL_RESULT_CHARS * 0.7);
+  const tail = MAX_TOOL_RESULT_CHARS - head;
+  return `${serialized.slice(0, head)}\n…[${serialized.length - MAX_TOOL_RESULT_CHARS} chars omitted]…\n${serialized.slice(-tail)}`;
+}
 
 export class AgentExecutor {
   public constructor(private readonly modelGateway: CompletionGateway, private readonly toolGateway: ToolGateway, private readonly maxTurns = 8, private readonly capabilityRouter?: CapabilityRouter, private readonly contextThreshold = 0.8, private readonly compactor?: ContextCompactor) {
@@ -103,7 +113,7 @@ export class AgentExecutor {
         }
         const replay = call.id ? completedRecords.get(call.id) : undefined;
         if (replay) {
-          messages.push({ role: 'tool', content: JSON.stringify(replay), tool_call_id: call.id, name: call.function.name });
+          messages.push({ role: 'tool', content: clipToolResult(JSON.stringify(replay)), tool_call_id: call.id, name: call.function.name });
           continue;
         }
         if (options.readOnly && !READ_ONLY_TOOL_NAMES.has(call.function.name)) {
@@ -112,7 +122,7 @@ export class AgentExecutor {
         }
         const record = await this.toolGateway.execute(call.function.name, args, call.id || randomUUID(), task.permission_mode);
         evidence.push(record);
-        messages.push({ role: 'tool', content: JSON.stringify(record), tool_call_id: call.id, name: call.function.name });
+        messages.push({ role: 'tool', content: clipToolResult(JSON.stringify(record)), tool_call_id: call.id, name: call.function.name });
         completedRecords.set(record.intent_id, record);
         await options.onCheckpoint?.(messages, evidence);
       }

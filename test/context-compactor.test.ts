@@ -24,11 +24,12 @@ test('replaces older turns with one summary and keeps recent turns verbatim', as
   ];
   const result = await compactor.compact(task, messages);
   assert.equal(result[0]?.content, 'sys');
-  assert.equal(result[1]?.content, `${COMPACT_SUMMARY_PREFIX}\n目标: demo`);
-  assert.deepEqual(result.slice(2), messages.slice(3));
+  assert.equal(result[1]?.content, 'u1');
+  assert.equal(result[2]?.content, `${COMPACT_SUMMARY_PREFIX}\n目标: demo`);
+  assert.deepEqual(result.slice(3), messages.slice(3));
   assert.equal(seen.length, 1);
-  assert.match(seen[0] ?? '', /user: u1/);
-  assert.doesNotMatch(seen[0] ?? '', /u2/);
+  assert.match(seen[0] ?? '', /assistant: a1/);
+  assert.doesNotMatch(seen[0] ?? '', /user: u1/);
 });
 
 test('rolling compaction feeds the previous summary back into the next summary', async () => {
@@ -42,9 +43,27 @@ test('rolling compaction feeds the previous summary back into the next summary',
   const once = await compactor.compact(task, first);
   const next: ModelMessage[] = [...once, { role: 'assistant', content: 'a2' }, { role: 'user', content: 'u3' }];
   const twice = await compactor.compact(task, next);
-  assert.equal(twice[0]?.content, `${COMPACT_SUMMARY_PREFIX}\nrolled summary`);
+  assert.equal(twice[0]?.content, 'u1');
+  assert.equal(twice[1]?.content, `${COMPACT_SUMMARY_PREFIX}\nrolled summary`);
   assert.match(seen[1] ?? '', new RegExp(`${COMPACT_SUMMARY_PREFIX}`));
   assert.match(seen[1] ?? '', /rolled summary|Compacted history/);
+});
+
+test('keeps the first user turn (the goal) verbatim and summarizes only the middle', async () => {
+  const seen: string[] = [];
+  const compactor = new ContextCompactor(async (_task, transcript) => { seen.push(transcript); return 'middle summary'; }, 2);
+  const messages: ModelMessage[] = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'GOAL: fix parser' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'u2' },
+    { role: 'assistant', content: 'a2' },
+    { role: 'user', content: 'u3' },
+  ];
+  const result = await compactor.compact(task, messages);
+  assert.deepEqual(result.map((message) => message.content), ['sys', 'GOAL: fix parser', `${COMPACT_SUMMARY_PREFIX}\nmiddle summary`, 'a2', 'u3']);
+  assert.doesNotMatch(seen[0] ?? '', /GOAL: fix parser/);
+  assert.match(seen[0] ?? '', /TODO|identifiers|exactly/i);
 });
 
 test('default keepRecent is shared with the runtime compaction path', () => {
@@ -55,14 +74,17 @@ test('does not split an assistant tool_calls message from its tool results', asy
   const compactor = new ContextCompactor(async () => 'summary', 2);
   const messages: ModelMessage[] = [
     { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a0' },
+    { role: 'user', content: 'u2' },
     { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 't', arguments: '{}' } }] },
     { role: 'tool', content: 'r1', tool_call_id: 'c1', name: 't' },
     { role: 'assistant', content: 'a' },
   ];
   const result = await compactor.compact(task, messages);
-  // The first user turn is compacted; the assistant tool_calls message and its tool result stay together.
-  assert.equal(result[0]?.content, `${COMPACT_SUMMARY_PREFIX}\nsummary`);
-  assert.deepEqual(result.slice(1), messages.slice(1));
+  // The first user turn is the anchor. Keep the assistant tool_calls message with its tool result.
+  assert.equal(result[0]?.content, 'u1');
+  assert.equal(result[1]?.content, `${COMPACT_SUMMARY_PREFIX}\nsummary`);
+  assert.deepEqual(result.slice(2), messages.slice(3));
 });
 
 test('keeps history unchanged when the summary is empty', async () => {

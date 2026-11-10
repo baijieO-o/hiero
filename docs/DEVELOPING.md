@@ -61,7 +61,7 @@ interface RegisteredTool<TInput, TResult> {
 
 ## 4. 脚手架
 
-`create-hiero/` 会复制 `template/` 并安装依赖。它尚未与当前代码逐项核对，使用前请先确认其可用性。
+`create-hiero/` 会复制 `template/` 并安装依赖。`template/` 是 `src/`、`frontend/src/` 与依赖清单的快照，发布 create-hiero 前需要同步：把主仓库的源码复制进 `template/`，并保留模板自己的 `package.json`（`name: hiero-local`、`private: true`，不带发布用的 `bin`/`files`/`prepack`）。模板不包含 `test/` 与 `examples/`。同步后运行 `tsc --noEmit`（在 `template/` 下）和 `npm ci --dry-run` 验证。
 
 ## 5. 提交前检查
 

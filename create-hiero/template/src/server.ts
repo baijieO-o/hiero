@@ -8,6 +8,7 @@ import { parseTokenList } from './model-gateway.js';
 loadLocalLlmEnv();
 const runtime = new HieroRuntime(8080);
 runtime.startMcpServers();
+if (process.env.HIERO_UPDATE_CHECK !== '0') void runtime.broadcastUpdateStatus();
 
 const uiPort = Number(process.env.HIERO_UI_PORT ?? 5173);
 const frontendDir = defaultFrontendDir();
