@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react';
-import { explainApproval, secondsLeft } from './approval-model';
+import { explainApproval, secondsLeft, type ApprovalRisk } from './approval-model';
 
 export interface ApprovalDialogRequest {
   approval_id: string;
@@ -15,13 +15,20 @@ interface ApprovalDialogProps {
   request: ApprovalDialogRequest;
   onRespond: (approved: boolean) => void;
   now?: () => number;
+  /** Total queued requests, including this one. Batch controls appear when it is above 1. */
+  pendingCount?: number;
+  onRespondAll?: (approved: boolean) => void;
+  /** Highest risk across the whole queue, used for the badge when batching. */
+  queueRisk?: ApprovalRisk;
 }
 
 /** Asks the user to approve one irreversible or external action. Declining is the default focus. */
-export function ApprovalDialog({ request, onRespond, now = Date.now }: ApprovalDialogProps): ReactElement {
+export function ApprovalDialog({ request, onRespond, now = Date.now, pendingCount = 1, onRespondAll, queueRisk }: ApprovalDialogProps): ReactElement {
   const [deadline] = useState(() => now() + APPROVAL_TIMEOUT_MS);
   const [remaining, setRemaining] = useState(() => secondsLeft(deadline, now()));
   const explanation = explainApproval(request.tool_name, request.input);
+  const batching = pendingCount > 1 && onRespondAll !== undefined;
+  const risk = batching && queueRisk ? queueRisk : explanation.risk;
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -43,11 +50,14 @@ export function ApprovalDialog({ request, onRespond, now = Date.now }: ApprovalD
   const detail = JSON.stringify(request.input, null, 2);
   return (
     <div className="approval-backdrop">
-      <div role="alertdialog" aria-modal="true" aria-labelledby="approval-title" aria-describedby="approval-effect" className={`approval-dialog approval-${explanation.risk}`}>
+      <div role="alertdialog" aria-modal="true" aria-labelledby="approval-title" aria-describedby="approval-effect" className={`approval-dialog approval-${risk}`}>
         <div className="approval-head">
-          <span className="approval-badge">{explanation.risk === 'high' ? '高风险' : '需注意'}</span>
+          <span className="approval-badge">{risk === 'high' ? '高风险' : '需注意'}</span>
           <span className="approval-countdown">{remaining} 秒后自动拒绝</span>
         </div>
+        {batching && (
+          <p className="approval-batch-note">队列中还有 {pendingCount} 条待审批，可一次全部处理。</p>
+        )}
         <h3 id="approval-title">{explanation.title}</h3>
         <p id="approval-effect" className="approval-effect">{explanation.effect}</p>
         <dl className="approval-facts">
@@ -62,6 +72,12 @@ export function ApprovalDialog({ request, onRespond, now = Date.now }: ApprovalD
           <button type="button" className="approval-deny" autoFocus onClick={() => onRespond(false)}>拒绝（Esc）</button>
           <button type="button" className="approval-approve" onClick={() => onRespond(true)}>同意执行</button>
         </div>
+        {batching && (
+          <div className="approval-actions approval-batch-actions">
+            <button type="button" className="approval-deny" onClick={() => onRespondAll?.(false)}>全部拒绝（{pendingCount} 条）</button>
+            <button type="button" className="approval-approve" onClick={() => onRespondAll?.(true)}>全部同意（{pendingCount} 条）</button>
+          </div>
+        )}
       </div>
     </div>
   );

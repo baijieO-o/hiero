@@ -1,6 +1,6 @@
 ﻿import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { explainApproval, secondsLeft } from '../frontend/src/approval-model.js';
+import { batchRisk, explainApproval, secondsLeft } from '../frontend/src/approval-model.js';
 import { clarifyComplete, clarifyQuestions } from '../frontend/src/clarify-model.js';
 
 test('explainApproval names the command for term_exec and marks it high risk', () => {
@@ -22,6 +22,12 @@ test('explainApproval describes skill edits as medium-risk and not auto-reversib
   assert.equal(save.title, '保存技能');
   assert.equal(save.reversible, false);
   assert.equal(explainApproval('skill_delete', {}).title, '删除技能');
+});
+
+test('batchRisk is high when any queued request is high risk', () => {
+  assert.equal(batchRisk(['write_file', 'skill_save'], [{ path: 'a.ts' }, {}]), 'medium');
+  assert.equal(batchRisk(['write_file', 'term_exec'], [{ path: 'a.ts' }, { command: 'rm -rf x' }]), 'high');
+  assert.equal(batchRisk([], []), 'medium');
 });
 
 test('explainApproval falls back to a high-risk irreversible warning for unknown tools', () => {

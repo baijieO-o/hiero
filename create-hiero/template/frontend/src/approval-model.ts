@@ -55,6 +55,11 @@ export function explainApproval(toolName: string, input: unknown): ApprovalExpla
   }
 }
 
+/** Risk of a batch is the highest risk among its requests. */
+export function batchRisk(toolNames: string[], inputs: unknown[]): ApprovalRisk {
+  return toolNames.some((name, index) => explainApproval(name, inputs[index]).risk === 'high') ? 'high' : 'medium';
+}
+
 /** Remaining seconds rounded up, never below zero. */
 export function secondsLeft(deadlineMs: number, nowMs: number): number {
   return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1000));

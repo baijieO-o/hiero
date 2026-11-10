@@ -12,6 +12,7 @@ import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
 import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
 import { TaskCard } from './task-card';
 import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
+import { batchRisk } from './approval-model';
 import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
 import { DocsCenter } from './docs-center';
 import { clarifyComplete, clarifyQuestions, type ClarifyAnswers } from './clarify-model';
@@ -1876,9 +1877,28 @@ function ApprovalModal(): ReactElement | null {
     }
     setQueue((rest) => rest.slice(1));
   }, [approvalId]);
+  // Answers every queued request in one go. Each one still gets its own approval_response, so the backend protocol is unchanged.
+  const respondAll = useCallback((approved: boolean) => {
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      for (const request of queue) {
+        socket.send(JSON.stringify({ type: 'approval_response', payload: { approval_id: request.approval_id, approved } }));
+      }
+    }
+    setQueue([]);
+  }, [queue]);
   if (!current) return null;
 
-  return <ApprovalDialog key={current.approval_id} request={current} onRespond={respond} />;
+  return (
+    <ApprovalDialog
+      key={current.approval_id}
+      request={current}
+      onRespond={respond}
+      pendingCount={queue.length}
+      onRespondAll={respondAll}
+      queueRisk={batchRisk(queue.map((item) => item.tool_name), queue.map((item) => item.input))}
+    />
+  );
 }
 
 type RollbackPayload = { ok: boolean; restored?: string[]; skipped?: string[]; warning?: { code: string; message: string }; message?: string };
