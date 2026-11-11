@@ -4,6 +4,20 @@ import { z } from 'zod';
 import { ApprovalBroker } from '../src/approval-broker.js';
 import { ToolGateway } from '../src/tool-gateway.js';
 
+test('workspace writes require approval in standard mode when configured as a breakpoint', async () => {
+  const gateway = new ToolGateway();
+  let ran = 0;
+  gateway.register({
+    name: 'write_file', irreversible: true, effect: 'workspace', inputSchema: z.object({ path: z.string() }),
+    execute: async () => { ran += 1; return 'written'; },
+  } as never);
+  gateway.setBreakpoints(['write_file']);
+  await assert.rejects(() => gateway.execute('write_file', { path: 'a' }, 'i', 'standard'), /GOV-001/);
+  gateway.setApprover(async () => ({ approved: true }));
+  assert.equal((await gateway.execute('write_file', { path: 'a' }, 'i', 'standard')).result, 'written');
+  assert.equal(ran, 1);
+});
+
 test('ApprovalBroker resolves approve and deny, ignores unknown or duplicate ids', async () => {
   const seen: string[] = [];
   const broker = new ApprovalBroker((request) => seen.push(request.approval_id));

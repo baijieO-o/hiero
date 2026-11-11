@@ -218,7 +218,10 @@ button, textarea, select { font: inherit; }
 .chat-markdown table { border-collapse: collapse; display: block; overflow-x: auto; }
 .chat-markdown th, .chat-markdown td { padding: 4px 8px; border: 1px solid var(--border); }
 .chat-role { display: block; font-size: 10px; font-weight: 800; letter-spacing: .12em; color: var(--text-muted); text-transform: uppercase; }
-.chat-error { color: #ff8a8a; font-size: 12px; margin: 0; padding: 8px 10px; border: 1px solid rgba(255, 107, 107, .35); border-radius: 8px; background: rgba(255, 107, 107, .08); }
+.chat-error { color: #ff8a8a; font-size: 12px; margin: 0; padding: 8px 10px; border: 1px solid rgba(255, 107, 107, .35); border-radius: 8px; background: rgba(255, 107, 107, .08); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.chat-failure-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.chat-failure-actions button { border: 1px solid rgba(255, 255, 255, .2); border-radius: 6px; padding: 4px 8px; color: inherit; background: rgba(255, 255, 255, .06); cursor: pointer; }
+.chat-failure-actions button:hover { background: rgba(255, 255, 255, .14); }
 .chat-composer { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--surface-3); }
 .chat-sidebar .chat-history-item.active, .chat-sidebar .chat-history-item:hover { background: color-mix(in srgb, var(--surface-2) calc(var(--panel-opacity) * 100%), transparent); }
 .chat-options { display: flex; flex-wrap: wrap; gap: 8px; }

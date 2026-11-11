@@ -318,7 +318,8 @@ interface ChatState {
   renameConversation: (id: string, title: string) => void;
   deleteConversation: (id: string) => void;
   rewindConversation: (messageIndex: number) => void;
-  send: (text: string, images?: string[], sharedUrls?: string[]) => void;
+  send: (text: string, images?: string[], sharedUrls?: string[], taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } }) => void;
+  retry: () => void;
   cancel: () => void;
 }
 
@@ -371,6 +372,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
   let sentOnSocket: string | null = null;
   let pendingFiles: string[] = [];
   let pendingTrace: TraceEvent[] | undefined;
+  let lastFailedSend: { text: string; images: string[]; sharedUrls: string[]; taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } } } | null = null;
   /** Deltas arrive per token; they are merged and written to the store at most once per animation frame. */
   let deltaBuffer = '';
   let deltaFrame: number | undefined;
@@ -504,11 +506,13 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         if (partial || finished.steps) {
           updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         }
+        lastFailedSend = null;
         activeRequest = null;
         writeActiveRequest(null);
         set({ pending: false, streamingSegments: [], error: null });
       } else if (message.type === 'CHAT_UNKNOWN') {
         // The backend no longer has this run (it restarted or the record expired), so nothing can be recovered.
+        lastFailedSend = null;
         pendingFiles = [];
         pendingTrace = undefined;
         discardDeltas();
@@ -519,6 +523,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         const rawDetail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
         const errorCode = typeof message.payload?.code === 'string' ? message.payload.code : '';
         const detail = errorCode ? `[${errorCode}] ${rawDetail}` : rawDetail;
+        lastFailedSend = null;
         pendingFiles = [];
         pendingTrace = undefined;
         discardDeltas();
@@ -639,12 +644,13 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       });
       set({ error: null });
     },
-    send: (text, images = [], sharedUrls = []) => {
+    send: (text, images = [], sharedUrls = [], taskCard) => {
       const trimmed = text.trim();
       const state = get();
     if ((!trimmed && images.length === 0 && sharedUrls.length === 0) || state.pending) return;
       const conversation = state.conversations.find((conv) => conv.id === state.activeId);
       if (!conversation) return;
+    lastFailedSend = { text: trimmed, images: [...images], sharedUrls: [...sharedUrls], taskCard };
       const message: ChatMessage = { role: 'user', content: trimmed, ...(images.length > 0 ? { images } : {}) };
       const requestId = `chat-${Date.now()}`;
       activeRequest = { conversationId: conversation.id, requestId };
@@ -663,9 +669,16 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const target = ensureSocket();
       const { model, permission, workspace, contextMode } = state.options;
       const subagent = useSubagentPreferences.getState().values;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent, ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
+      const contractFields = taskCard ?? undefined;
+      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
+    },
+    retry: () => {
+      const failed = lastFailedSend;
+      if (!failed || get().pending) return;
+      lastFailedSend = null;
+      get().send(failed.text, failed.images, failed.sharedUrls, failed.taskCard);
     },
     cancel: () => {
       const request = activeRequest;
@@ -1032,7 +1045,7 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, cancel: state.cancel })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, retry, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, retry: state.retry, cancel: state.cancel })));
   const [draft, setDraft] = useState('');
   const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1291,7 +1304,7 @@ function ChatPanel(): ReactElement {
         </div>
         {scrolledUp && <button type="button" className="chat-scroll-bottom" onClick={scrollToBottom}>回到底部 ↓</button>}
         </div>
-        {error && <p className="chat-error">{error}</p>}
+        {error && <div className="chat-error" role="alert"><span>{error}</span><span className="chat-failure-actions"><button type="button" onClick={retry}>重试</button><button type="button" onClick={() => { setDraft((current) => current ? `${current}\n\n请换一种方案继续处理，先只给出计划并说明风险，不要重复刚才失败的操作。` : '请换一种方案继续处理，先只给出计划并说明风险，不要重复刚才失败的操作。'); composerRef.current?.focus(); }}>换方案</button><button type="button" onClick={() => { setOption('permission', 'strict'); setDraft((current) => current ? `${current}\n\n请在每次文件写入前等待我的审批，并先说明修改方案。` : '请在每次文件写入前等待我的审批，并先说明修改方案。'); composerRef.current?.focus(); }}>转人工审批</button></span></div>}
         {folderError && <p className="chat-error">{folderError}</p>}
         {sessionInfoOpen && active && <SessionInfoPanel
           usage={contextUsage[active.id]}

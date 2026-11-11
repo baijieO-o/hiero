@@ -4,20 +4,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { HieroRuntime } from '../src/hiero-runtime.js';
+import { SecretStore } from '../src/secret-store.js';
 
 test('saveModelSettings keeps existing tokens when the token field is blank', async () => {
   const root = mkdtempSync(join(tmpdir(), 'hiero-save-'));
   const previous = { endpoint: process.env.HIERO_LLM_ENDPOINT, tokens: process.env.HIERO_LLM_TOKENS, model: process.env.HIERO_LLM_MODEL };
   process.env.HIERO_LLM_TOKENS = 'kept-one,kept-two';
   const runtime = new HieroRuntime(0);
+  runtime.secrets = new SecretStore(join(root, 'store'));
+  runtime.secrets.set('HIERO_LLM_TOKENS', 'kept-one,kept-two');
   try {
     const saved = runtime.saveModelSettings({ endpoint: 'https://save.test/v1', model: 'save-model', tokens: '' }, root);
     assert.equal(saved.endpoint, 'https://save.test/v1/chat/completions');
     assert.equal(saved.model, 'save-model');
     assert.equal(saved.token_count, 2);
     const text = readFileSync(join(root, '.env'), 'utf8');
-    assert.ok(text.includes('HIERO_LLM_TOKENS=kept-one,kept-two'));
+    assert.ok(!text.includes('kept-one'), 'tokens must not be written to .env');
     assert.ok(text.includes('HIERO_LLM_ENDPOINT=https://save.test/v1/chat/completions'));
+    assert.equal(runtime.secrets.get('HIERO_LLM_TOKENS'), 'kept-one,kept-two');
   } finally {
     await runtime.close();
     for (const [key, value] of Object.entries({ HIERO_LLM_ENDPOINT: previous.endpoint, HIERO_LLM_TOKENS: previous.tokens, HIERO_LLM_MODEL: previous.model })) {

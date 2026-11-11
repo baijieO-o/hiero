@@ -5,7 +5,8 @@
 - 功能说明与配置：[docs/FEATURES.md](docs/FEATURES.md)
 - 架构与实现状态：[ARCHITECTURE.md](ARCHITECTURE.md) 第 7 节
 - 未实现与待决策事项：见下文第 5 节
-- 未提交改动：本次工作区改动尚未 commit。提交前需用户确认，并需先跑完整 `npm test`。
+- 提交状态：工作区干净，最新提交为 `a007ac7`（前端批量审批），已推送到 `origin/main`。
+- 手动冒烟验证步骤见 [docs/SMOKE-TEST.md](docs/SMOKE-TEST.md)；真实模型、真实文件读写与 Docker 运行均需按清单实测，文档本身不代表验证通过。
 
 ## 1. 项目
 
@@ -61,7 +62,7 @@ Set-Location frontend; npm run dev   # 前端
 
 ## 5. 未实现 / 待决策
 
-完整清单（17 项）与归属见 [files/doc-cleanup-plan.md](files/doc-cleanup-plan.md)。摘要：
+摘要（完整清单原为会话内临时文件，已不在仓库中）：
 
 - 交接文档的自动生成与自动恢复
 - 沙箱与审批设置域（设置面板中尚无）

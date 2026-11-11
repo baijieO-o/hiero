@@ -20,7 +20,8 @@ import { z } from 'zod';
 import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
 import { diffSnapshots, snapshotTextFiles } from './workspace-diff.js';
-import { modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+import { loadLocalLlmEnv, modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+import { SecretStore, type SecretName } from './secret-store.js';
 import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
 import { ApprovalBroker } from './approval-broker.js';
@@ -74,6 +75,18 @@ import type { ExtensionReady, SystemAgentError } from './system_agent.js';
 import type { WebSocket } from 'ws';
 
 const DEFAULT_MAX_CONTEXT_TOKENS = 32_000;
+const CHAT_DEFAULT_MAX_TOKENS = 4_000;
+const CHAT_DEFAULT_MAX_TIME_MS = 120_000;
+const CHAT_BUDGET_LIMITS = { maxTokens: { min: 100, max: 200_000 }, maxTimeMs: { min: 10_000, max: 3_600_000 } } as const;
+
+function chatBudget(request: RuntimeChatRequest): { maxTokens: number; maxTimeMs: number } {
+  const clamp = (value: number | undefined, limits: { min: number; max: number }, fallback: number) =>
+    typeof value === 'number' && Number.isFinite(value) ? Math.min(limits.max, Math.max(limits.min, Math.round(value))) : fallback;
+  return {
+    maxTokens: clamp(request.budget_envelope?.max_tokens, CHAT_BUDGET_LIMITS.maxTokens, CHAT_DEFAULT_MAX_TOKENS),
+    maxTimeMs: clamp(request.budget_envelope?.max_time_ms, CHAT_BUDGET_LIMITS.maxTimeMs, CHAT_DEFAULT_MAX_TIME_MS),
+  };
+}
 
 export interface RuntimeTaskRequest {
   goal?: string;
@@ -99,6 +112,8 @@ export interface RuntimeChatRequest {
   subagent?: Partial<SubagentSettings>;
   /** Web pages shared from the built-in browser; fetched server-side and attached to the latest user message. */
   shared_urls?: string[];
+  acceptance_criteria?: string[];
+  budget_envelope?: { max_tokens?: number; max_time_ms?: number };
 }
 
 const MAX_SHARED_PAGES = 3;
@@ -517,7 +532,7 @@ function isWorkspaceRequest(message: unknown): message is WorkspaceRequest {
 
 /** Tool names from HIERO_HITL_TOOLS (comma-separated) that always pause for approval outside auto mode. */
 export function hitlBreakpointsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.HIERO_HITL_TOOLS ?? '').split(',').map((name) => name.trim()).filter((name) => name.length > 0);
+  return [...new Set(['write_file', ...(env.HIERO_HITL_TOOLS ?? '').split(',').map((name) => name.trim()).filter((name) => name.length > 0)])];
 }
 
 export class HieroRuntime {
@@ -532,6 +547,7 @@ export class HieroRuntime {
   private readonly browserSessions = new BrowserSessions({
     headlessCdpUrl: process.env.HIERO_HEADLESS_CDP_URL || undefined,
   });
+  secrets = new SecretStore(join(homedir(), '.hiero'));
   private readonly writeSnapshots = new WriteSnapshotStore(join(homedir(), '.hiero', 'write-snapshots.json'));
   private readonly codeIndexes = new Map<string, CodeIndex>();
   private readonly configWatcher = new ConfigWatcher({ home: homedir() });
@@ -563,7 +579,9 @@ export class HieroRuntime {
       else if (isAskUserResponse(message)) this.askUsers.respond(message.payload.ask_id, message.payload.status === 'submitted' ? { status: 'submitted', values: message.payload.values ?? {} } : { status: 'declined' });
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
-      else if (isChatCancelRequest(message)) this.cancelChat(message.request_id, client);
+      else if (isChatCancelRequest(message)) {
+        if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
+      }
       else if (isChatAttachRequest(message)) this.attachChat(message.request_id, client);
       else if (isChatUsageRequest(message)) await this.handleChatUsage(message, client);
       else if (isChatCompactRequest(message)) await this.handleChatCompact(message, client);
@@ -801,8 +819,11 @@ export class HieroRuntime {
       HIERO_LLM_TOKENS: tokens.join(','),
       HIERO_LLM_TASK_MODELS: Object.keys(taskModels).length > 0 ? JSON.stringify(taskModels) : '',
     };
-    writeLocalEnv(values, root);
-    for (const [key, value] of Object.entries(values)) process.env[key] = value;
+    const { HIERO_LLM_TOKENS: tokenValue, ...plain } = values;
+    writeLocalEnv(plain, root);
+    if (newTokens.length > 0) this.secrets.set('HIERO_LLM_TOKENS', tokenValue ?? '');
+    for (const [key, value] of Object.entries(plain)) process.env[key] = value;
+    process.env.HIERO_LLM_TOKENS = tokenValue;
     this.gateway = this.createGateway();
     this.workflow = this.createWorkflow();
     return this.readModelSettings();
@@ -899,14 +920,15 @@ export class HieroRuntime {
   }
 
   /** Aborts an in-flight chat. The model call stops immediately and the client gets CHAT_CANCELLED. */
-  private cancelChat(requestId: string, client?: WebSocket): void {
+  private cancelChat(requestId: string, client?: WebSocket): boolean {
     const controller = this.activeChats.get(requestId);
-    if (!controller) return;
+    if (!controller) return false;
     console.log(`[chat ${requestId}] cancel requested`);
     controller.abort();
     const run = this.chatRuns.get(requestId);
     if (run) this.sendChat(requestId, run, { type: 'CHAT_CANCELLED', payload: { request_id: requestId } });
     else this.runtime.send({ type: 'CHAT_CANCELLED', payload: { request_id: requestId } }, client);
+    return true;
   }
 
   private async runChat(request: RuntimeChatRequest, model: string, run: ChatRunBuffer, signal: AbortSignal): Promise<void> {
@@ -919,8 +941,8 @@ export class HieroRuntime {
       model_config: { preferred_model: model, fallback_chain: [] },
       permission_mode: parsePermissionMode(request.permission, 'standard'),
       context_mode: 'ephemeral',
-      acceptance_criteria: [],
-      budget_envelope: { max_tokens: DEFAULT_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 },
+      acceptance_criteria: Array.isArray(request.acceptance_criteria) ? request.acceptance_criteria.filter((item): item is string => typeof item === 'string').slice(0, 100) : [],
+      budget_envelope: (() => { const budget = chatBudget(request); return { max_tokens: budget.maxTokens, max_time_ms: budget.maxTimeMs }; })(),
     };
     const subagent = normalizeSubagentSettings(request.subagent);
     const toolDefinitions = chatToolDefinitions(subagent);

@@ -9,6 +9,14 @@ import { listSkills } from './skill-store.js';
 export interface SkillSummary { name: string; description: string; path: string; }
 export interface SkillDetail extends SkillSummary { content: string; }
 
+const METADATA_DESCRIPTION_LIMIT = 120;
+
+function compactDescription(description: string): string {
+  const oneLine = description.replace(/^["']|["']$/g, '').replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= METADATA_DESCRIPTION_LIMIT) return oneLine;
+  return `${oneLine.slice(0, METADATA_DESCRIPTION_LIMIT - 1).trimEnd()}…`;
+}
+
 export class CapabilityRouter {
   private skills: SkillSummary[] = [];
   private readonly mcp: McpToolClient;
@@ -23,8 +31,9 @@ export class CapabilityRouter {
 
   public skillSummaries(): readonly SkillSummary[] { return this.skills; }
 
+  /** Short one-line summaries for the system prompt; full SKILL.md is loaded on demand via load_skill. */
   public systemPromptMetadata(): string {
-    return this.skills.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n');
+    return this.skills.map((skill) => `- ${skill.name}: ${compactDescription(skill.description)}`).join('\n');
   }
 
   public async loadSkill(name: string): Promise<SkillDetail | undefined> {

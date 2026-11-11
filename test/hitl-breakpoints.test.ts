@@ -51,5 +51,5 @@ test('tools without a breakpoint run without asking', async () => {
 
 test('HIERO_HITL_TOOLS is parsed as a trimmed comma-separated list', () => {
   assert.deepEqual(hitlBreakpointsFromEnv({ HIERO_HITL_TOOLS: ' write_file, ,edit_file ' }), ['write_file', 'edit_file']);
-  assert.deepEqual(hitlBreakpointsFromEnv({}), []);
+  assert.deepEqual(hitlBreakpointsFromEnv({}), ['write_file']);
 });

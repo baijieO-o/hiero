@@ -47,3 +47,20 @@ test('CapabilityRouter exposes skill metadata first and loads full content on de
     assert.match((await router.loadSkill('browser'))?.content ?? '', /Secret implementation details/);
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
+
+test('CapabilityRouter truncates long skill descriptions in the system prompt only', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'hiero-skills-long-'));
+  try {
+    const longDescription = `When the user wants ${'something very specific '.repeat(20)}`;
+    const skillDir = join(workspace, '.agent', 'skills', 'verbose');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(join(skillDir, 'SKILL.md'), `---\ndescription: ${longDescription}\n---\n# Body`);
+    const router = new CapabilityRouter();
+    await router.discoverSkills(workspace);
+    const line = router.systemPromptMetadata().split('\n').find((item) => item.startsWith('- verbose:')) ?? '';
+    assert.ok(line.length > 0 && line.length <= '- verbose: '.length + 120, `metadata line too long: ${line.length}`);
+    assert.ok(line.endsWith('…'));
+    const detail = await router.loadSkill('verbose');
+    assert.equal(detail?.description, longDescription.trim());
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});

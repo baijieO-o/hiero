@@ -119,7 +119,7 @@ HIERO_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct
 HIERO_LLM_TOKENS=EMPTY
 ```
 
-如果 vLLM 启用了 API key，把 `HIERO_LLM_TOKENS` 设为对应密钥。设置面板也可以填写这些字段。
+如果 vLLM 启用了 API key，把 `HIERO_LLM_TOKENS` 设为对应密钥。设置面板也可以填写这些字段。令牌与 Brave 搜索密钥会加密保存在 `~/.hiero/secrets.enc.json`，不会以明文留在 `.env` 中。
 
 全部环境变量及其说明见 [docs/FEATURES.md 第 12 节](docs/FEATURES.md#12-模型配置)，这里不再重复。
 
