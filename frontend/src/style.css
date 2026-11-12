@@ -289,6 +289,20 @@ button, textarea, select { font: inherit; }
 .chat-history-item:hover { background: var(--surface-2); color: var(--text); }
 .chat-history-item.active { background: var(--surface-2); border-color: var(--border); color: var(--text-strong); }
 .chat-history-row { position: relative; }
+.chat-history-row.pinned .chat-history-item { border-color: color-mix(in srgb, var(--border) 60%, transparent); }
+.chat-sidebar-top { display: flex; align-items: center; gap: 6px; }
+.chat-sidebar-top .primary-button { flex: 1; }
+.chat-select-header { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 4px; font-size: 15px; color: var(--text-strong); }
+.chat-history-select { display: flex; align-items: center; gap: 10px; padding: 8px 10px; font-size: 13px; color: var(--text); cursor: pointer; min-width: 0; border-radius: 8px; }
+.chat-history-select input { appearance: none; flex: none; width: 16px; height: 16px; margin: 0; border: 1.5px solid var(--text-muted); border-radius: 50%; cursor: pointer; }
+.chat-history-select input:checked { background: var(--text-strong); border-color: var(--text-strong); box-shadow: inset 0 0 0 3px var(--surface); }
+.chat-history-select input:disabled { opacity: .4; cursor: default; }
+.chat-history-row.selected .chat-history-select { background: var(--surface-2); }
+.chat-history-item-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-batch-bar { display: flex; align-items: center; justify-content: space-around; gap: 6px; margin-top: auto; padding: 10px 2px 2px; border-top: 1px solid var(--border); }
+.chat-batch-action { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: none; border-radius: 8px; background: transparent; color: var(--text-muted); font-size: 13px; cursor: pointer; }
+.chat-batch-action:hover:not(:disabled) { background: var(--surface-2); color: var(--text-strong); }
+.chat-batch-action:disabled { opacity: .4; cursor: default; }
 .chat-history-actions { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); display: flex; gap: 4px; opacity: 0; pointer-events: none; transition: opacity .15s; }
 .chat-history-row:hover .chat-history-actions, .chat-history-actions:focus-within { opacity: 1; pointer-events: auto; }
 .chat-history-row:hover .chat-history-item { padding-right: 64px; }
@@ -491,6 +505,10 @@ button, textarea, select { font: inherit; }
 .chat-checkpoint::before, .chat-checkpoint::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .chat-checkpoint:hover:not(:disabled) { color: var(--text-strong); }
 .chat-checkpoint:disabled { cursor: default; opacity: 0.5; }
+.chat-checkpoint-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.chat-checkpoint-row::before, .chat-checkpoint-row::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.chat-checkpoint-row .chat-checkpoint { width: auto; margin: 0; }
+.chat-checkpoint-row .chat-checkpoint::before, .chat-checkpoint-row .chat-checkpoint::after { display: none; }
 .chat-checkpoint svg { flex: none; }
 .chat-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .chat-file { padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: #8fc4ff; font-size: 12px; cursor: pointer; }

@@ -11,7 +11,11 @@
   "bugs": {
     "url": "https://github.com/baijieO-o/hiero/issues"
   },
-  "keywords": ["agent", "state-machine", "hiero"],
+  "keywords": [
+    "agent",
+    "state-machine",
+    "hiero"
+  ],
   "type": "module",
   "bin": {
     "hiero": "dist/src/server.js"
@@ -30,11 +34,13 @@
     "start": "npm run build && node dist/src/server.js",
     "test": "npm run build && node --test dist/test/*.test.js",
     "build:frontend": "npm --prefix frontend run build",
+    "desktop": "electron electron/main.cjs",
     "prepack": "npm run build:frontend && npm run build"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/ws": "^8.18.2",
+    "electron": "^45.3.0",
     "typescript": "^7.0.2"
   },
   "dependencies": {

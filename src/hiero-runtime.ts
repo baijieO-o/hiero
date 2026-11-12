@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -142,7 +142,7 @@ function withSharedContext(history: RuntimeChatRequest['messages'], sharedContex
   return history.map((item, i) => i === index ? { ...item, content: `${item.content}\n\n${sharedContext}` } : item);
 }
 
-const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative. When the user asks you to ask them something (e.g. "问我", "询问我", "弹窗问我") or when you need the user to choose among options or supply missing details, you MUST call the ask_user tool instead of asking in plain text.';
+const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Write the complete final content in a single write_file call: do not write placeholders or drafts first, and do not read a file back just to check what you wrote. When generating animated pages, keep the animations running by default; do not add a prefers-reduced-motion rule that disables or shortens all animations, and only add a reduced-motion variant if the user asks for one. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative. When the user asks you to ask them something (e.g. "问我", "询问我", "弹窗问我") or when you need the user to choose among options or supply missing details, you MUST call the ask_user tool instead of asking in plain text.';
 const CHAT_TOOL_ROUNDS = 5;
 /** Chat has no per-task token cap, so compaction triggers at a fixed estimated size. */
 const CHAT_COMPACT_TOKENS = 24_000;
@@ -206,8 +206,8 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     type: 'function',
     function: {
       name: 'browser_open',
-      description: 'Open a public http(s) page in an agent-controlled browser. mode "visible" shows a real Edge window the user can watch; mode "headless" runs without a window. Returns the page title and URL.',
-      parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' }, mode: { type: 'string', enum: ['visible', 'headless'] } }, required: ['url'] },
+      description: 'Open a public http(s) page in an agent-controlled browser. mode "visible" (default) shows a real Edge window the user can watch; mode "headless" runs without a window; mode "shared" operates on the page the user sees in the Hiero desktop browser panel (same login session), and needs the desktop shell. Returns the page title and URL. Fails on HTTP status 400 or above.',
+      parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' }, mode: { type: 'string', enum: ['visible', 'headless', 'shared'] } }, required: ['url'] },
     },
   },
   {
@@ -215,15 +215,15 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     function: {
       name: 'browser_snapshot',
       description: 'Return the accessibility tree of the current agent-browser page (roles, names, states). Use it to find elements before clicking or typing.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] } } },
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] } } },
     },
   },
   {
     type: 'function',
     function: {
       name: 'browser_screenshot',
-      description: 'Report the current agent-browser page URL, title and screenshot size. The image itself is not returned; use browser_snapshot for the page structure.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] } } },
+      description: 'Report the current agent-browser page URL, title and the screenshot byte size. The image itself is not returned; use browser_snapshot for the page structure.',
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] } } },
     },
   },
   {
@@ -239,7 +239,7 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     function: {
       name: 'browser_click',
       description: 'Click an element in the agent-browser page, identified by its ARIA role and exact accessible name (from browser_snapshot). Requires user approval for each click.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] }, role: { type: 'string' }, name: { type: 'string' } }, required: ['role', 'name'] },
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] }, role: { type: 'string' }, name: { type: 'string' } }, required: ['role', 'name'] },
     },
   },
   {
@@ -247,7 +247,7 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     function: {
       name: 'browser_type',
       description: 'Type text into an input identified by its ARIA role and exact accessible name (from browser_snapshot). Requires user approval for each input.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] }, role: { type: 'string' }, name: { type: 'string' }, text: { type: 'string' } }, required: ['role', 'name', 'text'] },
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] }, role: { type: 'string' }, name: { type: 'string' }, text: { type: 'string' } }, required: ['role', 'name', 'text'] },
     },
   },
   {
@@ -377,6 +377,11 @@ function isTaskHistoryRequest(message: unknown): boolean {
 }
 
 interface ChatCancelRequest { type: 'chat_cancel'; request_id: string }
+
+interface BrowserPauseRequest { type: 'browser_agent_pause'; paused: boolean }
+function isBrowserPauseRequest(message: unknown): message is BrowserPauseRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'browser_agent_pause' && typeof (message as { paused?: unknown }).paused === 'boolean';
+}
 
 function isChatCancelRequest(message: unknown): message is ChatCancelRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_cancel' && typeof (message as { request_id?: unknown }).request_id === 'string';
@@ -546,6 +551,7 @@ export class HieroRuntime {
   private readonly askUsers: AskUserBroker;
   private readonly browserSessions = new BrowserSessions({
     headlessCdpUrl: process.env.HIERO_HEADLESS_CDP_URL || undefined,
+    sharedCdpUrl: process.env.HIERO_SHARED_CDP_URL || 'http://127.0.0.1:9333',
   });
   secrets = new SecretStore(join(homedir(), '.hiero'));
   private readonly writeSnapshots = new WriteSnapshotStore(join(homedir(), '.hiero', 'write-snapshots.json'));
@@ -581,6 +587,10 @@ export class HieroRuntime {
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) {
         if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
+      }
+      else if (isBrowserPauseRequest(message)) {
+        this.browserSessions.setAgentPaused(message.paused);
+        this.runtime.broadcast({ type: 'BROWSER_AGENT_STATE', payload: { paused: this.browserSessions.isAgentPaused() } });
       }
       else if (isChatAttachRequest(message)) this.attachChat(message.request_id, client);
       else if (isChatUsageRequest(message)) await this.handleChatUsage(message, client);

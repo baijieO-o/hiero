@@ -50,15 +50,25 @@ Set-Location frontend; npm run dev   # 前端
 - 智能体专用浏览器（`src/browser-session.ts`，`playwright-core` 1.65.0，使用本机 Edge）：`browser_open`、`browser_snapshot`、`browser_screenshot`（仅返回元数据）、`browser_click`、`browser_type`、`headless_extract`。点击与输入需审批（非 auto 模式）。`HIERO_HEADLESS_CDP_URL` 可接入外部引擎。
 - 测试：`test/browser-session.test.ts`。
 
-未完成 / 未验证：
-1. 审批弹窗未在聊天界面验证。
-2. 截图对模型不可见（只返回元数据）。`image_url` 路径已在 `src/model-gateway.ts` 支持，但未接入。
-3. Lightpanda 未验证（Windows 下载被拦截）。
-4. 用户接管未实现（没有「接管」按钮或暂停 Agent 控制的机制）。
-5. 子代理白名单未包含浏览器工具（`READ_ONLY_SUBAGENT_TOOLS` / `WRITE_SUBAGENT_TOOLS`）。
-6. 「分享链接」未在浏览器中实测。
+桌面版共享浏览器（第二步，已构建，未做端到端验证）：
+- Electron 主进程（`electron/main.cjs`）开启 `remote-debugging-port`（默认 127.0.0.1:9333，`HIERO_SHARED_CDP_PORT` 可改）。webview 与智能体的 `shared` 模式通过 CDP 接入同一浏览器，共享页面与登录态。
+- `browser_open` / `snapshot` / `screenshot` / `click` / `type` 的 `mode` 支持 `shared`；未启动桌面版时报错提示。
+- 暂停：WebSocket 消息 `browser_agent_pause`，后端内存标志，暂停时拒绝 click / type（读取仍允许）。状态通过 `BROWSER_AGENT_STATE` 广播，面板有暂停/恢复按钮。
+- 安全注意：CDP 端口绑定本机，但任何本机进程都能连接；shared 模式无请求拦截，导航后仅做 URL 公网校验。
+- 「分享给智能体」仍只传 URL（后端抓取公网页面），不携带 webview 中已登录的页面内容。
+- 标准浏览器的共享方式：不依赖桌面版，启动一个外部 Chrome/Edge 并开启 CDP，例如 `chrome.exe --remote-debugging-port=9333 --user-data-dir=<独立目录>`（Chrome 136+ 不允许对默认配置开启调试，必须用独立的 user-data-dir）。后端默认连接 `http://127.0.0.1:9333`，可用 `HIERO_SHARED_CDP_URL` 修改。未配置时的报错会提示这两种方式。
+- `requirePage` 在 shared 模式下会自动接管当前共享页面，不需要先调用 `browser_open`。
+- 已验证（直接调用方法，非模型工具调用）：读取共享页面快照；暂停时点击被拒绝；恢复后点击成功。
 
-限制（设计如此）：浏览器不带用户登录态，不共享用户 DOM 或 Cookie。
+未完成 / 未验证：
+1. 桌面版端到端验证（webview 目标是否出现在 `/json/list`，shared 模式读取同一页面）未做。
+2. 模型通过工具调用操作 shared 页面的链路未做真实模型验证。前端暂停按钮的 UI 效果未在浏览器中验证。
+2. 审批弹窗未在聊天界面验证。
+2a. rea MCP（逆向分析工具，`.hiero/mcp.json`，已 gitignore）：rea-agents@6.8.0 要求 Node 22.23.4+/24.22.1+/26.12.1+，系统 Node 26.12.0 不满足，MCP 握手会超时。当前用 `.hiero/rea-runtime/`（内含 Node 22.23.5 与 rea-agents@6.8.0）启动，`McpToolClient.connect` 已验证可列出 229 个工具。多数逆向能力还需要 Ghidra / IDA / Hopper 等本地程序，尚未验证。
+3. 截图对模型不可见（只返回元数据）。`image_url` 路径已在 `src/model-gateway.ts` 支持，但未接入。
+4. Lightpanda 未验证（Windows 下载被拦截）。
+5. 子代理白名单未包含浏览器工具（`READ_ONLY_SUBAGENT_TOOLS` / `WRITE_SUBAGENT_TOOLS`）。
+6. 登录态共享未加显式同意步骤；目前 webview 持久分区内的 Cookie 即为共享。
 
 ## 5. 未实现 / 待决策
 

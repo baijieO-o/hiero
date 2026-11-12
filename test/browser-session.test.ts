@@ -18,3 +18,17 @@ test('browser tools mark clicks and typing as irreversible while reads stay read
   assert.deepEqual(actions.map((tool) => tool.name), ['browser_click', 'browser_type']);
   assert.ok(actions.every((tool) => tool.irreversible === true));
 });
+
+test('shared browser needs the desktop shell and refuses agent actions while paused', async () => {
+  const unconfigured = new BrowserSessions();
+  await assert.rejects(unconfigured.open('shared', 'https://example.com/'), /共享浏览器未配置/);
+  await unconfigured.close();
+
+  const sessions = new BrowserSessions({ sharedCdpUrl: 'http://127.0.0.1:1' });
+  sessions.setAgentPaused(true);
+  assert.equal(sessions.isAgentPaused(), true);
+  await assert.rejects(sessions.click('shared', 'button', 'Go'), /已暂停/);
+  await assert.rejects(sessions.type('shared', 'textbox', 'Q', 'x'), /已暂停/);
+  sessions.setAgentPaused(false);
+  await sessions.close();
+});

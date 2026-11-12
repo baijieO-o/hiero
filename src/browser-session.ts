@@ -7,7 +7,7 @@ import { assertFetchableUrl, assertPublicHost } from './web-tools.js';
  * A browser the agent can drive. "visible" is a headed Edge window the user can watch and take over.
  * "headless" connects to a CDP endpoint (for example Lightpanda) when configured, otherwise runs headless Edge.
  */
-export type BrowserMode = 'visible' | 'headless';
+export type BrowserMode = 'visible' | 'headless' | 'shared';
 
 const NAV_TIMEOUT_MS = 20_000;
 const ACTION_TIMEOUT_MS = 10_000;
@@ -17,6 +17,8 @@ const MAX_EXTRACT_CHARS = 20_000;
 interface BrowserSessionOptions {
   /** CDP endpoint for a headless engine such as Lightpanda, for example http://127.0.0.1:9222. */
   headlessCdpUrl?: string | undefined;
+  /** CDP endpoint of the Electron desktop shell. Its webview pages are the "shared" browser. */
+  sharedCdpUrl?: string | undefined;
 }
 
 /** Owns one Playwright browser per mode. Pages are created on demand and reused by the agent. */
@@ -24,14 +26,32 @@ export class BrowserSessions {
   private readonly browsers = new Map<BrowserMode, Promise<Browser>>();
   private readonly contexts = new Map<BrowserMode, BrowserContext>();
   private readonly pages = new Map<BrowserMode, Page>();
+  /** When true the agent may still read the shared page, but clicks and typing are refused until the user resumes it. */
+  private agentPaused = false;
 
   constructor(private readonly options: BrowserSessionOptions = {}) {}
+
+  setAgentPaused(paused: boolean): void {
+    this.agentPaused = paused;
+  }
+
+  isAgentPaused(): boolean {
+    return this.agentPaused;
+  }
+
+  private assertCanAct(mode: BrowserMode): void {
+    if (mode === 'shared' && this.agentPaused) throw new Error('智能体已暂停，无法在共享浏览器中操作。请在浏览器面板中恢复智能体后重试。');
+  }
 
   private async browserFor(mode: BrowserMode): Promise<Browser> {
     const existing = this.browsers.get(mode);
     if (existing) return existing;
     const launching = (async () => {
       const { chromium } = await import('playwright-core');
+      if (mode === 'shared') {
+        if (!this.options.sharedCdpUrl) throw new Error('共享浏览器未配置：请设置 HIERO_SHARED_CDP_URL，或使用桌面版（npm run desktop）。');
+        return chromium.connectOverCDP(this.options.sharedCdpUrl);
+      }
       if (mode === 'headless' && this.options.headlessCdpUrl) {
         return chromium.connectOverCDP(this.options.headlessCdpUrl);
       }
@@ -42,15 +62,27 @@ export class BrowserSessions {
     return launching;
   }
 
+  /** Shared mode attaches to the webview page the user is viewing instead of creating a new one. */
+  private async sharedPageFor(browser: Browser): Promise<Page> {
+    const pages = browser.contexts().flatMap((context) => context.pages()).filter((page) => !page.isClosed() && /^https?:/i.test(page.url()));
+    const page = pages.at(-1);
+    if (!page) throw new Error('共享浏览器中没有已打开的页面，请先在浏览器面板中打开一个网址。');
+    this.pages.set('shared', page);
+    return page;
+  }
+
   private async pageFor(mode: BrowserMode): Promise<Page> {
     const existing = this.pages.get(mode);
     if (existing && !existing.isClosed()) return existing;
     const browser = await this.browserFor(mode);
+    if (mode === 'shared') return this.sharedPageFor(browser);
     let context = this.contexts.get(mode);
     if (!context) {
       context = browser.contexts()[0] ?? await browser.newContext();
       this.contexts.set(mode, context);
     }
+    // Reuse the open page above; close only a stale one so repeated opens do not accumulate tabs.
+    if (existing) await existing.close().catch(() => undefined);
     const page = await context.newPage();
     // Every request, including redirects and subresources, must target a public address.
     await page.route('**/*', async (route) => {
@@ -73,7 +105,11 @@ export class BrowserSessions {
     const url = assertFetchableUrl(rawUrl);
     await assertPublicHost(url);
     const page = await this.pageFor(mode);
-    await page.goto(url.toString(), { timeout: NAV_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
+    const response = await page.goto(url.toString(), { timeout: NAV_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
+    // The shared page has no request interception, so re-check where it actually landed (redirects included).
+    if (mode === 'shared') await assertPublicHost(assertFetchableUrl(page.url()));
+    const status = response?.status() ?? 0;
+    if (status >= 400) throw new Error(`Page responded with HTTP ${status}: ${page.url()}`);
     return { url: page.url(), title: await page.title() };
   }
 
@@ -93,6 +129,7 @@ export class BrowserSessions {
 
   /** Clicks by visible text or role+name, not CSS selectors, so the agent acts on what the snapshot shows. */
   async click(mode: BrowserMode, role: string, name: string): Promise<{ url: string }> {
+    this.assertCanAct(mode);
     const page = await this.requirePage(mode);
     await page.getByRole(role as Parameters<Page['getByRole']>[0], { name, exact: true }).first().click({ timeout: ACTION_TIMEOUT_MS });
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
@@ -100,6 +137,7 @@ export class BrowserSessions {
   }
 
   async type(mode: BrowserMode, role: string, name: string, text: string): Promise<{ url: string }> {
+    this.assertCanAct(mode);
     const page = await this.requirePage(mode);
     await page.getByRole(role as Parameters<Page['getByRole']>[0], { name, exact: true }).first().fill(text, { timeout: ACTION_TIMEOUT_MS });
     return { url: page.url() };
@@ -115,6 +153,8 @@ export class BrowserSessions {
   }
 
   private async requirePage(mode: BrowserMode): Promise<Page> {
+    // Shared mode attaches to the user's current page on demand, so the agent can act without a prior browser_open.
+    if (mode === 'shared') return this.pageFor('shared');
     const page = this.pages.get(mode);
     if (!page || page.isClosed()) throw new Error(`No page is open in ${mode} browser. Call browser_open first.`);
     return page;
@@ -131,7 +171,7 @@ export class BrowserSessions {
   }
 }
 
-const modeSchema = z.enum(['visible', 'headless']).default('visible');
+const modeSchema = z.enum(['visible', 'headless', 'shared']).default('visible');
 
 /** Read-only browser tools. Visible mode is the user-watchable window; headless is for bulk extraction. */
 export function createBrowserReadTools(sessions: BrowserSessions): RegisteredTool<unknown, unknown>[] {

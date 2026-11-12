@@ -272,6 +272,8 @@ interface Conversation {
   /** Summary of messages[0..compactedUpTo); later requests send the summary plus the messages after it. */
   compactedSummary?: string;
   compactedUpTo?: number;
+  /** Pinned conversations list first, in the order they were pinned. */
+  pinnedAt?: number;
 }
 
 interface ContextUsageView { window: number; total: number; system: number; tools: number; tool_results: number; messages: number }
@@ -287,10 +289,8 @@ export interface ChatOptions {
   model: string;
   permission: string;
   workspace: string;
-  contextMode: string;
 }
 
-const CHAT_CONTEXT_OPTIONS = ['临时会话', '持久化 Markdown'];
 // 热边：鼠标距窗口左边缘多少像素内触发展开；离开侧栏后延迟收起，避免抖动。
 const HOT_EDGE_PX = 8;
 const HOT_EDGE_HIDE_DELAY_MS = 300;
@@ -311,14 +311,19 @@ interface ChatState {
   browserPageToShare: string | null;
   shareBrowserPage: (url: string) => void;
   takeBrowserPageShare: () => string | null;
+  browserAgentPaused: boolean;
+  setBrowserAgentPaused: (paused: boolean) => void;
   options: ChatOptions;
   setOption: <K extends keyof ChatOptions>(key: K, value: ChatOptions[K]) => void;
   newConversation: () => void;
   selectConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
   deleteConversation: (id: string) => void;
+  deleteConversations: (ids: string[]) => void;
+  togglePin: (id: string) => void;
   rewindConversation: (messageIndex: number) => void;
-  send: (text: string, images?: string[], sharedUrls?: string[], taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } }) => void;
+  forkConversation: (messageIndex: number) => void;
+  send:  (text: string, images?: string[], sharedUrls?: string[], taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } }) => void;
   retry: () => void;
   cancel: () => void;
 }
@@ -462,6 +467,10 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         handleSideChannel(message);
         return;
       }
+      if (message.type === 'BROWSER_AGENT_STATE') {
+        set({ browserAgentPaused: message.payload?.paused === true });
+        return;
+      }
       const requestId = typeof message.payload?.request_id === 'string' ? message.payload.request_id : '';
       if (!activeRequest || activeRequest.requestId !== requestId) return;
       const conversationId = activeRequest.conversationId;
@@ -572,6 +581,14 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     contextUsage: {},
     browserPageToShare: null,
     shareBrowserPage: (url) => set({ browserPageToShare: url }),
+    browserAgentPaused: false,
+    setBrowserAgentPaused: (paused) => {
+      const target = ensureSocket();
+      const payload = JSON.stringify({ type: 'browser_agent_pause', paused });
+      if (target.readyState === WebSocket.OPEN) target.send(payload);
+      else target.addEventListener('open', () => target.send(payload), { once: true });
+      set({ browserAgentPaused: paused });
+    },
     takeBrowserPageShare: () => {
       const url = get().browserPageToShare;
       if (url) set({ browserPageToShare: null });
@@ -603,7 +620,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
-    options: { model: readStoredDefaultModel(), permission: readStoredPermission(), workspace: '', contextMode: '临时会话' },
+    options: { model: readStoredDefaultModel(), permission: readStoredPermission(), workspace: '' },
     setOption: (key, value) => set((state) => ({ options: { ...state.options, [key]: value } })),
     newConversation: () => {
       if (get().pending) return;
@@ -615,17 +632,24 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const trimmed = title.trim();
       if (trimmed) updateConversation(id, (conv) => ({ ...conv, title: trimmed }));
     },
-    deleteConversation: (id) => {
-      if (get().pending && activeRequest?.conversationId === id) return;
+    deleteConversation: (id) => get().deleteConversations([id]),
+    deleteConversations: (ids) => {
+      // The conversation with an in-flight request cannot be removed, otherwise its reply would have nowhere to land.
+      const blocked = get().pending ? activeRequest?.conversationId : undefined;
+      const targets = new Set(ids.filter((id) => id !== blocked));
+      if (targets.size === 0) return;
       set((state) => {
-        const remaining = state.conversations.filter((conv) => conv.id !== id);
+        const remaining = state.conversations.filter((conv) => !targets.has(conv.id));
         if (remaining.length === 0) {
           const fresh = createConversation();
           return { conversations: [fresh], activeId: fresh.id };
         }
-        const activeId = state.activeId === id ? remaining[0]!.id : state.activeId;
+        const activeId = targets.has(state.activeId) ? remaining[0]!.id : state.activeId;
         return { conversations: remaining, activeId };
       });
+    },
+    togglePin: (id) => {
+      updateConversation(id, (conv) => ({ ...conv, pinnedAt: conv.pinnedAt === undefined ? Date.now() : undefined }));
     },
     rewindConversation: (messageIndex) => {
       if (get().pending) return;
@@ -643,6 +667,21 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         };
       });
       set({ error: null });
+    },
+    forkConversation: (messageIndex) => {
+      if (get().pending) return;
+      const state = get();
+      const source = state.conversations.find((conv) => conv.id === state.activeId);
+      if (!source || messageIndex < 0 || messageIndex >= source.messages.length) return;
+      // The fork is a separate timeline: the original keeps every message, and the new conversation starts from the messages before the chosen one.
+      const keepSummary = source.compactedUpTo !== undefined && messageIndex >= source.compactedUpTo;
+      const fork: Conversation = {
+        ...createConversation(),
+        title: `${source.title}（分支）`.slice(0, 40),
+        messages: source.messages.slice(0, messageIndex),
+        ...(keepSummary ? { compactedSummary: source.compactedSummary, compactedUpTo: source.compactedUpTo } : {}),
+      };
+      set((current) => ({ conversations: [fork, ...current.conversations], activeId: fork.id, error: null }));
     },
     send: (text, images = [], sharedUrls = [], taskCard) => {
       const trimmed = text.trim();
@@ -667,10 +706,10 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       textBreak = false;
       set({ pending: true, streamingSegments: [], error: null });
       const target = ensureSocket();
-      const { model, permission, workspace, contextMode } = state.options;
+      const { model, permission, workspace } = state.options;
       const subagent = useSubagentPreferences.getState().values;
       const contractFields = taskCard ?? undefined;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
+      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, subagent, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
@@ -770,6 +809,14 @@ function GitForkIcon(): ReactElement {
 
 function TrashIcon(): ReactElement {
   return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M6 6l1 14h10l1-14" /></svg>;
+}
+
+function SelectIcon(): ReactElement {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11" /><path d="M3 6l1 1 2-2M3 12l1 1 2-2M3 18l1 1 2-2" /></svg>;
+}
+
+function PinIcon(): ReactElement {
+  return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 17v5" /><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3z" /></svg>;
 }
 
 function parseJsonObject(raw: string): Record<string, unknown> | null {
@@ -923,7 +970,7 @@ function FadingStreamingText({ text, streaming }: { text: string; streaming: boo
   return <div className="chat-segment-text"><MarkdownBody content={text} /></div>;
 }
 
-function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
+function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, onFork, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; onFork?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
   const [copied, setCopied] = useState(false);
   const [timeVisible, setTimeVisible] = useState(false);
   const idleTimer = useRef<number | undefined>(undefined);
@@ -965,9 +1012,14 @@ function ChatMessageView({ role, content, images, files, steps, segments, usage,
     </div>}
     {trace && trace.length > 0 && <TraceTimeline events={trace} />}
   </div>;
-  const checkpoint = onRewind && <button type="button" className="chat-checkpoint" onClick={onRewind} disabled={rewindDisabled} title="还原到此消息之前，删除此消息及之后的内容">
-    <span>还原检查点</span><span aria-hidden="true">·</span><GitForkIcon />
-  </button>;
+  const checkpoint = onRewind && <div className="chat-checkpoint-row">
+    <button type="button" className="chat-checkpoint" onClick={onRewind} disabled={rewindDisabled} title="还原到此消息之前，删除此消息及之后的内容">
+      <span>还原检查点</span>
+    </button>
+    {onFork && <button type="button" className="chat-checkpoint" onClick={onFork} disabled={rewindDisabled} title="从此消息之前派生一个新分支对话，原对话保留">
+      <span>派生对话</span><GitForkIcon />
+    </button>}
+  </div>;
   if (checkpoint) return <>{checkpoint}{bubble}</>;
   if (role !== 'assistant' || completedAt === undefined) return bubble;
   return <div className={`chat-message-wrap chat-${role}`} onPointerEnter={showTimeUntilIdle} onPointerMove={showTimeUntilIdle} onPointerLeave={hideTime}>
@@ -1045,7 +1097,7 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, retry, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, retry: state.retry, cancel: state.cancel })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, send, retry, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, send: state.send, retry: state.retry, cancel: state.cancel })));
   const [draft, setDraft] = useState('');
   const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1239,6 +1291,28 @@ function ChatPanel(): ReactElement {
     setConfirmDeleteId(null);
     deleteConversation(id);
   };
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [confirmBatch, setConfirmBatch] = useState(false);
+  const toggleSelected = (id: string) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const exitSelectMode = () => { setSelectMode(false); setSelectedIds(new Set()); setConfirmBatch(false); };
+  const confirmBatchRemove = () => {
+    deleteConversations([...selectedIds]);
+    setConfirmBatch(false);
+    exitSelectMode();
+  };
+  // Pinned first (in pin order), then the rest in their existing order.
+  const sortedConversations = [...conversations].sort((a, b) => {
+    const pa = a.pinnedAt, pb = b.pinnedAt;
+    if (pa !== undefined && pb !== undefined) return pa - pb;
+    if (pa !== undefined) return -1;
+    if (pb !== undefined) return 1;
+    return 0;
+  });
   const renameInput = (id: string) => editing?.id === id
     ? <input className="chat-rename-input" autoFocus value={editing.title} onChange={(event) => setEditing({ id, title: event.target.value })} onBlur={commitRename} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commitRename(); } if (event.key === 'Escape') { renameSkipRef.current = true; setEditing(null); } }} />
     : null;
@@ -1257,16 +1331,41 @@ function ChatPanel(): ReactElement {
   return <section className="panel-content chat-panel">
     <div className="chat-layout" style={{ gridTemplateColumns: `${sidebarWidth}px 6px minmax(0, 1fr)` }}>
       <aside className="chat-sidebar">
-        <button className="primary-button" type="button" onClick={newConversation} disabled={pending}>+ 新对话</button>
+        {selectMode
+          ? <div className="chat-select-header"><strong>选择对话</strong><button type="button" className="chat-icon-button" aria-label="退出多选" title="退出多选" onClick={exitSelectMode}>✕</button></div>
+          : <div className="chat-sidebar-top">
+            <button className="primary-button" type="button" onClick={newConversation} disabled={pending}>+ 新对话</button>
+            <button className="chat-icon-button" type="button" aria-label="多选" title="多选" onClick={() => setSelectMode(true)}><SelectIcon /></button>
+          </div>}
         <ul className="chat-history">
-          {conversations.map((conv) => <li key={conv.id} className="chat-history-row" onContextMenu={(event) => openMenu(event, conv.id)}>
-            {renameInput(conv.id) ?? <button type="button" className={conv.id === active?.id ? 'chat-history-item active' : 'chat-history-item'} onClick={() => selectConversation(conv.id)}>{conv.title}</button>}
-            <div className="chat-history-actions">
+          {sortedConversations.map((conv) => <li key={conv.id} className={[conv.pinnedAt !== undefined ? 'chat-history-row pinned' : 'chat-history-row', selectMode && selectedIds.has(conv.id) ? 'selected' : ''].join(' ').trim()} onContextMenu={(event) => { if (!selectMode) openMenu(event, conv.id); }}>
+            {selectMode
+              ? <label className="chat-history-select">
+                <input type="checkbox" checked={selectedIds.has(conv.id)} disabled={pending && conv.id === active?.id} onChange={() => toggleSelected(conv.id)} />
+                <span className="chat-history-item-text" title={conv.title}>{conv.pinnedAt !== undefined && <span aria-label="已置顶">📌 </span>}{conv.title}</span>
+              </label>
+              : renameInput(conv.id) ?? <button type="button" className={conv.id === active?.id ? 'chat-history-item active' : 'chat-history-item'} onClick={() => selectConversation(conv.id)}>{conv.pinnedAt !== undefined && <span aria-label="已置顶">📌 </span>}{conv.title}</button>}
+            {!selectMode && <div className="chat-history-actions">
+              <button type="button" className="chat-icon-button" title={conv.pinnedAt !== undefined ? '取消置顶' : '置顶'} aria-label={conv.pinnedAt !== undefined ? '取消置顶' : '置顶'} onClick={() => togglePin(conv.id)}>📌</button>
               <button type="button" className="chat-icon-button" title="重命名" aria-label="重命名" onClick={() => rename(conv.id)} disabled={pending}><PencilIcon /></button>
               <button type="button" className="chat-icon-button" title="删除" aria-label="删除" onClick={() => remove(conv.id)} disabled={pending}><TrashIcon /></button>
-            </div>
+            </div>}
           </li>)}
         </ul>
+        {selectMode && <div className="chat-batch-bar">
+          <button type="button" className="chat-batch-action" disabled={selectedIds.size === 0} onClick={() => selectedIds.forEach((id) => togglePin(id))}><PinIcon /><span>置顶</span></button>
+          <button type="button" className="chat-batch-action chat-delete-danger" disabled={selectedIds.size === 0 || pending} onClick={() => setConfirmBatch(true)}><TrashIcon /><span>删除</span></button>
+        </div>}
+        {confirmBatch && <div className="chat-delete-confirm" role="alertdialog" aria-labelledby="chat-batch-title">
+          <div className="chat-delete-confirm-text">
+            <strong id="chat-batch-title">删除 {selectedIds.size} 段对话？</strong>
+            <span>对话记录会被永久删除，无法恢复。</span>
+          </div>
+          <div className="chat-delete-confirm-actions">
+            <button type="button" className="chat-delete-cancel" autoFocus onClick={() => setConfirmBatch(false)}>保留</button>
+            <button type="button" className="chat-delete-danger" onClick={confirmBatchRemove}>删除对话</button>
+          </div>
+        </div>}
       </aside>
       <div className="chat-splitter" role="separator" aria-orientation="vertical" aria-label="调整对话侧栏宽度" onPointerDown={startSidebarResize} />
       <div className="chat-main">
@@ -1282,6 +1381,7 @@ function ChatPanel(): ReactElement {
         </div>
         {deleteConfirm}
         {menu && <div className="chat-context-menu" style={{ left: menu.x, top: menu.y }}>
+          <button type="button" onClick={() => { setMenu(null); togglePin(menu.id); }}>{conversations.find((conv) => conv.id === menu.id)?.pinnedAt !== undefined ? '取消置顶' : '置顶'}</button>
           <button type="button" disabled={pending} onClick={() => { setMenu(null); rename(menu.id); }}>重命名</button>
           <button type="button" disabled={pending} onClick={() => { setMenu(null); remove(menu.id); }}>删除</button>
         </div>}
@@ -1299,7 +1399,7 @@ function ChatPanel(): ReactElement {
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
           {messages.map((message, index) => message.compactedMarker
             ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
-            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
+            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} onFork={message.role === 'user' ? () => forkConversation(index) : undefined} rewindDisabled={pending} />)}
           {pending && <StreamingBubble />}
         </div>
         {scrolledUp && <button type="button" className="chat-scroll-bottom" onClick={scrollToBottom}>回到底部 ↓</button>}
@@ -1346,7 +1446,6 @@ function ChatPanel(): ReactElement {
                 </div>
               </details>
               <ChatOptionSelect label="模型" value={options.model} options={chatModelOptions(readStoredModelCatalog(), options.model)} disabled={pending} onChange={(value) => setOption('model', value)} />
-              <ChatOptionSelect label="上下文" value={options.contextMode} options={CHAT_CONTEXT_OPTIONS} disabled={pending} onChange={(value) => setOption('contextMode', value)} />
               <span className="chat-toolbar-spacer" />
               <ContextUsageRing usage={activeId ? contextUsage[activeId] : undefined} open={sessionInfoOpen} onToggle={() => {
                 if (!sessionInfoOpen && activeId) requestContextUsage(activeId);
@@ -1680,6 +1779,11 @@ function SettingsBuffer(): ReactElement {
   return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} modelList={modelList} onFetchModels={fetchModels} mcpConfig={mcpConfig}   mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
 }
 
+/** True only inside Hiero's own desktop shell (electron/main.cjs), not other Electron hosts such as VS Code. */
+function isElectronShell(): boolean {
+  return typeof navigator !== 'undefined' && navigator.userAgent.includes('HieroDesktop/');
+}
+
 function normalizeBrowserUrl(input: string): string | null {
   const text = input.trim();
   if (!text) return null;
@@ -1699,6 +1803,9 @@ function BrowserBuffer({ api }: { api: { id: string } }): ReactElement {
   const [draft, setDraft] = useState(url);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const desktop = isElectronShell();
+  const browserAgentPaused = useChatStore((state) => state.browserAgentPaused);
+  const setBrowserAgentPaused = useChatStore((state) => state.setBrowserAgentPaused);
   const navigate = (raw: string) => {
     const next = normalizeBrowserUrl(raw);
     if (!next) {
@@ -1719,11 +1826,15 @@ function BrowserBuffer({ api }: { api: { id: string } }): ReactElement {
       <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="输入链接，例如 example.com" aria-label="浏览器地址" />
       <button type="submit">前往</button>
       <button type="button" onClick={() => { useChatStore.getState().shareBrowserPage(url); if (openChatFromPanel) openChatFromPanel(); else openBufferFromPanel?.('chat'); }} disabled={!url}>分享给智能体</button>
+      {desktop && <button type="button" onClick={() => setBrowserAgentPaused(!browserAgentPaused)} aria-pressed={browserAgentPaused} title={browserAgentPaused ? '智能体已暂停，无法操作共享页面' : '暂停后智能体不能点击或输入'}>{browserAgentPaused ? '恢复智能体' : '暂停智能体'}</button>}
       {url && <a href={url} target="_blank" rel="noreferrer">外部打开</a>}
     </form>
     {error && <p className="browser-error">{error}</p>}
+    {desktop && <p className="browser-hint">{browserAgentPaused ? '智能体已暂停：可以浏览，但不能点击或输入。' : '桌面版：智能体可用 shared 模式操作此页面，并与你共享登录状态。'}</p>}
     {url
-      ? <iframe key={reloadKey} className="browser-frame" src={url} title={url} sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox" />
+      ? (desktop
+        ? <webview key={reloadKey} className="browser-frame" src={url} />
+        : <iframe key={reloadKey} className="browser-frame" src={url} title={url} sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox" />)
       : <div className="empty-state">输入链接后在此打开页面<br /><span>部分网站禁止嵌入，可点击"外部打开"</span></div>}
   </section>;
 }
