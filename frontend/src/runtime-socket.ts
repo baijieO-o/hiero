@@ -19,6 +19,8 @@ export class RuntimeSocket {
   private listeners = new Map<string, Set<Listener>>();
   private snapshotListeners = new Set<(seq: number) => void>();
   private gapListeners = new Set<(fromSeq: number, toSeq: number) => void>();
+  private statusListeners = new Set<(connected: boolean) => void>();
+  private connected = false;
   private refCount = 0;
   private retryTimer: number | undefined;
   private attempts = 0;
@@ -57,6 +59,21 @@ export class RuntimeSocket {
     });
   }
 
+  /** Fires when the socket opens or closes, so the UI can show a real connection state. */
+  public onStatus(listener: (connected: boolean) => void): () => void {
+    this.statusListeners.add(listener);
+    listener(this.connected);
+    return this.retain(() => {
+      this.statusListeners.delete(listener);
+    });
+  }
+
+  private setConnected(connected: boolean): void {
+    if (this.connected === connected) return;
+    this.connected = connected;
+    for (const listener of this.statusListeners) listener(connected);
+  }
+
   private retain(cleanup: () => void): () => void {
     this.refCount += 1;
     this.ensureConnected();
@@ -76,6 +93,7 @@ export class RuntimeSocket {
     this.socket = socket;
     socket.onopen = () => {
       this.attempts = 0;
+      this.setConnected(true);
       // Ask the server to replay events after the last seq we saw before the drop.
       if (this.lastSeq >= 0) socket.send(JSON.stringify({ type: 'RESUME', payload: { since: this.lastSeq } }));
     };
@@ -83,6 +101,7 @@ export class RuntimeSocket {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.setConnected(false);
       if (this.refCount > 0) this.scheduleReconnect();
     };
     socket.onerror = () => { /* onclose follows and handles reconnect. */ };
@@ -102,6 +121,7 @@ export class RuntimeSocket {
     if (this.retryTimer !== undefined) { window.clearTimeout(this.retryTimer); this.retryTimer = undefined; }
     const socket = this.socket;
     this.socket = null;
+    this.setConnected(false);
     socket?.close();
   }
 

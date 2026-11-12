@@ -2842,6 +2842,8 @@ function App(): ReactElement {
   const [screenDraft, setScreenDraft] = useState('');
   const hotEdgeSidebar = usePreferences((state) => state.values.hotEdgeSidebar);
   const [railOpen, setRailOpen] = useState(() => !usePreferences.getState().values.hotEdgeSidebar);
+  const [runtimeConnected, setRuntimeConnected] = useState(false);
+  useEffect(() => runtimeSocketFor(RUNTIME_WS_URL).onStatus(setRuntimeConnected), []);
   const railHideTimer = useRef<number | undefined>(undefined);
   const railPinned = useRef(false);
   useEffect(() => {
@@ -3041,7 +3043,7 @@ function App(): ReactElement {
         </span>)}
         <form className="screen-add" onSubmit={(event) => { event.preventDefault(); onCreateScreen(); }}><input value={screenDraft} onChange={(event) => setScreenDraft(event.target.value)} placeholder="新工作区" aria-label="新工作区名称" /></form>
       </nav>
-      <span className="topbar-meta"><button type="button" className="layout-reset" onClick={() => openBuffer('docs')}>文档</button><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className="live-pill"><b /> 在线</span></span>
+      <span className="topbar-meta"><button type="button" className="layout-reset" onClick={() => openBuffer('docs')}>文档</button><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className={`live-pill ${runtimeConnected ? 'online' : 'offline'}`} role="status" aria-live="polite"><b /> {runtimeConnected ? '在线' : '离线'}</span></span>
     </header>
     <div className="workspace-body">
       <aside className={`quick-rail ${railOpen ? 'open' : 'closed'}`} aria-label="快捷入口" onPointerEnter={keepRailOpen} onPointerLeave={scheduleHideRail}>
