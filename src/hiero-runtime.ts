@@ -11,7 +11,9 @@ import { StateStore } from './state-store.js';
 import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type CompletionGateway } from './model-gateway.js';
 import { ToolGateway } from './tool-gateway.js';
 import { CapabilityRouter } from './capability-router.js';
-import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig } from './mcp-config.js';
+import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
+import { McpToolClient } from './mcp-client.js';
+import { HotPlugRegistry } from './hot-plug.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { RuntimeWebSocketServer, type RuntimeEvent } from './runtime-server.js';
 import type { ModelMessage, ModelResponse, ModelToolCall, ModelToolDefinition } from './model-gateway.js';
@@ -514,6 +516,18 @@ function isMcpConfigSave(message: unknown): message is { type: 'mcp_config_save'
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'mcp_config_save';
 }
 
+interface HotPlugMessage {
+  type: 'hot_plug_list' | 'hot_plug_set';
+  kind?: 'mcp' | 'skill' | 'tool';
+  name?: string;
+  enabled?: boolean;
+}
+
+function isHotPlugRequest(message: unknown): message is HotPlugMessage {
+  const type = typeof message === 'object' && message !== null ? (message as { type?: unknown }).type : undefined;
+  return type === 'hot_plug_list' || type === 'hot_plug_set';
+}
+
 type WorkspaceRequest = { workspace?: string } & (
   | { type: 'folder_pick'; request_id: string; initialPath?: string }
   | { type: 'fs_list'; request_id: string; path?: string }
@@ -546,7 +560,10 @@ export class HieroRuntime {
   private readonly runtime: RuntimeWebSocketServer;
   private workflow: AgentWorkflow;
   private readonly systemAgent = new SystemAgentClient();
-  private readonly capabilityRouter = new CapabilityRouter();
+  private readonly mcpClient = new McpToolClient();
+  private readonly hotPlug = new HotPlugRegistry(this.mcpClient);
+  private readonly capabilityRouter = new CapabilityRouter(this.mcpClient, (name) => this.hotPlug.isSkillEnabled(name));
+  private readonly mcpSignatures = new Map<string, string>();
   private readonly approvals: ApprovalBroker;
   private readonly askUsers: AskUserBroker;
   private readonly browserSessions = new BrowserSessions({
@@ -603,6 +620,7 @@ export class HieroRuntime {
       else if (isModelListRequest(message)) await this.handleModelList(message, client);
       else if (isMcpConfigGet(message)) this.sendMcpConfig(client);
       else if (isMcpConfigSave(message)) await this.handleMcpConfigSave(message.payload, client);
+      else if (isHotPlugRequest(message)) await this.handleHotPlug(message, client);
       else if (isWorkspaceRequest(message)) await this.handleWorkspaceRequest(message, client);
       else if (isModelSettingsSave(message)) {
         try {
@@ -849,14 +867,14 @@ export class HieroRuntime {
   private async handleMcpConfigSave(input: unknown, client?: WebSocket): Promise<void> {
     try {
       const saved = saveMcpConfig(input);
-      const statuses = await this.capabilityRouter.reloadMcp(saved.servers.filter((server) => server.enabled).map(toClientConfig));
+      await this.applyMcpConfig(saved.servers);
+      const statuses = this.hotPlug.mcpStatuses();
       this.runtime.send({ type: 'MCP_CONFIG_SAVE_RESULT', payload: { ok: true, servers: saved.servers, statuses, path: mcpConfigPath() } }, client);
     } catch (cause) {
       this.runtime.send({ type: 'MCP_CONFIG_SAVE_RESULT', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
     }
   }
 
-  /** Connects enabled MCP servers from the saved config. Runs in the background so a slow server never blocks startup. */
   /** Checks the remote for a newer tag and sends the result to one client, or to everyone when no client is given. */
   public async broadcastUpdateStatus(client?: WebSocket): Promise<UpdateStatus> {
     const status = await checkForUpdate();
@@ -866,12 +884,79 @@ export class HieroRuntime {
     return status;
   }
 
+  /**
+   * Manual hot-plug. `hot_plug_set` flips one MCP server's enabled flag in the saved config and applies it
+   * live, so the change survives a restart. `hot_plug_list` reports every configured server and its runtime state.
+   */
+  /**
+   * Hot-plug API. `kind` selects what to toggle: `mcp` (persisted in mcp.json and connected/disconnected live),
+   * `skill` (hidden from routing and load_skill for this runtime), or `tool` (built-in tool removed from new chats).
+   */
+  private async handleHotPlug(message: HotPlugMessage, client?: WebSocket): Promise<void> {
+    try {
+      const kind = message.kind ?? 'mcp';
+      if (message.type === 'hot_plug_set') {
+        if (!message.name) throw new Error('hot_plug_set requires name');
+        const enabled = message.enabled !== false;
+        if (kind === 'mcp') {
+          const config = readMcpConfig();
+          const target = config.servers.find((server) => server.name === message.name);
+          if (!target) throw new Error(`MCP server '${message.name}' is not configured`);
+          target.enabled = enabled;
+          const saved = saveMcpConfig(config);
+          await this.applyMcpConfig(saved.servers);
+        } else if (kind === 'skill') {
+          this.hotPlug.setSkillEnabled(message.name, enabled);
+        } else {
+          this.hotPlug.setToolEnabled(message.name, enabled);
+        }
+      }
+      const config = readMcpConfig();
+      await this.capabilityRouter.discoverSkills(resolveChatWorkspace(undefined));
+      this.runtime.send({
+        type: 'HOT_PLUG_RESULT',
+        payload: {
+          ok: true,
+          servers: config.servers,
+          statuses: this.hotPlug.mcpStatuses(),
+          skills: this.capabilityRouter.discoveredSkillSummaries().map((skill) => ({ name: skill.name, enabled: this.hotPlug.isSkillEnabled(skill.name) })),
+          tools: this.createChatToolGateway(resolveChatWorkspace(undefined), false).registeredNames().map((name) => ({ name, enabled: this.hotPlug.isToolEnabled(name) })),
+        },
+      }, client);
+    } catch (cause) {
+      this.runtime.send({ type: 'HOT_PLUG_RESULT', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
+    }
+  }
+
+  /** Connects enabled MCP servers from the saved config. Runs in the background so a slow server never blocks startup. */
   public startMcpServers(): void {
     try {
-      const enabled = readMcpConfig().servers.filter((server) => server.enabled).map(toClientConfig);
-      if (enabled.length > 0) void this.capabilityRouter.reloadMcp(enabled);
+      void this.applyMcpConfig(readMcpConfig().servers);
     } catch (cause) {
       console.warn(`MCP config ignored: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
+  /**
+   * Diffs the desired MCP servers against the running plugins. Removed or disabled servers are disposed,
+   * new or changed ones are (re)enabled, and unchanged servers keep their live connection.
+   */
+  private async applyMcpConfig(servers: readonly McpServerEntry[]): Promise<void> {
+    const desired = new Map(servers.filter((server) => server.enabled).map((server) => [server.name, toClientConfig(server)]));
+    const running = new Map(this.hotPlug.list().filter((plug) => plug.kind === 'mcp').map((plug) => [plug.name, plug]));
+    for (const plug of running.values()) {
+      if (!desired.has(plug.name)) await this.hotPlug.disable(`mcp:${plug.name}`);
+    }
+    for (const [name, config] of desired) {
+      const previous = this.mcpSignatures.get(name);
+      const signature = JSON.stringify(config);
+      if (running.has(name) && previous === signature) continue;
+      this.hotPlug.defineMcp(config);
+      this.mcpSignatures.set(name, signature);
+      await this.hotPlug.enableMcp(name);
+    }
+    for (const name of [...this.mcpSignatures.keys()]) {
+      if (!desired.has(name)) this.mcpSignatures.delete(name);
     }
   }
 
@@ -1064,7 +1149,8 @@ export class HieroRuntime {
    * Chat tools run through a per-request ToolGateway so they share schema checks and the approval policy.
    * Memory writes change persistent state, so they are irreversible and need approval outside auto mode.
    */
-  private createChatToolGateway(workspacePath: string): ToolGateway {
+  /** Builds the per-chat tool set. `applyHotPlug=false` keeps disabled tools listed, for the management API. */
+  private createChatToolGateway(workspacePath: string, applyHotPlug = true): ToolGateway {
     const tools = new ToolGateway();
     tools.register(createReadFileTool(workspacePath));
     tools.register(createListDirTool(workspacePath));
@@ -1107,6 +1193,7 @@ export class HieroRuntime {
     });
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
     tools.setBreakpoints(hitlBreakpointsFromEnv());
+    if (applyHotPlug) for (const name of this.hotPlug.disabledToolNames()) tools.unregister(name);
     return tools;
   }
 

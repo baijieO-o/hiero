@@ -1104,6 +1104,23 @@ function ChatPanel(): ReactElement {
   const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
   const [folderPicking, setFolderPicking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
+  const permissionDetailsRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const closeOnOutside = (event: PointerEvent): void => {
+      const details = permissionDetailsRef.current;
+      if (details?.open && !details.contains(event.target as Node)) details.open = false;
+    };
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      const details = permissionDetailsRef.current;
+      if (event.key === 'Escape' && details?.open) details.open = false;
+    };
+    document.addEventListener('pointerdown', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, []);
   const pickWorkspaceFolder = async (): Promise<void> => {
     setFolderPicking(true);
     setFolderError(null);
@@ -1439,7 +1456,7 @@ function ChatPanel(): ReactElement {
               <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
               </button>
-              <details className="chat-tool-details">
+              <details className="chat-tool-details" ref={permissionDetailsRef}>
                 <summary className="chat-pill chat-pill-summary" title="发送前选择权限模式"><span className="chat-pill-label">权限</span><span className="chat-pill-value">{options.permission}</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></summary>
                 <div className="chat-tool-panel">
                   <PermissionModePicker value={isPermissionLabel(options.permission) ? options.permission : '标准'} disabled={pending} onChange={(value) => setOption('permission', value)} />
@@ -2062,10 +2079,90 @@ function RollbackButton(): ReactElement {
 const SKILL_CATEGORIES = ['MCP 服务器', '技能', '指令', '智能体', '挂钩', '工具'] as const;
 type SkillCategory = (typeof SKILL_CATEGORIES)[number];
 
+type HotPlugItem = { name: string; enabled: boolean };
+type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; skills: HotPlugItem[]; tools: HotPlugItem[] };
+type HotPlugKind = 'mcp' | 'skill' | 'tool';
+
+/** Hot-plug state for MCP servers, skills and built-in tools, sharing one backend socket per view. */
+function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null; toggle: (kind: HotPlugKind, name: string, enabled: boolean) => void } {
+  const [snapshot, setSnapshot] = useState<HotPlugSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  useEffect(() => {
+    let active = true;
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    socketRef.current = socket;
+    socket.onopen = () => { if (active) socket.send(JSON.stringify({ type: 'hot_plug_list' })); };
+    socket.onmessage = (event) => {
+      if (!active) return;
+      try {
+        const message = JSON.parse(String(event.data)) as RuntimeMessage;
+        if (message.type !== 'HOT_PLUG_RESULT') return;
+        const result = message.payload as unknown as ({ ok: true } & HotPlugSnapshot) | { ok: false; message: string };
+        if (result.ok) { setSnapshot(result); setError(null); } else setError(result.message);
+      } catch { /* Ignore non-JSON runtime messages. */ }
+    };
+    socket.onerror = () => { if (active) setError('未连接到后端（localhost:8080）。'); };
+    return () => { active = false; socketRef.current = null; socket.close(); };
+  }, []);
+  const toggle = (kind: HotPlugKind, name: string, enabled: boolean) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
+    socket.send(JSON.stringify({ type: 'hot_plug_set', kind, name, enabled }));
+  };
+  return { snapshot, error, toggle };
+}
+
+function HotPlugToggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }): ReactElement {
+  return (
+    <label className="hot-plug-toggle" title={checked ? '已启用' : '已停用'}>
+      <input type="checkbox" role="switch" checked={checked} aria-label={label} onChange={(event) => onChange(event.target.checked)} />
+      <span className="hot-plug-track" aria-hidden="true" />
+    </label>
+  );
+}
+
+function HotPlugList({ items, kind, note, onToggle }: { items: HotPlugItem[]; kind: HotPlugKind; note: string; onToggle: HotPlugToggleFn }): ReactElement {
+  if (items.length === 0) return <p className="skills-empty">暂无条目。</p>;
+  return (
+    <div className="hot-plug-list">
+      <p className="skills-empty">{note}</p>
+      <ul>
+        {items.map((item) => (
+          <li key={item.name} className={item.enabled ? '' : 'disabled'}>
+            <span>{item.name}</span>
+            <HotPlugToggle checked={item.enabled} label={`${kind} ${item.name}`} onChange={(checked) => onToggle(kind, item.name, checked)} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+type HotPlugToggleFn = (kind: HotPlugKind, name: string, enabled: boolean) => void;
+
+function ToolsCategoryView(): ReactElement {
+  const { snapshot, error, toggle } = useHotPlug();
+  return (
+    <div className="skills-editor">
+      {error ? <p role="alert">{error}</p> : null}
+      {snapshot ? (
+        <HotPlugList items={snapshot.tools} kind="tool" note="内置工具。开关对新对话生效，已有对话保持不变。" onToggle={toggle} />
+      ) : <p className="skills-empty">正在读取工具列表…</p>}
+    </div>
+  );
+}
+
 function McpCategoryView(): ReactElement {
+  const hotPlug = useHotPlug();
   const [config, setConfig] = useState<McpConfigState | null>(null);
   const [saveState, setSaveState] = useState<McpSaveState>({ status: 'idle' });
   const socketRef = useRef<WebSocket | null>(null);
+  const { snapshot } = hotPlug;
+  useEffect(() => {
+    if (!snapshot) return;
+    setConfig((current) => (current ? { ...current, servers: snapshot.servers, statuses: snapshot.statuses } : current));
+  }, [snapshot]);
   useEffect(() => {
     let active = true;
     const socket = new WebSocket(RUNTIME_WS_URL);
@@ -2099,7 +2196,20 @@ function McpCategoryView(): ReactElement {
     setSaveState({ status: 'saving' });
     socket.send(JSON.stringify({ type: 'mcp_config_save', payload: { servers } }));
   };
-  return <div className="skills-editor"><McpServersForm config={config} saveState={saveState} onSave={save} /></div>;
+  return (
+    <div className="skills-editor">
+      {hotPlug.error ? <p role="alert">{hotPlug.error}</p> : null}
+      {hotPlug.snapshot && hotPlug.snapshot.servers.length > 0 ? (
+        <HotPlugList
+          items={hotPlug.snapshot.servers.map((server) => ({ name: server.name, enabled: server.enabled !== false }))}
+          kind="mcp"
+          note="启停立即生效，并写入 mcp.json，重启后保持。"
+          onToggle={hotPlug.toggle}
+        />
+      ) : null}
+      <McpServersForm config={config} saveState={saveState} onSave={save} />
+    </div>
+  );
 }
 
 function SkillsBuffer(): ReactElement {
@@ -2110,6 +2220,13 @@ function SkillsBuffer(): ReactElement {
   const [saved, setSaved] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const hotPlug = useHotPlug();
+  const categoryCount = (item: SkillCategory): number => {
+    if (item === '技能') return skills.length;
+    if (item === 'MCP 服务器') return hotPlug.snapshot?.servers.length ?? 0;
+    if (item === '工具') return hotPlug.snapshot?.tools.length ?? 0;
+    return 0;
+  };
 
   const refresh = () => {
     setError(null);
@@ -2150,24 +2267,31 @@ function SkillsBuffer(): ReactElement {
         {SKILL_CATEGORIES.map((item) => (
           <button key={item} type="button" className={item === category ? 'active' : ''} onClick={() => setCategory(item)}>
             <span>{item}</span>
-            <b>{item === '技能' ? skills.length : 0}</b>
+            <b>{categoryCount(item)}</b>
           </button>
         ))}
       </nav>
       <div className="skills-main">
         {category === 'MCP 服务器' && <McpCategoryView />}
-        {category !== '技能' && category !== 'MCP 服务器' && <p className="skills-empty">{category} 暂未接入数据源。</p>}
+        {category === '工具' && <ToolsCategoryView />}
+        {category !== '技能' && category !== 'MCP 服务器' && category !== '工具' && <p className="skills-empty">{category} 暂未接入数据源。</p>}
         {category === '技能' && (
           <div className="skills-body">
             <ul className="skills-list">
-              {skills.map((skill) => (
-                <li key={skill.id}>
-                  <button type="button" className={skill.id === selectedId ? 'active' : ''} onClick={() => open(skill)}>
-                    <strong>{skill.name}</strong>
-                    <small>{SKILL_SCOPE_LABELS[skill.scope]} · {skill.description || '无描述'}</small>
-                  </button>
-                </li>
-              ))}
+              {skills.map((skill) => {
+                const enabled = hotPlug.snapshot?.skills.find((item) => item.name === skill.name)?.enabled !== false;
+                return (
+                  <li key={skill.id} className={enabled ? '' : 'disabled'}>
+                    <button type="button" className={skill.id === selectedId ? 'active' : ''} onClick={() => open(skill)}>
+                      <strong>{skill.name}</strong>
+                      <small>{SKILL_SCOPE_LABELS[skill.scope]} · {skill.description || '无描述'}{enabled ? '' : ' · 已停用'}</small>
+                    </button>
+                    {hotPlug.snapshot ? (
+                      <HotPlugToggle checked={enabled} label={`skill ${skill.name}`} onChange={(checked) => hotPlug.toggle('skill', skill.name, checked)} />
+                    ) : null}
+                  </li>
+                );
+              })}
               {skills.length === 0 && <li className="skills-empty">未找到技能。可在 .agent/skills、~/.copilot/skills 或 ~/.agents/skills 下新建 &lt;name&gt;/SKILL.md。</li>}
             </ul>
             <div className="skills-editor">

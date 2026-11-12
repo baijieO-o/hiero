@@ -24,6 +24,7 @@
 - **标准浏览器共享**：不使用桌面版时，可手动启动带 CDP 的外部 Chrome/Edge（`--remote-debugging-port=9333 --user-data-dir=<独立目录>`），后端默认连接 `127.0.0.1:9333`（可用 `HIERO_SHARED_CDP_URL` 修改）。智能体在 `shared` 模式下会自动接管当前共享页面，可以读取用户打开的任何页面（包括 localhost）；但它自己发起的导航仍要经过公网地址校验。
 - **标准浏览器共享**：不使用桌面版时，可手动启动带 CDP 的外部 Chrome/Edge（`--remote-debugging-port=9333 --user-data-dir=<独立目录>`），后端默认连接 `127.0.0.1:9333`（可用 `HIERO_SHARED_CDP_URL` 修改）。智能体在 `shared` 模式下会自动接管当前共享页面。该页面需为公网地址，智能体不能访问 localhost 或内网地址。
 - **浏览器共享**：内置浏览器点击「分享给智能体」会在输入框上方添加一个可移除的链接标签。发送时后端会抓取该页面正文并附加到用户消息中（最多 3 个页面；仅允许公网 http(s)，不支持 localhost）。跨域 iframe 内容不会直接从界面提取。
+- **热插拔（cordis 内核）**：`src/hot-plug.ts` 用 cordis 的 fiber 管理 MCP 服务。通过 WebSocket 发送 `hot_plug_list` 或 `hot_plug_set`（字段 `kind`：`mcp` / `skill` / `tool`，`name`，`enabled`）。后端回复 `HOT_PLUG_RESULT`，载荷含 `servers`、`statuses`、`skills`（`{name,enabled}`）、`tools`（`{name,enabled}`）。`mcp` 会改写 `.hiero/mcp.json` 并立即连接或断开。`skill` 只隐藏，不删除文件。`tool` 只过滤新建对话的内置工具，正在运行的对话不受影响。skill 和 tool 的停用项保存在 `.hiero/hot-plug.json`，重启后保持；mcp 的启停写入 `mcp.json`。前端「技能管理」面板的「MCP 服务器」「技能」「工具」分类都提供开关。
 - **智能体浏览器工具**：智能体可以使用独立的 Playwright 浏览器（默认 headed Edge，`visible` 模式，用户可以看到窗口）：`browser_open`、`browser_snapshot`（无障碍树）、`browser_screenshot`（仅返回元数据，模型看不到图片）、`browser_click`、`browser_type`（点击和输入每次需要用户确认）。`headless_extract` 使用无头浏览器提取正文；设置 `HIERO_HEADLESS_CDP_URL` 可接入外部 CDP 引擎（如 Lightpanda，尚未在 Windows 上验证）。该浏览器没有用户登录状态，也不共享用户的 DOM 或 Cookie。子智能体不能使用这些工具。审批弹窗和链接标签尚未在界面中端到端验证。
 - **上下文用量**：按约 4 字符一个 token 估算，并非精确值。
 - **历史压缩**：历史过长时，把旧消息压缩为摘要。可通过 `HIERO_COMPACT_MODEL` 指定压缩模型，未设置则使用主模型。

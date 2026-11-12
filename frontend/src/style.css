@@ -814,3 +814,12 @@ button, textarea, select { font: inherit; }
 .update-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 1000; display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--accent, #2563eb); color: #fff; font-size: 14px; }
 .update-banner code { background: rgba(255, 255, 255, 0.2); padding: 1px 6px; border-radius: 4px; }
 .update-banner button { margin-left: auto; color: #fff; }
+
+.hot-plug-toggle { position: relative; display: inline-flex; flex: none; cursor: pointer; }
+.hot-plug-toggle input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.hot-plug-track { position: relative; width: 36px; height: 20px; border-radius: 999px; background: #3a3d44; transition: background .15s; }
+.hot-plug-track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #1b1d22; transition: transform .15s, background .15s; }
+.hot-plug-toggle input:checked + .hot-plug-track { background: #6d5efc; }
+.hot-plug-toggle input:checked + .hot-plug-track::after { transform: translateX(16px); background: #f2f2f5; }
+.hot-plug-toggle input:focus-visible + .hot-plug-track { outline: 2px solid var(--accent, #6d5efc); outline-offset: 2px; }
+.hot-plug-toggle input:disabled + .hot-plug-track { opacity: .5; }

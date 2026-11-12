@@ -48,7 +48,7 @@ export function defaultMcpConfig(root = process.cwd()): McpConfigFile {
 export function readMcpConfig(root = process.cwd()): McpConfigFile {
   const path = mcpConfigPath(root);
   if (!existsSync(path)) return saveMcpConfig(defaultMcpConfig(root), root);
-  const parsed = mcpConfigSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')));
+  const parsed = mcpConfigSchema.safeParse(JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')));
   if (!parsed.success) throw new Error(parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; '));
   return parsed.data;
 }

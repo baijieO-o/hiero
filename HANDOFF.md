@@ -53,6 +53,7 @@ Set-Location frontend; npm run dev   # 前端
 桌面版共享浏览器（第二步，已构建，未做端到端验证）：
 - Electron 主进程（`electron/main.cjs`）开启 `remote-debugging-port`（默认 127.0.0.1:9333，`HIERO_SHARED_CDP_PORT` 可改）。webview 与智能体的 `shared` 模式通过 CDP 接入同一浏览器，共享页面与登录态。
 - `browser_open` / `snapshot` / `screenshot` / `click` / `type` 的 `mode` 支持 `shared`；未启动桌面版时报错提示。
+- 热插拔（cordis 4.0.0-rc.12，`src/hot-plug.ts`）：MCP 服务、技能、内置工具可在「技能管理」面板手动启停。MCP 启停写入 `.hiero/mcp.json`；技能与工具的停用项写入 `.hiero/hot-plug.json`（仅存停用名单，重启保持）。工具开关只影响新对话。
 - 暂停：WebSocket 消息 `browser_agent_pause`，后端内存标志，暂停时拒绝 click / type（读取仍允许）。状态通过 `BROWSER_AGENT_STATE` 广播，面板有暂停/恢复按钮。
 - 安全注意：CDP 端口绑定本机，但任何本机进程都能连接；shared 模式无请求拦截，导航后仅做 URL 公网校验。
 - 「分享给智能体」仍只传 URL（后端抓取公网页面），不携带 webview 中已登录的页面内容。

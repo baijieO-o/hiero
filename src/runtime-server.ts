@@ -39,6 +39,7 @@ export type RuntimeEvent =
   | { type: 'SCHEDULES'; payload: { ok: true; tasks: ScheduledTask[] } | { ok: false; message: string; tasks: ScheduledTask[] } }
   | { type: 'MCP_CONFIG'; payload: { servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } }
   | { type: 'MCP_CONFIG_SAVE_RESULT'; payload: { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string } }
+  | { type: 'HOT_PLUG_RESULT'; payload: { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; skills: { name: string; enabled: boolean }[]; tools: { name: string; enabled: boolean }[] } | { ok: false; message: string } }
   | { type: 'WORKSPACE_RESULT'; payload: Record<string, unknown> & { request_id: string; kind: string } }
   | { type: 'BROWSER_AGENT_STATE'; payload: { paused: boolean } }
   | { type: 'APPROVAL_REQUIRED'; payload: { approval_id: string; tool_name: string; summary: string; input: unknown } }

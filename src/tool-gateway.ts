@@ -34,6 +34,15 @@ export class ToolGateway {
     this.breakpoints = new Set(toolNames);
   }
 
+  /** Removes a tool so the model never sees it and it cannot be executed. Returns false when the name is unknown. */
+  public unregister(toolName: string): boolean {
+    return this.tools.delete(toolName);
+  }
+
+  public registeredNames(): string[] {
+    return [...this.tools.keys()];
+  }
+
   public register<TInput, TResult>(tool: RegisteredTool<TInput, TResult>): void {
     this.tools.set(tool.name, tool as RegisteredTool<unknown, unknown>);
   }

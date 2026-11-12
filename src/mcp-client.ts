@@ -45,6 +45,16 @@ export class McpToolClient {
     }
   }
 
+  /** Disconnects one server without touching the others. Unknown names are a no-op. */
+  public async disconnect(name: string): Promise<void> {
+    const server = this.servers.get(name);
+    this.failures.delete(name);
+    if (!server) return;
+    this.servers.delete(name);
+    await server.client.close().catch(() => undefined);
+    await server.transport.close().catch(() => undefined);
+  }
+
   public async listTools(): Promise<Tool[]> {
     return [...this.servers.values()].flatMap((server) => server.tools);
   }

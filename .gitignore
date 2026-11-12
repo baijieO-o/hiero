@@ -20,3 +20,5 @@ test/*.d.ts.map
 
 # Local runtime memory
 .agent/
+
+frontend/tsconfig.tsbuildinfo
