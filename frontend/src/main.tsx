@@ -1,3 +1,4 @@
+import '@fontsource/anton/latin-400.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
@@ -12,7 +13,7 @@ const root = createRoot(document.getElementById('app')!);
 const renderApp = (): void => root.render(<StrictMode><App /></StrictMode>);
 renderApp();
 // Hide the boot splash (index.html) after the first frame and once its draw-in animation has played.
-const SPLASH_MIN_MS = 1900;
+const SPLASH_MIN_MS = 3000;
 requestAnimationFrame(() => {
   const splash = document.getElementById('boot-splash');
   const wait = Math.max(0, SPLASH_MIN_MS - performance.now());

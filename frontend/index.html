@@ -7,15 +7,15 @@
     <meta name="theme-color" content="#070b12" />
     <title>Hiero · Agent 工作台</title>
     <style>
-      #boot-splash { position: fixed; inset: 0; z-index: 9999; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: radial-gradient(circle at 50% 42%, #14102a 0%, #070b12 62%); transition: opacity .4s ease, visibility .4s; }
+      #boot-splash { position: fixed; inset: 0; z-index: 9999; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: radial-gradient(circle at 50% 42%, #14102a 0%, #070b12 62%); transition: opacity .6s ease, visibility .6s; }
       #boot-splash.done { opacity: 0; visibility: hidden; pointer-events: none; }
-      #boot-splash .boot-glow { position: absolute; width: 240px; height: 240px; border-radius: 50%; background: radial-gradient(circle, rgba(126, 20, 255, .35), transparent 70%); animation: boot-glow 1.9s ease-out both; }
+      #boot-splash .boot-glow { position: absolute; width: 240px; height: 240px; border-radius: 50%; background: radial-gradient(circle, rgba(126, 20, 255, .35), transparent 70%); animation: boot-glow 3s ease-out both; }
       #boot-splash svg { position: relative; width: 104px; height: 104px; overflow: visible; animation: boot-spin 14s linear infinite; }
-      #boot-splash .boot-arc { stroke-dasharray: 1; stroke-dashoffset: 1; animation: boot-draw .9s cubic-bezier(.6, 0, .2, 1) forwards; animation-delay: var(--d); }
-      #boot-splash .boot-spoke { stroke-dasharray: 1; stroke-dashoffset: 1; animation: boot-draw .5s ease-out forwards; animation-delay: var(--d); }
+      #boot-splash .boot-arc { stroke-dasharray: 1; stroke-dashoffset: 1; animation: boot-draw 1.5s cubic-bezier(.6, 0, .2, 1) forwards; animation-delay: var(--d); }
+      #boot-splash .boot-spoke { stroke-dasharray: 1; stroke-dashoffset: 1; animation: boot-draw .8s ease-out forwards; animation-delay: var(--d); }
       #boot-splash .boot-lockup { position: relative; display: flex; align-items: center; }
-      #boot-splash .boot-title { box-sizing: border-box; height: 104px; max-width: 0; padding-left: 0; overflow: hidden; white-space: nowrap; font: 800 148px/104px ui-sans-serif, system-ui, sans-serif; letter-spacing: .02em; color: #ede6ff; opacity: 0; animation: boot-reveal 1s cubic-bezier(.6, 0, .2, 1) .75s forwards; }
-      #boot-splash .boot-sub { position: relative; font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; color: #8b93a7; opacity: 0; animation: boot-rise .6s ease-out 1.5s forwards; }
+      #boot-splash .boot-title { box-sizing: border-box; height: 118px; max-width: 0; padding-left: 0; overflow: hidden; white-space: nowrap; font: 400 118px/118px Anton, "Arial Narrow", sans-serif; letter-spacing: .08em; color: #ede6ff; opacity: 0; animation: boot-reveal 1.6s cubic-bezier(.6, 0, .2, 1) 1.2s forwards; }
+      #boot-splash .boot-sub { position: relative; font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; color: #8b93a7; opacity: 0; animation: boot-rise 1s ease-out 2.4s forwards; }
       @keyframes boot-draw { to { stroke-dashoffset: 0; } }
       @keyframes boot-spin { to { transform: rotate(360deg); } }
       @keyframes boot-glow { 0% { opacity: 0; transform: scale(.4); } 60% { opacity: 1; } 100% { opacity: .7; transform: scale(1.2); } }
