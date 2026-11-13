@@ -2,10 +2,14 @@
 import { existsSync } from 'node:fs';
 import { defaultFrontendDir, startStaticServer } from './static-server.js';
 import { HieroRuntime } from './hiero-runtime.js';
-import { loadLocalLlmEnv } from './llm-env.js';
+import { loadLocalLlmEnv, migrateEnvSecrets } from './llm-env.js';
 import { parseTokenList } from './model-gateway.js';
+import { SecretStore } from './secret-store.js';
 
-loadLocalLlmEnv();
+const secretStore = new SecretStore();
+const migrated = migrateEnvSecrets(secretStore);
+if (migrated.length > 0) console.log(`Moved to encrypted store: ${migrated.join(', ')} (backup: .env.bak)`);
+loadLocalLlmEnv(process.cwd(), secretStore);
 const runtime = new HieroRuntime(8080);
 runtime.startMcpServers();
 if (process.env.HIERO_UPDATE_CHECK !== '0') void runtime.broadcastUpdateStatus();

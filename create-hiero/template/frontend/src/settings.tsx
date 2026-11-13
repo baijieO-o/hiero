@@ -351,7 +351,10 @@ function ThemePaletteControl({ palette, onChange }: { palette: ThemePalette; onC
 
 function PreferenceControl({ field, value, onChange }: { field: PreferenceField; value: PreferenceValues[keyof PreferenceValues]; onChange: (value: PreferenceValues[keyof PreferenceValues]) => void }): ReactElement {
   if (field.type === 'boolean') {
-    return <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} aria-label={field.title} />;
+    return <label className="settings-switch">
+      <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} aria-label={field.title} />
+      <span className="settings-switch-track" aria-hidden="true" />
+    </label>;
   }
   if (field.type === 'enum') {
     return <select value={String(value)} onChange={(event) => onChange(event.target.value)} aria-label={field.title}>
@@ -535,6 +538,15 @@ export function McpServersForm({ config, saveState, onSave }: { config: McpConfi
     setText(JSON.stringify({ servers: next }, null, 2));
   }, [config, dirty]);
 
+  // Enable/disable from the skills panel writes mcp.json directly, so a stale draft must not be saved back.
+  useEffect(() => {
+    if (!config) return;
+    setServers((current) => current.map((server) => {
+      const saved = config.servers.find((item) => item.name === server.name);
+      return saved && saved.enabled !== server.enabled ? { ...server, enabled: saved.enabled } : server;
+    }));
+  }, [config]);
+
   const update = (next: McpServerDraft[]) => {
     setServers(next);
     setText(JSON.stringify({ servers: next }, null, 2));
@@ -615,7 +627,7 @@ export function McpServersForm({ config, saveState, onSave }: { config: McpConfi
           <div>
             <strong>{server.name}</strong> <small>{server.transport ?? 'stdio'}</small>
             <div className="settings-mcp-desc">{describeServer(server)}</div>
-            {status && <div className={status.connected ? 'mcp-connected' : 'mcp-failed'}>{status.connected ? `已连接，${status.tool_count} 个工具` : `未连接 — ${status.error ?? '未知错误'}`}</div>}
+            {status && server.enabled && <div className={status.connected ? 'mcp-connected' : 'mcp-failed'}>{status.connected ? `已连接，${status.tool_count} 个工具` : `未连接 — ${status.error ?? '未知错误'}`}</div>}
           </div>
           <div className="settings-mcp-item-actions">
             <label><input type="checkbox" checked={server.enabled} onChange={() => toggle(index)} aria-label={`启用 ${server.name}`} /> 启用</label>
@@ -625,26 +637,28 @@ export function McpServersForm({ config, saveState, onSave }: { config: McpConfi
       })}
     </ul>
 
-    <fieldset className="settings-mcp-custom">
-      <legend>添加自定义服务器</legend>
-      <label className="settings-field"><span><strong>名称</strong></span><input value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} aria-label="服务器名称" /></label>
-      <label className="settings-field"><span><strong>传输方式</strong></span>
-        <select value={custom.transport} onChange={(event) => setCustom({ ...custom, transport: event.target.value as McpTransport })} aria-label="传输方式">
-          <option value="stdio">stdio（本地命令）</option>
-          <option value="sse">sse（远程）</option>
-          <option value="http">http（远程）</option>
-        </select>
-      </label>
-      {custom.transport === 'stdio' ? <>
-        <label className="settings-field"><span><strong>命令</strong></span><input value={custom.command} onChange={(event) => setCustom({ ...custom, command: event.target.value })} aria-label="启动命令" placeholder="例如 npx" /></label>
-        <label className="settings-field"><span><strong>参数</strong><small>每行一个参数</small></span><textarea rows={3} value={custom.args} onChange={(event) => setCustom({ ...custom, args: event.target.value })} aria-label="命令参数" /></label>
-      </> : <label className="settings-field"><span><strong>URL</strong></span><input value={custom.url} onChange={(event) => setCustom({ ...custom, url: event.target.value })} aria-label="远程地址" placeholder="https://example.com/mcp" /></label>}
-      <label className="settings-field"><span><strong>{custom.transport === 'stdio' ? '环境变量' : '请求头'}</strong><small>每行 KEY=VALUE；凭据写成 ${'{'}变量名{'}'}，例如 Authorization=Bearer ${'{'}MY_TOKEN{'}'}</small></span>
-        <textarea rows={3} value={custom.secrets} onChange={(event) => setCustom({ ...custom, secrets: event.target.value })} aria-label="环境变量或请求头" spellCheck={false} />
-      </label>
+    <details className="settings-mcp-add">
+      <summary>+ 添加服务器</summary>
+      <div className="settings-mcp-grid">
+        <label className="settings-mcp-cell"><span><strong>名称</strong></span><input value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} aria-label="服务器名称" /></label>
+        <label className="settings-mcp-cell"><span><strong>传输方式</strong></span>
+          <select value={custom.transport} onChange={(event) => setCustom({ ...custom, transport: event.target.value as McpTransport })} aria-label="传输方式">
+            <option value="stdio">stdio（本地命令）</option>
+            <option value="sse">sse（远程）</option>
+            <option value="http">http（远程）</option>
+          </select>
+        </label>
+        {custom.transport === 'stdio' ? <>
+          <label className="settings-mcp-cell"><span><strong>命令</strong></span><input value={custom.command} onChange={(event) => setCustom({ ...custom, command: event.target.value })} aria-label="启动命令" placeholder="例如 npx" /></label>
+          <label className="settings-mcp-cell"><span><strong>参数</strong><small>每行一个参数</small></span><textarea rows={3} value={custom.args} onChange={(event) => setCustom({ ...custom, args: event.target.value })} aria-label="命令参数" /></label>
+        </> : <label className="settings-mcp-cell settings-mcp-wide"><span><strong>URL</strong></span><input value={custom.url} onChange={(event) => setCustom({ ...custom, url: event.target.value })} aria-label="远程地址" placeholder="https://example.com/mcp" /></label>}
+        <label className="settings-mcp-cell settings-mcp-wide"><span><strong>{custom.transport === 'stdio' ? '环境变量' : '请求头'}</strong><small>每行 KEY=VALUE；凭据写成 ${'{'}变量名{'}'}，例如 Authorization=Bearer ${'{'}MY_TOKEN{'}'}</small></span>
+          <textarea rows={3} value={custom.secrets} onChange={(event) => setCustom({ ...custom, secrets: event.target.value })} aria-label="环境变量或请求头" spellCheck={false} />
+        </label>
+      </div>
       {formError && <p className="settings-save-error" role="alert">{formError}</p>}
       <div className="settings-form-actions"><button type="button" className="ghost-button" onClick={addCustom}>加入列表（默认禁用）</button></div>
-    </fieldset>
+    </details>
 
     <details className="settings-mcp-advanced">
       <summary>高级：直接编辑 JSON</summary>
@@ -760,7 +774,10 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList
           <h3>子代理</h3>
           <label className="settings-row">
             <span><strong>启用只读子代理</strong><small>允许模型把调研任务交给只读子代理（只能读文件、列目录、查记忆）。关闭后模型不再看到 delegate_read 工具。</small></span>
-            <input type="checkbox" checked={subagent.enabled} onChange={(event) => updateSubagent('enabled', event.target.checked)} aria-label="启用只读子代理" />
+            <label className="settings-switch">
+              <input type="checkbox" checked={subagent.enabled} onChange={(event) => updateSubagent('enabled', event.target.checked)} aria-label="启用只读子代理" />
+              <span className="settings-switch-track" aria-hidden="true" />
+            </label>
           </label>
           <label className="settings-row">
             <span><strong>最大轮数</strong><small>子代理最多调用模型几轮（1–10）。越大越能深入调研，耗时和成本也越高。</small></span>

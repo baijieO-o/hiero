@@ -6,6 +6,7 @@ import type { ChatTraceEvent } from './chat-trace.js';
 import type { StoredChatTrace } from './trace-store.js';
 import type { TaskRecord } from './state-store.js';
 import type { ContextUsageBreakdown } from './context-usage.js';
+import type { UsageStats } from './usage-stats.js';
 import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { isAllowedOrigin, isLoopbackAddress } from './ws-guard.js';
@@ -14,7 +15,9 @@ import type { ScheduledTask } from './scheduled-tasks.js';
 export type RuntimeEvent =
   | { type: 'SYSTEM_STATS'; payload: SystemStats & { timestamp: string } }
   | { type: 'STATE_CHANGE'; payload: { node: AgentState; status: 'running' | 'completed' } }
-  | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string } }
+  | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string; workspace: string } }
+  | { type: 'FILE_DIFF_RESET'; payload: { task_id: string } }
+  | { type: 'FILE_REVERT_RESULT'; payload: { path: string; ok: true; status: 'restored' | 'skipped' } | { path: string; ok: false; message: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
   | { type: 'VERIFY_RESULT'; payload: VerificationResult }
   | { type: 'DAG_TASK'; payload: { task_id: string; goal: string; read_only: boolean; status: 'running' | 'completed' | 'failed'; error?: string } }
@@ -32,6 +35,7 @@ export type RuntimeEvent =
   | { type: 'CHAT_CANCELLED'; payload: { request_id: string } }
   | { type: 'CHAT_UNKNOWN'; payload: { request_id: string } }
   | { type: 'CHAT_USAGE'; payload: { request_id: string; usage: ContextUsageBreakdown } }
+  | { type: 'USAGE_STATS'; payload: { request_id: string } & UsageStats }
   | { type: 'MODEL_LIST'; payload: { request_id: string; models: string[]; error?: string } }
   | { type: 'CHAT_COMPACTED'; payload: { request_id: string; summary: string; before_tokens: number; after_tokens: number; kept_messages: number } | { request_id: string; ok: false; message: string } }
   | { type: 'SETTINGS'; payload: { endpoint: string; model: string; token_count: number } }
@@ -39,7 +43,9 @@ export type RuntimeEvent =
   | { type: 'SCHEDULES'; payload: { ok: true; tasks: ScheduledTask[] } | { ok: false; message: string; tasks: ScheduledTask[] } }
   | { type: 'MCP_CONFIG'; payload: { servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } }
   | { type: 'MCP_CONFIG_SAVE_RESULT'; payload: { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string } }
+  | { type: 'HOT_PLUG_RESULT'; payload: { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; skills: { name: string; enabled: boolean }[]; tools: { name: string; enabled: boolean }[] } | { ok: false; message: string } }
   | { type: 'WORKSPACE_RESULT'; payload: Record<string, unknown> & { request_id: string; kind: string } }
+  | { type: 'BROWSER_AGENT_STATE'; payload: { paused: boolean } }
   | { type: 'APPROVAL_REQUIRED'; payload: { approval_id: string; tool_name: string; summary: string; input: unknown } }
   | { type: 'ASK_USER_REQUIRED'; payload: { ask_id: string; message: string; fields: unknown[] } }
   | { type: 'UPDATE_STATUS'; payload: import('./update-check.js').UpdateStatus }

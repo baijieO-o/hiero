@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -11,7 +11,9 @@ import { StateStore } from './state-store.js';
 import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type CompletionGateway } from './model-gateway.js';
 import { ToolGateway } from './tool-gateway.js';
 import { CapabilityRouter } from './capability-router.js';
-import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig } from './mcp-config.js';
+import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
+import { McpToolClient } from './mcp-client.js';
+import { HotPlugRegistry } from './hot-plug.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { RuntimeWebSocketServer, type RuntimeEvent } from './runtime-server.js';
 import type { ModelMessage, ModelResponse, ModelToolCall, ModelToolDefinition } from './model-gateway.js';
@@ -20,7 +22,8 @@ import { z } from 'zod';
 import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
 import { diffSnapshots, snapshotTextFiles } from './workspace-diff.js';
-import { modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+import { loadLocalLlmEnv, modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+import { SecretStore, type SecretName } from './secret-store.js';
 import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
 import { ApprovalBroker } from './approval-broker.js';
@@ -61,6 +64,7 @@ import { LOAD_SKILL_TOOL_DEFINITION, registerLoadSkillTool } from './skill-tool.
 import { CodeIndex, createSymbolSearchTool } from './code-index.js';
 import { paramsForModel, ConfigWatcher } from './config.js';
 import { Telemetry } from './telemetry.js';
+import { readUsageStats } from './usage-stats.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
@@ -74,6 +78,18 @@ import type { ExtensionReady, SystemAgentError } from './system_agent.js';
 import type { WebSocket } from 'ws';
 
 const DEFAULT_MAX_CONTEXT_TOKENS = 32_000;
+const CHAT_DEFAULT_MAX_TOKENS = 4_000;
+const CHAT_DEFAULT_MAX_TIME_MS = 120_000;
+const CHAT_BUDGET_LIMITS = { maxTokens: { min: 100, max: 200_000 }, maxTimeMs: { min: 10_000, max: 3_600_000 } } as const;
+
+function chatBudget(request: RuntimeChatRequest): { maxTokens: number; maxTimeMs: number } {
+  const clamp = (value: number | undefined, limits: { min: number; max: number }, fallback: number) =>
+    typeof value === 'number' && Number.isFinite(value) ? Math.min(limits.max, Math.max(limits.min, Math.round(value))) : fallback;
+  return {
+    maxTokens: clamp(request.budget_envelope?.max_tokens, CHAT_BUDGET_LIMITS.maxTokens, CHAT_DEFAULT_MAX_TOKENS),
+    maxTimeMs: clamp(request.budget_envelope?.max_time_ms, CHAT_BUDGET_LIMITS.maxTimeMs, CHAT_DEFAULT_MAX_TIME_MS),
+  };
+}
 
 export interface RuntimeTaskRequest {
   goal?: string;
@@ -99,6 +115,8 @@ export interface RuntimeChatRequest {
   subagent?: Partial<SubagentSettings>;
   /** Web pages shared from the built-in browser; fetched server-side and attached to the latest user message. */
   shared_urls?: string[];
+  acceptance_criteria?: string[];
+  budget_envelope?: { max_tokens?: number; max_time_ms?: number };
 }
 
 const MAX_SHARED_PAGES = 3;
@@ -127,7 +145,7 @@ function withSharedContext(history: RuntimeChatRequest['messages'], sharedContex
   return history.map((item, i) => i === index ? { ...item, content: `${item.content}\n\n${sharedContext}` } : item);
 }
 
-const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative. When the user asks you to ask them something (e.g. "问我", "询问我", "弹窗问我") or when you need the user to choose among options or supply missing details, you MUST call the ask_user tool instead of asking in plain text.';
+const CHAT_SYSTEM_PROMPT = 'You are Hiero, a helpful AI assistant. You can call list_dir to list the entries of a directory in the current workspace (use "." for the workspace root), and read_file to read a file in the workspace when it helps answer the user. Use write_file to create or overwrite a UTF-8 text file in the workspace when the user asks for file changes. Write the complete final content in a single write_file call: do not write placeholders or drafts first, and do not read a file back just to check what you wrote. When generating animated pages, keep the animations running by default; do not add a prefers-reduced-motion rule that disables or shortens all animations, and only add a reduced-motion variant if the user asks for one. Use memory_recall to look up long-term memory, and memory_remember to store durable facts or preferences the user states. Use memory_append (layer 0 rules) only when the user explicitly asks you to save a rule to always-injected memory; never write it on your own initiative. When the user asks you to ask them something (e.g. "问我", "询问我", "弹窗问我") or when you need the user to choose among options or supply missing details, you MUST call the ask_user tool instead of asking in plain text.';
 const CHAT_TOOL_ROUNDS = 5;
 /** Chat has no per-task token cap, so compaction triggers at a fixed estimated size. */
 const CHAT_COMPACT_TOKENS = 24_000;
@@ -191,8 +209,8 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     type: 'function',
     function: {
       name: 'browser_open',
-      description: 'Open a public http(s) page in an agent-controlled browser. mode "visible" shows a real Edge window the user can watch; mode "headless" runs without a window. Returns the page title and URL.',
-      parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' }, mode: { type: 'string', enum: ['visible', 'headless'] } }, required: ['url'] },
+      description: 'Open a public http(s) page in an agent-controlled browser. mode "visible" (default) shows a real Edge window the user can watch; mode "headless" runs without a window; mode "shared" operates on the page the user sees in the Hiero desktop browser panel (same login session), and needs the desktop shell. Returns the page title and URL. Fails on HTTP status 400 or above.',
+      parameters: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' }, mode: { type: 'string', enum: ['visible', 'headless', 'shared'] } }, required: ['url'] },
     },
   },
   {
@@ -200,15 +218,15 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     function: {
       name: 'browser_snapshot',
       description: 'Return the accessibility tree of the current agent-browser page (roles, names, states). Use it to find elements before clicking or typing.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] } } },
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] } } },
     },
   },
   {
     type: 'function',
     function: {
       name: 'browser_screenshot',
-      description: 'Report the current agent-browser page URL, title and screenshot size. The image itself is not returned; use browser_snapshot for the page structure.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] } } },
+      description: 'Report the current agent-browser page URL, title and the screenshot byte size. The image itself is not returned; use browser_snapshot for the page structure.',
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] } } },
     },
   },
   {
@@ -224,7 +242,7 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     function: {
       name: 'browser_click',
       description: 'Click an element in the agent-browser page, identified by its ARIA role and exact accessible name (from browser_snapshot). Requires user approval for each click.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] }, role: { type: 'string' }, name: { type: 'string' } }, required: ['role', 'name'] },
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] }, role: { type: 'string' }, name: { type: 'string' } }, required: ['role', 'name'] },
     },
   },
   {
@@ -232,7 +250,7 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     function: {
       name: 'browser_type',
       description: 'Type text into an input identified by its ARIA role and exact accessible name (from browser_snapshot). Requires user approval for each input.',
-      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless'] }, role: { type: 'string' }, name: { type: 'string' }, text: { type: 'string' } }, required: ['role', 'name', 'text'] },
+      parameters: { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['visible', 'headless', 'shared'] }, role: { type: 'string' }, name: { type: 'string' }, text: { type: 'string' } }, required: ['role', 'name', 'text'] },
     },
   },
   {
@@ -363,6 +381,11 @@ function isTaskHistoryRequest(message: unknown): boolean {
 
 interface ChatCancelRequest { type: 'chat_cancel'; request_id: string }
 
+interface BrowserPauseRequest { type: 'browser_agent_pause'; paused: boolean }
+function isBrowserPauseRequest(message: unknown): message is BrowserPauseRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'browser_agent_pause' && typeof (message as { paused?: unknown }).paused === 'boolean';
+}
+
 function isChatCancelRequest(message: unknown): message is ChatCancelRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_cancel' && typeof (message as { request_id?: unknown }).request_id === 'string';
 }
@@ -386,6 +409,12 @@ const CHAT_RUN_RETENTION_MS = 10 * 60_000;
 
 function isCompletedChatEvent(type: string): boolean {
   return type === 'CHAT_REPLY' || type === 'CHAT_ERROR' || type === 'CHAT_CANCELLED';
+}
+
+interface UsageStatsRequest { type: 'usage_stats'; request_id: string }
+
+function isUsageStatsRequest(message: unknown): message is UsageStatsRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'usage_stats' && typeof (message as { request_id?: unknown }).request_id === 'string';
 }
 
 interface ChatUsageRequest { type: 'chat_usage'; request_id: string; messages: RuntimeChatRequest['messages']; workspace?: string; subagent?: Partial<SubagentSettings>; compacted_summary?: string }
@@ -447,6 +476,12 @@ function isWriteRollbackRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'write_rollback';
 }
 
+function isFileRevertRequest(message: unknown): message is { type: 'file_revert'; workspace: string; path: string } {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as { type?: unknown; workspace?: unknown; path?: unknown };
+  return candidate.type === 'file_revert' && typeof candidate.workspace === 'string' && typeof candidate.path === 'string';
+}
+
 export type ScheduleRequest =
   | { type: 'SCHEDULE'; action: 'list' }
   | { type: 'SCHEDULE'; action: 'create'; payload: { name?: unknown; goal?: unknown; interval_minutes?: unknown; run_now?: unknown } }
@@ -494,6 +529,18 @@ function isMcpConfigSave(message: unknown): message is { type: 'mcp_config_save'
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'mcp_config_save';
 }
 
+interface HotPlugMessage {
+  type: 'hot_plug_list' | 'hot_plug_set';
+  kind?: 'mcp' | 'skill' | 'tool';
+  name?: string;
+  enabled?: boolean;
+}
+
+function isHotPlugRequest(message: unknown): message is HotPlugMessage {
+  const type = typeof message === 'object' && message !== null ? (message as { type?: unknown }).type : undefined;
+  return type === 'hot_plug_list' || type === 'hot_plug_set';
+}
+
 type WorkspaceRequest = { workspace?: string } & (
   | { type: 'folder_pick'; request_id: string; initialPath?: string }
   | { type: 'fs_list'; request_id: string; path?: string }
@@ -517,7 +564,7 @@ function isWorkspaceRequest(message: unknown): message is WorkspaceRequest {
 
 /** Tool names from HIERO_HITL_TOOLS (comma-separated) that always pause for approval outside auto mode. */
 export function hitlBreakpointsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.HIERO_HITL_TOOLS ?? '').split(',').map((name) => name.trim()).filter((name) => name.length > 0);
+  return [...new Set(['write_file', ...(env.HIERO_HITL_TOOLS ?? '').split(',').map((name) => name.trim()).filter((name) => name.length > 0)])];
 }
 
 export class HieroRuntime {
@@ -526,12 +573,17 @@ export class HieroRuntime {
   private readonly runtime: RuntimeWebSocketServer;
   private workflow: AgentWorkflow;
   private readonly systemAgent = new SystemAgentClient();
-  private readonly capabilityRouter = new CapabilityRouter();
+  private readonly mcpClient = new McpToolClient();
+  private readonly hotPlug = new HotPlugRegistry(this.mcpClient);
+  private readonly capabilityRouter = new CapabilityRouter(this.mcpClient, (name) => this.hotPlug.isSkillEnabled(name));
+  private readonly mcpSignatures = new Map<string, string>();
   private readonly approvals: ApprovalBroker;
   private readonly askUsers: AskUserBroker;
   private readonly browserSessions = new BrowserSessions({
     headlessCdpUrl: process.env.HIERO_HEADLESS_CDP_URL || undefined,
+    sharedCdpUrl: process.env.HIERO_SHARED_CDP_URL || 'http://127.0.0.1:9333',
   });
+  secrets = new SecretStore(join(homedir(), '.hiero'));
   private readonly writeSnapshots = new WriteSnapshotStore(join(homedir(), '.hiero', 'write-snapshots.json'));
   private readonly codeIndexes = new Map<string, CodeIndex>();
   private readonly configWatcher = new ConfigWatcher({ home: homedir() });
@@ -562,10 +614,18 @@ export class HieroRuntime {
       if (isApprovalResponse(message)) this.approvals.respond(message.payload.approval_id, message.payload.approved);
       else if (isAskUserResponse(message)) this.askUsers.respond(message.payload.ask_id, message.payload.status === 'submitted' ? { status: 'submitted', values: message.payload.values ?? {} } : { status: 'declined' });
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
+      else if (isFileRevertRequest(message)) await this.handleFileRevert(message, client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
-      else if (isChatCancelRequest(message)) this.cancelChat(message.request_id, client);
+      else if (isChatCancelRequest(message)) {
+        if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
+      }
+      else if (isBrowserPauseRequest(message)) {
+        this.browserSessions.setAgentPaused(message.paused);
+        this.runtime.broadcast({ type: 'BROWSER_AGENT_STATE', payload: { paused: this.browserSessions.isAgentPaused() } });
+      }
       else if (isChatAttachRequest(message)) this.attachChat(message.request_id, client);
       else if (isChatUsageRequest(message)) await this.handleChatUsage(message, client);
+      else if (isUsageStatsRequest(message)) this.runtime.send({ type: 'USAGE_STATS', payload: { request_id: message.request_id, ...readUsageStats(this.configWatcher.current().logging.file) } }, client);
       else if (isChatCompactRequest(message)) await this.handleChatCompact(message, client);
       else if (isTaskHistoryRequest(message)) this.runtime.send({ type: 'TASK_HISTORY', payload: { tasks: this.stateStore.listTasks() } }, client);
       else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: resolveChatWorkspace(message.workspace), traces: await listChatTraces(resolveChatWorkspace(message.workspace)) } }, client);
@@ -575,6 +635,7 @@ export class HieroRuntime {
       else if (isModelListRequest(message)) await this.handleModelList(message, client);
       else if (isMcpConfigGet(message)) this.sendMcpConfig(client);
       else if (isMcpConfigSave(message)) await this.handleMcpConfigSave(message.payload, client);
+      else if (isHotPlugRequest(message)) await this.handleHotPlug(message, client);
       else if (isWorkspaceRequest(message)) await this.handleWorkspaceRequest(message, client);
       else if (isModelSettingsSave(message)) {
         try {
@@ -596,6 +657,20 @@ export class HieroRuntime {
       this.runtime.send({ type: 'ROLLBACK_RESULT', payload: { ok: true, restored: result.restored, skipped: result.skipped, warning } }, client);
     } catch (cause) {
       this.runtime.send({ type: 'ROLLBACK_RESULT', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
+    }
+  }
+
+  /** Reverts one file the agent changed in this task. Same human-edit check as the full rollback. */
+  private async handleFileRevert(request: { workspace: string; path: string }, client: WebSocket): Promise<void> {
+    const reply = (payload: { ok: true; status: 'restored' | 'skipped' } | { ok: false; message: string }) =>
+      this.runtime.send({ type: 'FILE_REVERT_RESULT', payload: { path: request.path, ...payload } }, client);
+    try {
+      const target = resolve(resolveChatWorkspace(request.workspace), request.path);
+      const outcome = await this.writeSnapshots.revertFile(target);
+      if (outcome === 'unknown') reply({ ok: false, message: '该文件没有可还原的 agent 写入记录。' });
+      else reply({ ok: true, status: outcome });
+    } catch (cause) {
+      reply({ ok: false, message: cause instanceof Error ? cause.message : String(cause) });
     }
   }
 
@@ -801,8 +876,11 @@ export class HieroRuntime {
       HIERO_LLM_TOKENS: tokens.join(','),
       HIERO_LLM_TASK_MODELS: Object.keys(taskModels).length > 0 ? JSON.stringify(taskModels) : '',
     };
-    writeLocalEnv(values, root);
-    for (const [key, value] of Object.entries(values)) process.env[key] = value;
+    const { HIERO_LLM_TOKENS: tokenValue, ...plain } = values;
+    writeLocalEnv(plain, root);
+    if (newTokens.length > 0) this.secrets.set('HIERO_LLM_TOKENS', tokenValue ?? '');
+    for (const [key, value] of Object.entries(plain)) process.env[key] = value;
+    process.env.HIERO_LLM_TOKENS = tokenValue;
     this.gateway = this.createGateway();
     this.workflow = this.createWorkflow();
     return this.readModelSettings();
@@ -818,14 +896,14 @@ export class HieroRuntime {
   private async handleMcpConfigSave(input: unknown, client?: WebSocket): Promise<void> {
     try {
       const saved = saveMcpConfig(input);
-      const statuses = await this.capabilityRouter.reloadMcp(saved.servers.filter((server) => server.enabled).map(toClientConfig));
+      await this.applyMcpConfig(saved.servers);
+      const statuses = this.hotPlug.mcpStatuses();
       this.runtime.send({ type: 'MCP_CONFIG_SAVE_RESULT', payload: { ok: true, servers: saved.servers, statuses, path: mcpConfigPath() } }, client);
     } catch (cause) {
       this.runtime.send({ type: 'MCP_CONFIG_SAVE_RESULT', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
     }
   }
 
-  /** Connects enabled MCP servers from the saved config. Runs in the background so a slow server never blocks startup. */
   /** Checks the remote for a newer tag and sends the result to one client, or to everyone when no client is given. */
   public async broadcastUpdateStatus(client?: WebSocket): Promise<UpdateStatus> {
     const status = await checkForUpdate();
@@ -835,12 +913,79 @@ export class HieroRuntime {
     return status;
   }
 
+  /**
+   * Manual hot-plug. `hot_plug_set` flips one MCP server's enabled flag in the saved config and applies it
+   * live, so the change survives a restart. `hot_plug_list` reports every configured server and its runtime state.
+   */
+  /**
+   * Hot-plug API. `kind` selects what to toggle: `mcp` (persisted in mcp.json and connected/disconnected live),
+   * `skill` (hidden from routing and load_skill for this runtime), or `tool` (built-in tool removed from new chats).
+   */
+  private async handleHotPlug(message: HotPlugMessage, client?: WebSocket): Promise<void> {
+    try {
+      const kind = message.kind ?? 'mcp';
+      if (message.type === 'hot_plug_set') {
+        if (!message.name) throw new Error('hot_plug_set requires name');
+        const enabled = message.enabled !== false;
+        if (kind === 'mcp') {
+          const config = readMcpConfig();
+          const target = config.servers.find((server) => server.name === message.name);
+          if (!target) throw new Error(`MCP server '${message.name}' is not configured`);
+          target.enabled = enabled;
+          const saved = saveMcpConfig(config);
+          await this.applyMcpConfig(saved.servers);
+        } else if (kind === 'skill') {
+          this.hotPlug.setSkillEnabled(message.name, enabled);
+        } else {
+          this.hotPlug.setToolEnabled(message.name, enabled);
+        }
+      }
+      const config = readMcpConfig();
+      await this.capabilityRouter.discoverSkills(resolveChatWorkspace(undefined));
+      this.runtime.send({
+        type: 'HOT_PLUG_RESULT',
+        payload: {
+          ok: true,
+          servers: config.servers,
+          statuses: this.hotPlug.mcpStatuses(),
+          skills: this.capabilityRouter.discoveredSkillSummaries().map((skill) => ({ name: skill.name, enabled: this.hotPlug.isSkillEnabled(skill.name) })),
+          tools: this.createChatToolGateway(resolveChatWorkspace(undefined), false).registeredNames().map((name) => ({ name, enabled: this.hotPlug.isToolEnabled(name) })),
+        },
+      }, client);
+    } catch (cause) {
+      this.runtime.send({ type: 'HOT_PLUG_RESULT', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
+    }
+  }
+
+  /** Connects enabled MCP servers from the saved config. Runs in the background so a slow server never blocks startup. */
   public startMcpServers(): void {
     try {
-      const enabled = readMcpConfig().servers.filter((server) => server.enabled).map(toClientConfig);
-      if (enabled.length > 0) void this.capabilityRouter.reloadMcp(enabled);
+      void this.applyMcpConfig(readMcpConfig().servers);
     } catch (cause) {
       console.warn(`MCP config ignored: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
+  /**
+   * Diffs the desired MCP servers against the running plugins. Removed or disabled servers are disposed,
+   * new or changed ones are (re)enabled, and unchanged servers keep their live connection.
+   */
+  private async applyMcpConfig(servers: readonly McpServerEntry[]): Promise<void> {
+    const desired = new Map(servers.filter((server) => server.enabled).map((server) => [server.name, toClientConfig(server)]));
+    const running = new Map(this.hotPlug.list().filter((plug) => plug.kind === 'mcp').map((plug) => [plug.name, plug]));
+    for (const plug of running.values()) {
+      if (!desired.has(plug.name)) await this.hotPlug.disable(`mcp:${plug.name}`);
+    }
+    for (const [name, config] of desired) {
+      const previous = this.mcpSignatures.get(name);
+      const signature = JSON.stringify(config);
+      if (running.has(name) && previous === signature) continue;
+      this.hotPlug.defineMcp(config);
+      this.mcpSignatures.set(name, signature);
+      await this.hotPlug.enableMcp(name);
+    }
+    for (const name of [...this.mcpSignatures.keys()]) {
+      if (!desired.has(name)) this.mcpSignatures.delete(name);
     }
   }
 
@@ -899,14 +1044,15 @@ export class HieroRuntime {
   }
 
   /** Aborts an in-flight chat. The model call stops immediately and the client gets CHAT_CANCELLED. */
-  private cancelChat(requestId: string, client?: WebSocket): void {
+  private cancelChat(requestId: string, client?: WebSocket): boolean {
     const controller = this.activeChats.get(requestId);
-    if (!controller) return;
+    if (!controller) return false;
     console.log(`[chat ${requestId}] cancel requested`);
     controller.abort();
     const run = this.chatRuns.get(requestId);
     if (run) this.sendChat(requestId, run, { type: 'CHAT_CANCELLED', payload: { request_id: requestId } });
     else this.runtime.send({ type: 'CHAT_CANCELLED', payload: { request_id: requestId } }, client);
+    return true;
   }
 
   private async runChat(request: RuntimeChatRequest, model: string, run: ChatRunBuffer, signal: AbortSignal): Promise<void> {
@@ -919,8 +1065,8 @@ export class HieroRuntime {
       model_config: { preferred_model: model, fallback_chain: [] },
       permission_mode: parsePermissionMode(request.permission, 'standard'),
       context_mode: 'ephemeral',
-      acceptance_criteria: [],
-      budget_envelope: { max_tokens: DEFAULT_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 },
+      acceptance_criteria: Array.isArray(request.acceptance_criteria) ? request.acceptance_criteria.filter((item): item is string => typeof item === 'string').slice(0, 100) : [],
+      budget_envelope: (() => { const budget = chatBudget(request); return { max_tokens: budget.maxTokens, max_time_ms: budget.maxTimeMs }; })(),
     };
     const subagent = normalizeSubagentSettings(request.subagent);
     const toolDefinitions = chatToolDefinitions(subagent);
@@ -1032,7 +1178,8 @@ export class HieroRuntime {
    * Chat tools run through a per-request ToolGateway so they share schema checks and the approval policy.
    * Memory writes change persistent state, so they are irreversible and need approval outside auto mode.
    */
-  private createChatToolGateway(workspacePath: string): ToolGateway {
+  /** Builds the per-chat tool set. `applyHotPlug=false` keeps disabled tools listed, for the management API. */
+  private createChatToolGateway(workspacePath: string, applyHotPlug = true): ToolGateway {
     const tools = new ToolGateway();
     tools.register(createReadFileTool(workspacePath));
     tools.register(createListDirTool(workspacePath));
@@ -1075,6 +1222,7 @@ export class HieroRuntime {
     });
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
     tools.setBreakpoints(hitlBreakpointsFromEnv());
+    if (applyHotPlug) for (const name of this.hotPlug.disabledToolNames()) tools.unregister(name);
     return tools;
   }
 
@@ -1164,6 +1312,7 @@ export class HieroRuntime {
       if (checkpoint) this.stateStore.resumeTask(task.task_id);
       else this.stateStore.startTask(task.task_id, task.workspace_path, goal);
       const before = await snapshotTextFiles(task.workspace_path);
+      if (!checkpoint) this.runtime.broadcast({ type: 'FILE_DIFF_RESET', payload: { task_id: task.task_id } });
       const workflow = this.createWorkflow(task.workspace_path, {
         onCheckpoint: (messages, evidence) => this.stateStore.saveCheckpoint(task.task_id, messages, evidence),
         ...(checkpoint ? { resume: checkpoint } : {}),
@@ -1175,7 +1324,7 @@ export class HieroRuntime {
         return { task_id: task.task_id, status: 'completed', summary: '已转入交接，无正文汇报' };
       }
       const after = await snapshotTextFiles(task.workspace_path);
-      for (const diff of await diffSnapshots(before, after)) this.runtime.broadcast({ type: 'FILE_DIFF', payload: diff });
+      for (const diff of await diffSnapshots(before, after)) this.runtime.broadcast({ type: 'FILE_DIFF', payload: { ...diff, workspace: task.workspace_path } });
       this.runtime.completeState(AgentState.Verify);
       this.stateStore.finishTask(task.task_id, 'completed');
       return { task_id: task.task_id, status: 'completed', summary: outcome.response.content ?? '' };

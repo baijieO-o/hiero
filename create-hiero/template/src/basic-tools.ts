@@ -10,7 +10,13 @@ export const writeFileInput = z.object({
   content: z.string(),
 });
 
-export const readFileInput = z.object({ path: z.string().min(1) });
+export const readFileInput = z.object({
+  path: z.string().min(1),
+  /** 1-based first line to return. Use with limit to page through large files. */
+  offset: z.number().int().min(1).optional(),
+  /** Maximum number of lines to return. */
+  limit: z.number().int().min(1).max(2_000).optional(),
+});
 export const listDirInput = z.object({ path: z.string().default('.') });
 
 export function resolveWorkspacePath(workspacePath: string, path: string): string {
@@ -44,17 +50,36 @@ function realpathOfExisting(target: string): string {
   return join(realpathSync(current), ...missing);
 }
 
+/** Page size for read_file. Kept below the executor's tool-result cap so the continuation hint at the end is never clipped. */
+const PAGE_CHARS = 12_000;
+
 export function createReadFileTool(workspacePath: string): RegisteredTool<z.infer<typeof readFileInput>, { path: string; content: string }> {
   return {
     name: 'read_file',
     inputSchema: readFileInput,
     effect: 'read',
-    execute: async ({ path }) => {
+    execute: async ({ path, offset, limit }) => {
       const target = resolveWorkspacePath(workspacePath, path);
       const info = await stat(target);
       if (info.isDirectory()) throw new Error(`"${path}" is a directory; use list_dir to list its entries.`);
-      const content = await readFile(target, 'utf8');
-      return { path: target, content: content.slice(0, 20_000) };
+      const text = await readFile(target, 'utf8');
+      if (offset === undefined && limit === undefined) {
+        if (text.length <= PAGE_CHARS) return { path: target, content: text };
+        const totalLines = text.split('\n').length;
+        const page = text.slice(0, PAGE_CHARS);
+        const shownLines = page.split('\n').length - 1;
+        return {
+          path: target,
+          content: `${page}\n[truncated: showing about the first ${shownLines} of ${totalLines} lines; call read_file again with offset=${shownLines + 1} and limit to read the rest]`,
+        };
+      }
+      const lines = text.split('\n');
+      const start = (offset ?? 1) - 1;
+      const count = limit ?? 500;
+      const slice = lines.slice(start, start + count).join('\n').slice(0, PAGE_CHARS);
+      const next = start + count < lines.length ? start + count + 1 : undefined;
+      const hint = next ? `\n[lines ${start + 1}-${Math.min(start + count, lines.length)} of ${lines.length}; continue with offset=${next}]` : `\n[end of file, ${lines.length} lines]`;
+      return { path: target, content: slice + hint };
     },
   };
 }

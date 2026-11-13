@@ -6,8 +6,54 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#070b12" />
     <title>Hiero · Agent 工作台</title>
+    <style>
+      #boot-splash { position: fixed; inset: 0; z-index: 9999; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: radial-gradient(circle at 50% 42%, #14102a 0%, #070b12 62%); transition: opacity .6s ease, visibility .6s; }
+      #boot-splash.done { opacity: 0; visibility: hidden; pointer-events: none; }
+      #boot-splash .boot-glow { position: absolute; width: 240px; height: 240px; border-radius: 50%; background: radial-gradient(circle, rgba(126, 20, 255, .35), transparent 70%); animation: boot-glow 3s ease-out both; }
+      #boot-splash svg { position: relative; width: 104px; height: 104px; overflow: visible; animation: boot-spin 14s linear infinite; }
+      #boot-splash .boot-arc { stroke-dasharray: 1; stroke-dashoffset: 1; animation: boot-draw 1.5s cubic-bezier(.6, 0, .2, 1) forwards; animation-delay: var(--d); }
+      #boot-splash .boot-spoke { stroke-dasharray: 1; stroke-dashoffset: 1; animation: boot-draw .8s ease-out forwards; animation-delay: var(--d); }
+      #boot-splash .boot-lockup { position: relative; display: flex; align-items: center; }
+      #boot-splash .boot-title { box-sizing: border-box; height: 118px; max-width: 0; padding-left: 0; overflow: hidden; white-space: nowrap; font: 400 118px/118px Anton, "Arial Narrow", sans-serif; letter-spacing: .08em; color: #ede6ff; opacity: 0; animation: boot-reveal 1.6s cubic-bezier(.6, 0, .2, 1) 1.2s forwards; }
+      #boot-splash .boot-sub { position: relative; font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; color: #8b93a7; opacity: 0; animation: boot-rise 1s ease-out 2.4s forwards; }
+      @keyframes boot-draw { to { stroke-dashoffset: 0; } }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      @keyframes boot-glow { 0% { opacity: 0; transform: scale(.4); } 60% { opacity: 1; } 100% { opacity: .7; transform: scale(1.2); } }
+      @keyframes boot-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+      @keyframes boot-reveal { from { opacity: 0; max-width: 0; padding-left: 0; } 30% { opacity: 1; } to { opacity: 1; max-width: 720px; padding-left: 28px; } }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash svg { animation: none !important; }
+      }
+    </style>
   </head>
   <body>
+    <div id="boot-splash">
+      <div class="boot-glow"></div>
+      <div class="boot-lockup">
+        <svg viewBox="120 74 584 584" fill="none" stroke="url(#boot-grad)" stroke-width="10" stroke-linecap="round" aria-hidden="true">
+          <defs>
+            <linearGradient id="boot-grad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#a06bff" />
+              <stop offset="1" stop-color="#3b82f6" />
+            </linearGradient>
+          </defs>
+          <path class="boot-arc" pathLength="1" style="--d: .05s" d="M552.0 123.5 A280 280 0 0 1 392.5 645.3" />
+          <path class="boot-arc" pathLength="1" style="--d: .2s" d="M334.8 635.2 A280 280 0 0 1 185.5 530.6" />
+          <path class="boot-arc" pathLength="1" style="--d: .35s" d="M156.2 479.9 A280 280 0 0 1 498.5 99.7" />
+          <path class="boot-arc" pathLength="1" style="--d: .5s" d="M398.9 178.5 A188 188 0 0 1 599.5 379.1" />
+          <path class="boot-arc" pathLength="1" style="--d: .62s" d="M592.7 417.8 A188 188 0 0 1 259.9 476.5" />
+          <path class="boot-arc" pathLength="1" style="--d: .74s" d="M240.3 442.5 A188 188 0 0 1 360.2 185.3" />
+          <path class="boot-spoke" pathLength="1" style="--d: 1s" d="M415.3 178.0 L416.9 86.0" />
+          <path class="boot-spoke" pathLength="1" style="--d: 1.06s" d="M547.2 235.4 L613.4 171.5" />
+          <path class="boot-spoke" pathLength="1" style="--d: 1.12s" d="M265.9 247.7 L194.4 189.8" />
+          <path class="boot-spoke" pathLength="1" style="--d: 1.18s" d="M224.0 366.0 L132.0 366.0" />
+          <path class="boot-spoke" pathLength="1" style="--d: 1.24s" d="M412.0 554.0 L412.0 646.0" />
+          <path class="boot-spoke" pathLength="1" style="--d: 1.3s" d="M318.0 528.8 L272.0 608.5" />
+        </svg>
+        <div class="boot-title">HIERO</div>
+      </div>
+      <div class="boot-sub">个人 Agent 工作台</div>
+    </div>
     <div id="app"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

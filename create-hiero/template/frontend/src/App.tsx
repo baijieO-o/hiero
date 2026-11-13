@@ -1,58 +1,43 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewHeaderActionsProps } from 'dockview-react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
 import type { ReactElement } from 'react';
-import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState, type TaskModelKindId } from './settings';
-import { SchedulesPanel } from './schedules-panel';
+import { McpServersForm, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus } from './settings';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { handleCodeCopy, renderMarkdown, renderPartialMarkdown, splitStreamingBlocks } from './markdown';
 import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
-import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
-import { TaskCard } from './task-card';
+import { PermissionModePicker, isPermissionLabel, readStoredPermission } from './permission-mode';
 import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
 import { batchRisk } from './approval-model';
 import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
 import { DocsCenter } from './docs-center';
-import { clarifyComplete, clarifyQuestions, type ClarifyAnswers } from './clarify-model';
-import { ClarifyWizard } from './clarify-wizard';
-import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
-import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog, storeModelCatalog } from './model-catalog-store';
+import { DiffPanel } from './diff-panel';
+import { UsagePanel } from './usage-panel';
+import { PanelHeader } from './panel-header';
+import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog } from './model-catalog-store';
 import { RUNTIME_WS_URL } from './runtime-url';
 import { SystemStatus } from './system-status';
 import { runtimeSocketFor, type RuntimeSocketMessage } from './runtime-socket';
 import { estimateCostUsd, formatCost } from './token-cost';
-import { TerminalView, type TerminalWriteLine } from './terminal-view';
+import type { TerminalWriteLine } from './terminal-view';
+import { SettingsBuffer } from './settings-buffer';
+
+const LazyTerminalView = lazy(() => import('./terminal-view').then((module) => ({ default: module.TerminalView })));
 import { MAX_TEXT_PREVIEW_BYTES, classifyFile, folderNameFromEntry } from './dropped-files';
 import { FileRefChip, FilePreviewDialog, type DroppedFileRef } from './file-ref';
 import { compactionBoundary, insertDivider, sendableMessages } from './compaction';
 import { shortcutFromEvent, type ShortcutAction } from './shortcut-model';
 
-type TodoStatus = 'done' | 'active' | 'pending';
 
 type RuntimeMessage = RuntimeSocketMessage;
 
-const TODO_ITEMS = ['定义任务契约', '运行执行网关', '验证工具证据', '准备交接文档'];
-
-/** Read-only panels subscribe to every broadcast through one shared, reconnecting socket. */
-function connectRuntime(onMessage: (message: RuntimeMessage) => void): () => void {
-  const socket = runtimeSocketFor(RUNTIME_WS_URL);
-  const unsubscribers = BROADCAST_TYPES.map((type) => socket.subscribe(type, onMessage));
-  return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
-}
-
-const BROADCAST_TYPES = ['SNAPSHOT', 'STATE_CHANGE', 'VERIFY_RESULT', 'REWIND_RESULT', 'FILE_DIFF', 'HANDOFF_TRIGGERED'];
-
-type PanelKind = 'chat' | 'mission' | 'debug' | 'todo' | 'review' | 'handoff' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
+type PanelKind = 'chat' | 'debug' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'diff' | 'usage' | 'blank';
 
 const PANEL_TITLES: Record<PanelKind, string> = {
   chat: '对话',
-  mission: '任务控制台',
   debug: '调试控制台',
-  todo: '待办清单',
-  review: '代码审查',
-  handoff: '交接文档',
   settings: '设置',
   schedules: '定时任务',
   browser: '浏览器',
@@ -61,12 +46,14 @@ const PANEL_TITLES: Record<PanelKind, string> = {
   skills: '技能管理',
   memory: '记忆',
   docs: '文档',
+  diff: '变更审阅',
+  usage: '成本 / 用量',
   blank: '空缓存窗口',
 };
 
 const PANEL_KINDS = Object.keys(PANEL_TITLES).filter((kind) => kind !== 'blank') as PanelKind[];
 
-const HIDDEN_RAIL_KINDS: PanelKind[] = ['mission', 'todo', 'review', 'handoff', 'docs'];
+const HIDDEN_RAIL_KINDS: PanelKind[] = ['docs'];
 const RAIL_KINDS = PANEL_KINDS.filter((kind) => !HIDDEN_RAIL_KINDS.includes(kind));
 
 const DEFAULT_SCREEN = '默认';
@@ -157,15 +144,8 @@ function activeWorkspaceRoot(): string | undefined {
 
 const COMMAND_ALIASES: Record<string, PanelKind> = {
   CHAT: 'chat',
-  MS: 'mission',
-  TASK: 'mission',
   DBG: 'debug',
   DEBUG: 'debug',
-  TODO: 'todo',
-  REV: 'review',
-  DIFF: 'review',
-  HO: 'handoff',
-  HANDOFF: 'handoff',
   SET: 'settings',
   SETTINGS: 'settings',
   BROWSER: 'browser',
@@ -175,6 +155,8 @@ const COMMAND_ALIASES: Record<string, PanelKind> = {
   TERM: 'terminal',
   FILES: 'files',
   FM: 'files',
+  DIFF: 'diff',
+  USAGE: 'usage',
 };
 
 function resolveCommand(input: string): PanelKind | null {
@@ -272,6 +254,8 @@ interface Conversation {
   /** Summary of messages[0..compactedUpTo); later requests send the summary plus the messages after it. */
   compactedSummary?: string;
   compactedUpTo?: number;
+  /** Pinned conversations list first, in the order they were pinned. */
+  pinnedAt?: number;
 }
 
 interface ContextUsageView { window: number; total: number; system: number; tools: number; tool_results: number; messages: number }
@@ -287,10 +271,8 @@ export interface ChatOptions {
   model: string;
   permission: string;
   workspace: string;
-  contextMode: string;
 }
 
-const CHAT_CONTEXT_OPTIONS = ['临时会话', '持久化 Markdown'];
 // 热边：鼠标距窗口左边缘多少像素内触发展开；离开侧栏后延迟收起，避免抖动。
 const HOT_EDGE_PX = 8;
 const HOT_EDGE_HIDE_DELAY_MS = 300;
@@ -311,14 +293,20 @@ interface ChatState {
   browserPageToShare: string | null;
   shareBrowserPage: (url: string) => void;
   takeBrowserPageShare: () => string | null;
+  browserAgentPaused: boolean;
+  setBrowserAgentPaused: (paused: boolean) => void;
   options: ChatOptions;
   setOption: <K extends keyof ChatOptions>(key: K, value: ChatOptions[K]) => void;
   newConversation: () => void;
   selectConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
   deleteConversation: (id: string) => void;
+  deleteConversations: (ids: string[]) => void;
+  togglePin: (id: string) => void;
   rewindConversation: (messageIndex: number) => void;
-  send: (text: string, images?: string[], sharedUrls?: string[]) => void;
+  forkConversation: (messageIndex: number) => void;
+  send:  (text: string, images?: string[], sharedUrls?: string[], taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } }) => void;
+  retry: () => void;
   cancel: () => void;
 }
 
@@ -371,6 +359,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
   let sentOnSocket: string | null = null;
   let pendingFiles: string[] = [];
   let pendingTrace: TraceEvent[] | undefined;
+  let lastFailedSend: { text: string; images: string[]; sharedUrls: string[]; taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } } } | null = null;
   /** Deltas arrive per token; they are merged and written to the store at most once per animation frame. */
   let deltaBuffer = '';
   let deltaFrame: number | undefined;
@@ -460,6 +449,10 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         handleSideChannel(message);
         return;
       }
+      if (message.type === 'BROWSER_AGENT_STATE') {
+        set({ browserAgentPaused: message.payload?.paused === true });
+        return;
+      }
       const requestId = typeof message.payload?.request_id === 'string' ? message.payload.request_id : '';
       if (!activeRequest || activeRequest.requestId !== requestId) return;
       const conversationId = activeRequest.conversationId;
@@ -504,11 +497,13 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         if (partial || finished.steps) {
           updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         }
+        lastFailedSend = null;
         activeRequest = null;
         writeActiveRequest(null);
         set({ pending: false, streamingSegments: [], error: null });
       } else if (message.type === 'CHAT_UNKNOWN') {
         // The backend no longer has this run (it restarted or the record expired), so nothing can be recovered.
+        lastFailedSend = null;
         pendingFiles = [];
         pendingTrace = undefined;
         discardDeltas();
@@ -519,6 +514,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         const rawDetail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
         const errorCode = typeof message.payload?.code === 'string' ? message.payload.code : '';
         const detail = errorCode ? `[${errorCode}] ${rawDetail}` : rawDetail;
+        lastFailedSend = null;
         pendingFiles = [];
         pendingTrace = undefined;
         discardDeltas();
@@ -567,6 +563,14 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     contextUsage: {},
     browserPageToShare: null,
     shareBrowserPage: (url) => set({ browserPageToShare: url }),
+    browserAgentPaused: false,
+    setBrowserAgentPaused: (paused) => {
+      const target = ensureSocket();
+      const payload = JSON.stringify({ type: 'browser_agent_pause', paused });
+      if (target.readyState === WebSocket.OPEN) target.send(payload);
+      else target.addEventListener('open', () => target.send(payload), { once: true });
+      set({ browserAgentPaused: paused });
+    },
     takeBrowserPageShare: () => {
       const url = get().browserPageToShare;
       if (url) set({ browserPageToShare: null });
@@ -598,7 +602,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
-    options: { model: readStoredDefaultModel(), permission: readStoredPermission(), workspace: '', contextMode: '临时会话' },
+    options: { model: readStoredDefaultModel(), permission: readStoredPermission(), workspace: '' },
     setOption: (key, value) => set((state) => ({ options: { ...state.options, [key]: value } })),
     newConversation: () => {
       if (get().pending) return;
@@ -610,17 +614,24 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const trimmed = title.trim();
       if (trimmed) updateConversation(id, (conv) => ({ ...conv, title: trimmed }));
     },
-    deleteConversation: (id) => {
-      if (get().pending && activeRequest?.conversationId === id) return;
+    deleteConversation: (id) => get().deleteConversations([id]),
+    deleteConversations: (ids) => {
+      // The conversation with an in-flight request cannot be removed, otherwise its reply would have nowhere to land.
+      const blocked = get().pending ? activeRequest?.conversationId : undefined;
+      const targets = new Set(ids.filter((id) => id !== blocked));
+      if (targets.size === 0) return;
       set((state) => {
-        const remaining = state.conversations.filter((conv) => conv.id !== id);
+        const remaining = state.conversations.filter((conv) => !targets.has(conv.id));
         if (remaining.length === 0) {
           const fresh = createConversation();
           return { conversations: [fresh], activeId: fresh.id };
         }
-        const activeId = state.activeId === id ? remaining[0]!.id : state.activeId;
+        const activeId = targets.has(state.activeId) ? remaining[0]!.id : state.activeId;
         return { conversations: remaining, activeId };
       });
+    },
+    togglePin: (id) => {
+      updateConversation(id, (conv) => ({ ...conv, pinnedAt: conv.pinnedAt === undefined ? Date.now() : undefined }));
     },
     rewindConversation: (messageIndex) => {
       if (get().pending) return;
@@ -639,12 +650,28 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       });
       set({ error: null });
     },
-    send: (text, images = [], sharedUrls = []) => {
+    forkConversation: (messageIndex) => {
+      if (get().pending) return;
+      const state = get();
+      const source = state.conversations.find((conv) => conv.id === state.activeId);
+      if (!source || messageIndex < 0 || messageIndex >= source.messages.length) return;
+      // The fork is a separate timeline: the original keeps every message, and the new conversation starts from the messages before the chosen one.
+      const keepSummary = source.compactedUpTo !== undefined && messageIndex >= source.compactedUpTo;
+      const fork: Conversation = {
+        ...createConversation(),
+        title: `${source.title}（分支）`.slice(0, 40),
+        messages: source.messages.slice(0, messageIndex),
+        ...(keepSummary ? { compactedSummary: source.compactedSummary, compactedUpTo: source.compactedUpTo } : {}),
+      };
+      set((current) => ({ conversations: [fork, ...current.conversations], activeId: fork.id, error: null }));
+    },
+    send: (text, images = [], sharedUrls = [], taskCard) => {
       const trimmed = text.trim();
       const state = get();
     if ((!trimmed && images.length === 0 && sharedUrls.length === 0) || state.pending) return;
       const conversation = state.conversations.find((conv) => conv.id === state.activeId);
       if (!conversation) return;
+    lastFailedSend = { text: trimmed, images: [...images], sharedUrls: [...sharedUrls], taskCard };
       const message: ChatMessage = { role: 'user', content: trimmed, ...(images.length > 0 ? { images } : {}) };
       const requestId = `chat-${Date.now()}`;
       activeRequest = { conversationId: conversation.id, requestId };
@@ -661,11 +688,18 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       textBreak = false;
       set({ pending: true, streamingSegments: [], error: null });
       const target = ensureSocket();
-      const { model, permission, workspace, contextMode } = state.options;
+      const { model, permission, workspace } = state.options;
       const subagent = useSubagentPreferences.getState().values;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, context_mode: contextMode, subagent, ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
+      const contractFields = taskCard ?? undefined;
+      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, subagent, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
+    },
+    retry: () => {
+      const failed = lastFailedSend;
+      if (!failed || get().pending) return;
+      lastFailedSend = null;
+      get().send(failed.text, failed.images, failed.sharedUrls, failed.taskCard);
     },
     cancel: () => {
       const request = activeRequest;
@@ -759,6 +793,14 @@ function TrashIcon(): ReactElement {
   return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M6 6l1 14h10l1-14" /></svg>;
 }
 
+function SelectIcon(): ReactElement {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11" /><path d="M3 6l1 1 2-2M3 12l1 1 2-2M3 18l1 1 2-2" /></svg>;
+}
+
+function PinIcon(): ReactElement {
+  return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 17v5" /><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3z" /></svg>;
+}
+
 function parseJsonObject(raw: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -837,9 +879,15 @@ function MarkdownBody({ content }: { content: string }): ReactElement {
       if (img.naturalWidth > 0) img.dataset.loaded = '';
       else img.dataset.failed = '';
     });
-    const instances = renderMarkmaps(root);
+    let cancelled = false;
+    const instancesPromise = renderMarkmaps(root);
     void renderMermaidBlocks(root);
-    return () => instances.forEach((instance) => instance.destroy?.());
+    return () => {
+      cancelled = true;
+      void instancesPromise.then((instances) => {
+        if (cancelled) instances.forEach((instance) => instance.destroy?.());
+      });
+    };
   }, [html]);
   return <div ref={ref} className="chat-markdown" onClick={(event) => { handleCodeCopy(event.target); }}   onLoadCapture={(event) => { markImageLoaded(event.target); }} onErrorCapture={(event) => { markImageFailed(event.target); }} dangerouslySetInnerHTML={{ __html: html }} />;
 }
@@ -910,7 +958,7 @@ function FadingStreamingText({ text, streaming }: { text: string; streaming: boo
   return <div className="chat-segment-text"><MarkdownBody content={text} /></div>;
 }
 
-function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
+function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, onFork, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; onFork?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
   const [copied, setCopied] = useState(false);
   const [timeVisible, setTimeVisible] = useState(false);
   const idleTimer = useRef<number | undefined>(undefined);
@@ -948,13 +996,18 @@ function ChatMessageView({ role, content, images, files, steps, segments, usage,
       {files.map((file) => <button type="button" key={file} className="chat-file" onClick={() => requestOpenFile(file)} title={`在文件管理器中打开 ${file}`}>📄 {file}</button>)}
     </div>}
     {usage && usage.calls > 0 && <div className="chat-usage" title="模型调用轨迹">
-      模型调用 {usage.calls} 次 · 输入 {usage.input_tokens} / 输出 {usage.output_tokens} tokens · 耗时 {(usage.duration_ms / 1000).toFixed(1)}s · 成本 {formatCost(estimateCostUsd(usage, model))}
+      {model && <>模型 {model} · </>}模型调用 {usage.calls} 次 · 输入 {usage.input_tokens} / 输出 {usage.output_tokens} tokens · 耗时 {(usage.duration_ms / 1000).toFixed(1)}s · 成本 {formatCost(estimateCostUsd(usage, model))}
     </div>}
     {trace && trace.length > 0 && <TraceTimeline events={trace} />}
   </div>;
-  const checkpoint = onRewind && <button type="button" className="chat-checkpoint" onClick={onRewind} disabled={rewindDisabled} title="还原到此消息之前，删除此消息及之后的内容">
-    <span>还原检查点</span><span aria-hidden="true">·</span><GitForkIcon />
-  </button>;
+  const checkpoint = onRewind && <div className="chat-checkpoint-row">
+    <button type="button" className="chat-checkpoint" onClick={onRewind} disabled={rewindDisabled} title="还原到此消息之前，删除此消息及之后的内容">
+      <span>还原检查点</span>
+    </button>
+    {onFork && <button type="button" className="chat-checkpoint" onClick={onFork} disabled={rewindDisabled} title="从此消息之前派生一个新分支对话，原对话保留">
+      <span>派生对话</span><GitForkIcon />
+    </button>}
+  </div>;
   if (checkpoint) return <>{checkpoint}{bubble}</>;
   if (role !== 'assistant' || completedAt === undefined) return bubble;
   return <div className={`chat-message-wrap chat-${role}`} onPointerEnter={showTimeUntilIdle} onPointerMove={showTimeUntilIdle} onPointerLeave={hideTime}>
@@ -1032,13 +1085,30 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, rewindConversation, send, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, rewindConversation: state.rewindConversation, send: state.send, cancel: state.cancel })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, send, retry, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, send: state.send, retry: state.retry, cancel: state.cancel })));
   const [draft, setDraft] = useState('');
   const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
   const [folderPicking, setFolderPicking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
+  const permissionDetailsRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const closeOnOutside = (event: PointerEvent): void => {
+      const details = permissionDetailsRef.current;
+      if (details?.open && !details.contains(event.target as Node)) details.open = false;
+    };
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      const details = permissionDetailsRef.current;
+      if (event.key === 'Escape' && details?.open) details.open = false;
+    };
+    document.addEventListener('pointerdown', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, []);
   const pickWorkspaceFolder = async (): Promise<void> => {
     setFolderPicking(true);
     setFolderError(null);
@@ -1226,6 +1296,28 @@ function ChatPanel(): ReactElement {
     setConfirmDeleteId(null);
     deleteConversation(id);
   };
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [confirmBatch, setConfirmBatch] = useState(false);
+  const toggleSelected = (id: string) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const exitSelectMode = () => { setSelectMode(false); setSelectedIds(new Set()); setConfirmBatch(false); };
+  const confirmBatchRemove = () => {
+    deleteConversations([...selectedIds]);
+    setConfirmBatch(false);
+    exitSelectMode();
+  };
+  // Pinned first (in pin order), then the rest in their existing order.
+  const sortedConversations = [...conversations].sort((a, b) => {
+    const pa = a.pinnedAt, pb = b.pinnedAt;
+    if (pa !== undefined && pb !== undefined) return pa - pb;
+    if (pa !== undefined) return -1;
+    if (pb !== undefined) return 1;
+    return 0;
+  });
   const renameInput = (id: string) => editing?.id === id
     ? <input className="chat-rename-input" autoFocus value={editing.title} onChange={(event) => setEditing({ id, title: event.target.value })} onBlur={commitRename} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commitRename(); } if (event.key === 'Escape') { renameSkipRef.current = true; setEditing(null); } }} />
     : null;
@@ -1244,16 +1336,48 @@ function ChatPanel(): ReactElement {
   return <section className="panel-content chat-panel">
     <div className="chat-layout" style={{ gridTemplateColumns: `${sidebarWidth}px 6px minmax(0, 1fr)` }}>
       <aside className="chat-sidebar">
-        <button className="primary-button" type="button" onClick={newConversation} disabled={pending}>+ 新对话</button>
+        {selectMode
+          ? <div className="chat-select-header"><strong>选择对话</strong><button type="button" className="chat-icon-button" aria-label="退出多选" title="退出多选" onClick={exitSelectMode}>✕</button></div>
+          : <div className="chat-sidebar-top">
+            <button className="primary-button" type="button" onClick={newConversation} disabled={pending}>+ 新对话</button>
+            <button className="chat-icon-button" type="button" aria-label="多选" title="多选" onClick={() => setSelectMode(true)}><SelectIcon /></button>
+          </div>}
         <ul className="chat-history">
-          {conversations.map((conv) => <li key={conv.id} className="chat-history-row" onContextMenu={(event) => openMenu(event, conv.id)}>
-            {renameInput(conv.id) ?? <button type="button" className={conv.id === active?.id ? 'chat-history-item active' : 'chat-history-item'} onClick={() => selectConversation(conv.id)}>{conv.title}</button>}
-            <div className="chat-history-actions">
-              <button type="button" className="chat-icon-button" title="重命名" aria-label="重命名" onClick={() => rename(conv.id)} disabled={pending}><PencilIcon /></button>
-              <button type="button" className="chat-icon-button" title="删除" aria-label="删除" onClick={() => remove(conv.id)} disabled={pending}><TrashIcon /></button>
-            </div>
-          </li>)}
+          {sortedConversations.filter((conv) => conv.pinnedAt !== undefined).length > 0 && <li className="chat-history-group-label" aria-hidden="true">已置顶</li>}
+          {sortedConversations.map((conv, index) => {
+            const pinned = conv.pinnedAt !== undefined;
+            const firstUnpinned = !pinned && (index === 0 || sortedConversations[index - 1].pinnedAt !== undefined) && sortedConversations.some((item) => item.pinnedAt !== undefined);
+            return <Fragment key={conv.id}>
+              {firstUnpinned && <li className="chat-history-group-label" aria-hidden="true">其他对话</li>}
+              <li className={[pinned ? 'chat-history-row pinned' : 'chat-history-row', selectMode && selectedIds.has(conv.id) ? 'selected' : ''].join(' ').trim()} onContextMenu={(event) => { if (!selectMode) openMenu(event, conv.id); }}>
+                {selectMode
+                  ? <label className="chat-history-select">
+                    <input type="checkbox" checked={selectedIds.has(conv.id)} disabled={pending && conv.id === active?.id} onChange={() => toggleSelected(conv.id)} />
+                    <span className="chat-history-item-text" title={conv.title}>{conv.title}</span>
+                  </label>
+                  : renameInput(conv.id) ?? <button type="button" className={conv.id === active?.id ? 'chat-history-item active' : 'chat-history-item'} title={conv.title} onClick={() => selectConversation(conv.id)}>{conv.title}</button>}
+                {!selectMode && editing?.id !== conv.id && <div className="chat-history-actions">
+                  <button type="button" className="chat-icon-button" title="重命名" aria-label="重命名" onClick={() => rename(conv.id)} disabled={pending}><PencilIcon /></button>
+                  <button type="button" className="chat-icon-button" title="删除" aria-label="删除" onClick={() => remove(conv.id)} disabled={pending}><TrashIcon /></button>
+                </div>}
+              </li>
+            </Fragment>;
+          })}
         </ul>
+        {selectMode && <div className="chat-batch-bar">
+          <button type="button" className="chat-batch-action" disabled={selectedIds.size === 0} onClick={() => selectedIds.forEach((id) => togglePin(id))}><PinIcon /><span>置顶</span></button>
+          <button type="button" className="chat-batch-action chat-delete-danger" disabled={selectedIds.size === 0 || pending} onClick={() => setConfirmBatch(true)}><TrashIcon /><span>删除</span></button>
+        </div>}
+        {confirmBatch && <div className="chat-delete-confirm" role="alertdialog" aria-labelledby="chat-batch-title">
+          <div className="chat-delete-confirm-text">
+            <strong id="chat-batch-title">删除 {selectedIds.size} 段对话？</strong>
+            <span>对话记录会被永久删除，无法恢复。</span>
+          </div>
+          <div className="chat-delete-confirm-actions">
+            <button type="button" className="chat-delete-cancel" autoFocus onClick={() => setConfirmBatch(false)}>保留</button>
+            <button type="button" className="chat-delete-danger" onClick={confirmBatchRemove}>删除对话</button>
+          </div>
+        </div>}
       </aside>
       <div className="chat-splitter" role="separator" aria-orientation="vertical" aria-label="调整对话侧栏宽度" onPointerDown={startSidebarResize} />
       <div className="chat-main">
@@ -1269,6 +1393,7 @@ function ChatPanel(): ReactElement {
         </div>
         {deleteConfirm}
         {menu && <div className="chat-context-menu" style={{ left: menu.x, top: menu.y }}>
+          <button type="button" onClick={() => { setMenu(null); togglePin(menu.id); }}>{conversations.find((conv) => conv.id === menu.id)?.pinnedAt !== undefined ? '取消置顶' : '置顶'}</button>
           <button type="button" disabled={pending} onClick={() => { setMenu(null); rename(menu.id); }}>重命名</button>
           <button type="button" disabled={pending} onClick={() => { setMenu(null); remove(menu.id); }}>删除</button>
         </div>}
@@ -1286,12 +1411,12 @@ function ChatPanel(): ReactElement {
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
           {messages.map((message, index) => message.compactedMarker
             ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
-            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} rewindDisabled={pending} />)}
+            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} onFork={message.role === 'user' ? () => forkConversation(index) : undefined} rewindDisabled={pending} />)}
           {pending && <StreamingBubble />}
         </div>
         {scrolledUp && <button type="button" className="chat-scroll-bottom" onClick={scrollToBottom}>回到底部 ↓</button>}
         </div>
-        {error && <p className="chat-error">{error}</p>}
+        {error && <div className="chat-error" role="alert"><span>{error}</span><span className="chat-failure-actions"><button type="button" onClick={retry}>重试</button><button type="button" onClick={() => { setDraft((current) => current ? `${current}\n\n请换一种方案继续处理，先只给出计划并说明风险，不要重复刚才失败的操作。` : '请换一种方案继续处理，先只给出计划并说明风险，不要重复刚才失败的操作。'); composerRef.current?.focus(); }}>换方案</button><button type="button" onClick={() => { setOption('permission', 'strict'); setDraft((current) => current ? `${current}\n\n请在每次文件写入前等待我的审批，并先说明修改方案。` : '请在每次文件写入前等待我的审批，并先说明修改方案。'); composerRef.current?.focus(); }}>转人工审批</button></span></div>}
         {folderError && <p className="chat-error">{folderError}</p>}
         {sessionInfoOpen && active && <SessionInfoPanel
           usage={contextUsage[active.id]}
@@ -1326,14 +1451,13 @@ function ChatPanel(): ReactElement {
               <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
               </button>
-              <details className="chat-tool-details">
+              <details className="chat-tool-details" ref={permissionDetailsRef}>
                 <summary className="chat-pill chat-pill-summary" title="发送前选择权限模式"><span className="chat-pill-label">权限</span><span className="chat-pill-value">{options.permission}</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></summary>
                 <div className="chat-tool-panel">
                   <PermissionModePicker value={isPermissionLabel(options.permission) ? options.permission : '标准'} disabled={pending} onChange={(value) => setOption('permission', value)} />
                 </div>
               </details>
               <ChatOptionSelect label="模型" value={options.model} options={chatModelOptions(readStoredModelCatalog(), options.model)} disabled={pending} onChange={(value) => setOption('model', value)} />
-              <ChatOptionSelect label="上下文" value={options.contextMode} options={CHAT_CONTEXT_OPTIONS} disabled={pending} onChange={(value) => setOption('contextMode', value)} />
               <span className="chat-toolbar-spacer" />
               <ContextUsageRing usage={activeId ? contextUsage[activeId] : undefined} open={sessionInfoOpen} onToggle={() => {
                 if (!sessionInfoOpen && activeId) requestContextUsage(activeId);
@@ -1416,57 +1540,6 @@ function ChatOptionSelect({ label, value, options, disabled, onChange }: { label
   </label>;
 }
 
-function MissionControl(): ReactElement {
-  const [goal, setGoal] = useState('');
-  const [model, setModel] = useState(readStoredDefaultModel);
-  const [permission, setPermissionState] = useState<PermissionLabel>(readStoredPermission);
-  const setPermission = (value: PermissionLabel) => {
-    storePermission(value);
-    setPermissionState(value);
-  };
-  const workspace = useChatStore((state) => state.options.workspace);
-  const setWorkspace = (value: string) => useChatStore.getState().setOption('workspace', value);
-  const [contextMode, setContextMode] = useState('临时会话');
-  const [started, setStarted] = useState(false);
-  const [criteria, setCriteria] = useState('');
-  const [budget, setBudget] = useState<TaskCardBudget>({ ...DEFAULT_BUDGET });
-  const [confirmed, setConfirmed] = useState(false);
-  const [clarifyAnswers, setClarifyAnswers] = useState<ClarifyAnswers>({ allowWrites: null });
-  const draft = { goal, criteria, budget };
-  const validation = validateTaskCard(draft);
-  const questions = clarifyQuestions({ goal, criteria }, workspace);
-  const clarified = clarifyComplete(questions, criteria, clarifyAnswers, workspace);
-  const effectivePermission: PermissionLabel = clarifyAnswers.allowWrites === false ? '严格' : permission;
-  const changeGoal = (value: string) => {
-    setGoal(value);
-    setConfirmed(false);
-  };
-  const changePermission = (value: PermissionLabel) => {
-    setPermission(value);
-    setConfirmed(false);
-  };
-  const launch = () => {
-    if (validation || !confirmed || !clarified) return;
-    const nextGoal = goal.trim();
-    setStarted(true);
-    setConfirmed(false);
-    const socket = new WebSocket(RUNTIME_WS_URL);
-    socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: toPermissionMode(effectivePermission), context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral', ...toContractFields(draft) } }));
-      window.setTimeout(() => socket.close(), 500);
-    });
-  };
-  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => changeGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={chatModelOptions(readStoredModelCatalog(), model)} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={changePermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><ClarifyWizard questions={questions} answers={clarifyAnswers} criteria={criteria} onCriteriaChange={setCriteria} onAnswersChange={setClarifyAnswers} complete={clarified} /><TaskCard summary={{ goal: goal.trim(), workspace, model, permissionLabel: effectivePermission, contextMode }} criteria={criteria} budget={budget} onCriteriaChange={setCriteria} onBudgetChange={setBudget} confirmed={confirmed} onConfirmedChange={setConfirmed} disabled={started} /><button className="primary-button" type="button" onClick={launch} disabled={started || !confirmed || !clarified || validation !== null}>{started ? '任务已发送' : '启动任务'} <span>→</span></button>{validation && <p className="task-card-hint">{validation}</p>}<div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
-}
-
-
-function Select({ label, options, value, onChange }: { label: string; options: string[]; value: string; onChange: (value: string) => void }): ReactElement {
-  return <label className="select-wrap"><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)}>{options.map((option) => <option key={option}>{option}</option>)}</select></label>;
-}
-
-function PanelHeader({ eyebrow, title }: { eyebrow: string; title: string }): ReactElement {
-  return <header className="panel-header"><span className="eyebrow">{eyebrow}</span><h2>{title}</h2></header>;
-}
 
 type DevtoolsTab = 'console' | 'network' | 'runtime';
 
@@ -1507,6 +1580,7 @@ function DebugConsole(): ReactElement {
     <div className="devtools-toolbar">
       <button type="button" onClick={clearConsoleEntries} aria-label="清空控制台" title="清空控制台">⊘</button>
       <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选" aria-label="筛选日志" />
+      <RollbackButton />
       {tab === 'console' && <span className="devtools-counts"><span className="count-error">✕ {counts.error}</span><span className="count-warn">⚠ {counts.warn}</span></span>}
     </div>
     <div className="devtools-output" ref={outputRef} aria-live="polite">
@@ -1522,45 +1596,6 @@ function DebugConsole(): ReactElement {
   </section>;
 }
 
-function TodoList(): ReactElement {
-  const [currentNode, setCurrentNode] = useState('Plan');
-  const [verify, setVerify] = useState<{ verified: boolean; checks: { criterion: string; status: string; reason?: string }[] } | null>(null);
-  const [rewind, setRewind] = useState<{ restored: string[]; skipped: string[] } | null>(null);
-  useEffect(() => connectRuntime((message) => {
-    if (message.type === 'VERIFY_RESULT') { setVerify(message.payload as unknown as typeof verify); return; }
-    if (message.type === 'REWIND_RESULT') { setRewind(message.payload as unknown as typeof rewind); return; }
-    if (message.type !== 'STATE_CHANGE' && message.type !== 'SNAPSHOT') return;
-    const node = typeof message.payload?.node === 'string' ? message.payload.node : undefined;
-    const status = typeof message.payload?.status === 'string' ? message.payload.status : undefined;
-    // SNAPSHOT carries only the node, so resync from it on every (re)connect.
-    if (message.type === 'SNAPSHOT' && node) setCurrentNode(node);
-    else if (node && status) setCurrentNode(node);
-  }), []);
-  const statuses: TodoStatus[] = TODO_ITEMS.map((_, index) => index < Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'done' : index === Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'active' : 'pending');
-  return <section className="panel-content"><PanelHeader eyebrow="状态机" title="待办清单" /><div className="todo-list">{TODO_ITEMS.map((label, index) => <div className={`todo-item ${statuses[index]}`} key={label}><span className="todo-mark">{statuses[index] === 'done' ? '✓' : statuses[index] === 'active' ? '◌' : ''}</span><span>{label}</span></div>)}</div><p className="todo-note">仅根据状态机广播同步 · 当前节点：{currentNode}</p>{verify && <div className={`verify-result ${verify.verified ? 'passed' : 'failed'}`}><strong>{verify.verified ? 'Verify passed' : 'Verify failed'}</strong>{verify.checks.map((check) => <div className="verify-check" key={check.criterion}><span>{check.status}</span> {check.criterion}{check.reason ? <em> ({check.reason})</em> : null}</div>)}</div>}{rewind && <div className="rewind-result"><strong>Rewind</strong> restored {rewind.restored.length} file(s){rewind.skipped.length > 0 ? `, skipped ${rewind.skipped.length} human-edited` : ''}</div>}</section>;
-}
-
-const DiffEditor = lazy(async () => {
-  const { DiffEditor: MonacoDiffEditor } = await import('@monaco-editor/react');
-  return { default: MonacoDiffEditor };
-});
-
-function CodeReview(): ReactElement {
-  const [diff, setDiff] = useState({ path: '等待 FILE_DIFF 事件', original: '', modified: '' });
-  useEffect(() => connectRuntime((message) => {
-    if (message.type !== 'FILE_DIFF' || typeof message.payload?.path !== 'string') return;
-    setDiff({ path: message.payload.path, original: typeof message.payload.original === 'string' ? message.payload.original : '', modified: typeof message.payload.modified === 'string' ? message.payload.modified : '' });
-  }), []);
-  return <section className="panel-content review-panel"><PanelHeader eyebrow="代码审查" title="文件修改对比" /><div className="diff-path">{diff.path}</div><div className="editor-frame"><Suspense fallback={<div className="editor-loading">正在加载代码编辑器…</div>}><DiffEditor key={`${diff.path}:${diff.original.length}:${diff.modified.length}`} height="100%" language="typescript" original={diff.original} modified={diff.modified} theme="vs-dark" options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: true }} /></Suspense></div></section>;
-}
-
-function HandoffPanel(): ReactElement {
-  const [handoff, setHandoff] = useState<Record<string, unknown> | null>(null);
-  useEffect(() => connectRuntime((message) => { if (message.type === 'HANDOFF_TRIGGERED') setHandoff(message.payload ?? null); }), []);
-  return <section className={`panel-content handoff-panel ${handoff ? 'has-handoff' : ''}`}><PanelHeader eyebrow="上下文交接" title="Handoff Document" />{handoff ? <div className="handoff-card"><HandoffField label="任务目标" value={handoff.task_goal} /><HandoffField label="当前状态" value={handoff.current_state} /><HandoffField label="下一步" value={handoff.next_steps} /><HandoffField label="已完成步骤" value={handoff.completed_steps} /></div> : <div className="empty-state">等待后端广播 HANDOFF_TRIGGERED<br /><span>交接文档生成后将在这里显示</span></div>}</section>;
-}
-
-function HandoffField({ label, value }: { label: string; value: unknown }): ReactElement { return <div className="handoff-field"><span>{label}</span><p>{Array.isArray(value) ? value.join('、') : String(value ?? '—')}</p></div>; }
 
 
 let openBufferFromPanel: ((kind: PanelKind) => void) | null = null;
@@ -1580,91 +1615,13 @@ function BlankBuffer(): ReactElement {
     }
     setCommand('');
   };
-  return <section className="panel-content blank-panel"><PanelHeader eyebrow="命令入口" title="空缓存窗口" /><form className="command-bar" onSubmit={(event) => { event.preventDefault(); if (command.trim()) run(); }}><span className="command-prompt">&gt;</span><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="输入命令：MS / DBG / TODO / REV / HO" aria-label="缓存窗口命令" /></form><div className="console-output">{output.map((line, index) => <p key={index}>{line}</p>)}</div></section>;
+  return <section className="panel-content blank-panel"><PanelHeader eyebrow="命令入口" title="空缓存窗口" />  <form className="command-bar" onSubmit={(event) => { event.preventDefault(); if (command.trim()) run(); }}><span className="command-prompt">&gt;</span><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="输入命令：DBG / SET / FILES"  aria-label="缓存窗口命令" /></form><div className="console-output">{output.map((line, index) => <p key={index}>{line}</p>)}</div></section>;
 }
 
-function SettingsBuffer(): ReactElement {
-  const [settings, setSettings] = useState<ModelSettings | null>(null);
-  const [saveState, setSaveState] = useState<SaveState>({ status: 'idle' });
-  const [mcpConfig, setMcpConfig] = useState<McpConfigState | null>(null);
-  const [mcpSaveState, setMcpSaveState] = useState<McpSaveState>({ status: 'idle' });
-  const [modelList, setModelList] = useState<ModelListState>({ status: 'idle' });
-  const socketRef = useRef<WebSocket | null>(null);
-  const fetchModels = (input: { endpoint: string; tokens: string }) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setModelList({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端。' });
-      return;
-    }
-    setModelList({ status: 'loading' });
-    socket.send(JSON.stringify({ type: 'model_list', request_id: 'model-list', payload: input }));
-  };
-  const saveModel = (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setSaveState({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端再保存。' });
-      return;
-    }
-    setSaveState({ status: 'saving' });
-    socket.send(JSON.stringify({ type: 'settings_save', payload: input }));
-  };
-  const saveMcp = (servers: McpServerEntry[]) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setMcpSaveState({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端再保存。' });
-      return;
-    }
-    setMcpSaveState({ status: 'saving' });
-    socket.send(JSON.stringify({ type: 'mcp_config_save', payload: { servers } }));
-  };
-  useEffect(() => {
-    let active = true;
-    const socket = new WebSocket(RUNTIME_WS_URL);
-    socketRef.current = socket;
-    socket.onopen = () => {
-      if (!active) return;
-      socket.send(JSON.stringify({ type: 'settings_get' }));
-      socket.send(JSON.stringify({ type: 'mcp_config_get' }));
-    };
-    socket.onmessage = (event) => {
-      if (!active) return;
-      try {
-        const message = JSON.parse(String(event.data)) as RuntimeMessage;
-        if (message.type === 'SETTINGS') setSettings(message.payload as unknown as ModelSettings);
-        if (message.type === 'MODEL_LIST') {
-          const result = message.payload as unknown as { models: string[]; error?: string };
-          setModelList(result.error ? { status: 'error', message: result.error } : { status: 'ready', models: result.models });
-          if (!result.error) storeModelCatalog(result.models);
-        }
-        if (message.type === 'MCP_CONFIG') setMcpConfig(message.payload as unknown as McpConfigState);
-        if (message.type === 'MCP_CONFIG_SAVE_RESULT') {
-          const result = message.payload as unknown as { ok: true; servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } | { ok: false; message: string };
-          if (result.ok) {
-            setMcpConfig({ servers: result.servers, statuses: result.statuses, path: result.path });
-            setMcpSaveState({ status: 'saved' });
-          } else {
-            setMcpSaveState({ status: 'error', message: result.message });
-          }
-        }
-        if (message.type === 'SETTINGS_SAVE_RESULT') {
-          const result = message.payload as unknown as { ok: boolean; message?: string; settings?: ModelSettings };
-          if (result.ok && result.settings) {
-            setSettings(result.settings);
-            setSaveState({ status: 'saved', tokenCount: result.settings.token_count });
-          } else {
-            setSaveState({ status: 'error', message: result.message ?? '保存失败' });
-          }
-        }
-      } catch { /* Ignore non-JSON runtime messages. */ }
-    };
-    socket.onerror = () => { if (active) setSettings(null); };
-    return () => {
-      active = false;
-      socketRef.current = null;
-      socket.close();
-    };
-  }, []);
-  return <section className="panel-content"><PanelHeader eyebrow="配置" title="设置" /><SettingsPanel modelSettings={settings} saveState={saveState} onSaveModel={saveModel} modelList={modelList} onFetchModels={fetchModels} mcpConfig={mcpConfig}   mcpSaveState={mcpSaveState} onSaveMcp={saveMcp} /></section>;
+
+/** True only inside Hiero's own desktop shell (electron/main.cjs), not other Electron hosts such as VS Code. */
+function isElectronShell(): boolean {
+  return typeof navigator !== 'undefined' && navigator.userAgent.includes('HieroDesktop/');
 }
 
 function normalizeBrowserUrl(input: string): string | null {
@@ -1686,6 +1643,9 @@ function BrowserBuffer({ api }: { api: { id: string } }): ReactElement {
   const [draft, setDraft] = useState(url);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const desktop = isElectronShell();
+  const browserAgentPaused = useChatStore((state) => state.browserAgentPaused);
+  const setBrowserAgentPaused = useChatStore((state) => state.setBrowserAgentPaused);
   const navigate = (raw: string) => {
     const next = normalizeBrowserUrl(raw);
     if (!next) {
@@ -1706,11 +1666,15 @@ function BrowserBuffer({ api }: { api: { id: string } }): ReactElement {
       <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="输入链接，例如 example.com" aria-label="浏览器地址" />
       <button type="submit">前往</button>
       <button type="button" onClick={() => { useChatStore.getState().shareBrowserPage(url); if (openChatFromPanel) openChatFromPanel(); else openBufferFromPanel?.('chat'); }} disabled={!url}>分享给智能体</button>
+      {desktop && <button type="button" onClick={() => setBrowserAgentPaused(!browserAgentPaused)} aria-pressed={browserAgentPaused} title={browserAgentPaused ? '智能体已暂停，无法操作共享页面' : '暂停后智能体不能点击或输入'}>{browserAgentPaused ? '恢复智能体' : '暂停智能体'}</button>}
       {url && <a href={url} target="_blank" rel="noreferrer">外部打开</a>}
     </form>
     {error && <p className="browser-error">{error}</p>}
+    {desktop && <p className="browser-hint">{browserAgentPaused ? '智能体已暂停：可以浏览，但不能点击或输入。' : '桌面版：智能体可用 shared 模式操作此页面，并与你共享登录状态。'}</p>}
     {url
-      ? <iframe key={reloadKey} className="browser-frame" src={url} title={url} sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox" />
+      ? (desktop
+        ? <webview key={reloadKey} className="browser-frame" src={url} />
+        : <iframe key={reloadKey} className="browser-frame" src={url} title={url} sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox" />)
       : <div className="empty-state">输入链接后在此打开页面<br /><span>部分网站禁止嵌入，可点击"外部打开"</span></div>}
   </section>;
 }
@@ -1938,10 +1902,90 @@ function RollbackButton(): ReactElement {
 const SKILL_CATEGORIES = ['MCP 服务器', '技能', '指令', '智能体', '挂钩', '工具'] as const;
 type SkillCategory = (typeof SKILL_CATEGORIES)[number];
 
+type HotPlugItem = { name: string; enabled: boolean };
+type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; skills: HotPlugItem[]; tools: HotPlugItem[] };
+type HotPlugKind = 'mcp' | 'skill' | 'tool';
+
+/** Hot-plug state for MCP servers, skills and built-in tools, sharing one backend socket per view. */
+function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null; toggle: (kind: HotPlugKind, name: string, enabled: boolean) => void } {
+  const [snapshot, setSnapshot] = useState<HotPlugSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  useEffect(() => {
+    let active = true;
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    socketRef.current = socket;
+    socket.onopen = () => { if (active) socket.send(JSON.stringify({ type: 'hot_plug_list' })); };
+    socket.onmessage = (event) => {
+      if (!active) return;
+      try {
+        const message = JSON.parse(String(event.data)) as RuntimeMessage;
+        if (message.type !== 'HOT_PLUG_RESULT') return;
+        const result = message.payload as unknown as ({ ok: true } & HotPlugSnapshot) | { ok: false; message: string };
+        if (result.ok) { setSnapshot(result); setError(null); } else setError(result.message);
+      } catch { /* Ignore non-JSON runtime messages. */ }
+    };
+    socket.onerror = () => { if (active) setError('未连接到后端（localhost:8080）。'); };
+    return () => { active = false; socketRef.current = null; socket.close(); };
+  }, []);
+  const toggle = (kind: HotPlugKind, name: string, enabled: boolean) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
+    socket.send(JSON.stringify({ type: 'hot_plug_set', kind, name, enabled }));
+  };
+  return { snapshot, error, toggle };
+}
+
+function HotPlugToggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }): ReactElement {
+  return (
+    <label className="hot-plug-toggle" title={checked ? '已启用' : '已停用'}>
+      <input type="checkbox" role="switch" checked={checked} aria-label={label} onChange={(event) => onChange(event.target.checked)} />
+      <span className="hot-plug-track" aria-hidden="true" />
+    </label>
+  );
+}
+
+function HotPlugList({ items, kind, note, onToggle }: { items: HotPlugItem[]; kind: HotPlugKind; note: string; onToggle: HotPlugToggleFn }): ReactElement {
+  if (items.length === 0) return <p className="skills-empty">暂无条目。</p>;
+  return (
+    <div className="hot-plug-list">
+      <p className="skills-empty">{note}</p>
+      <ul>
+        {items.map((item) => (
+          <li key={item.name} className={item.enabled ? '' : 'disabled'}>
+            <span>{item.name}</span>
+            <HotPlugToggle checked={item.enabled} label={`${kind} ${item.name}`} onChange={(checked) => onToggle(kind, item.name, checked)} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+type HotPlugToggleFn = (kind: HotPlugKind, name: string, enabled: boolean) => void;
+
+function ToolsCategoryView(): ReactElement {
+  const { snapshot, error, toggle } = useHotPlug();
+  return (
+    <div className="skills-editor">
+      {error ? <p role="alert">{error}</p> : null}
+      {snapshot ? (
+        <HotPlugList items={snapshot.tools} kind="tool" note="内置工具。开关对新对话生效，已有对话保持不变。" onToggle={toggle} />
+      ) : <p className="skills-empty">正在读取工具列表…</p>}
+    </div>
+  );
+}
+
 function McpCategoryView(): ReactElement {
+  const hotPlug = useHotPlug();
   const [config, setConfig] = useState<McpConfigState | null>(null);
   const [saveState, setSaveState] = useState<McpSaveState>({ status: 'idle' });
   const socketRef = useRef<WebSocket | null>(null);
+  const { snapshot } = hotPlug;
+  useEffect(() => {
+    if (!snapshot) return;
+    setConfig((current) => (current ? { ...current, servers: snapshot.servers, statuses: snapshot.statuses } : current));
+  }, [snapshot]);
   useEffect(() => {
     let active = true;
     const socket = new WebSocket(RUNTIME_WS_URL);
@@ -1975,7 +2019,20 @@ function McpCategoryView(): ReactElement {
     setSaveState({ status: 'saving' });
     socket.send(JSON.stringify({ type: 'mcp_config_save', payload: { servers } }));
   };
-  return <div className="skills-editor"><McpServersForm config={config} saveState={saveState} onSave={save} /></div>;
+  return (
+    <div className="skills-editor">
+      {hotPlug.error ? <p role="alert">{hotPlug.error}</p> : null}
+      {hotPlug.snapshot && hotPlug.snapshot.servers.length > 0 ? (
+        <HotPlugList
+          items={hotPlug.snapshot.servers.map((server) => ({ name: server.name, enabled: server.enabled !== false }))}
+          kind="mcp"
+          note="启停立即生效，并写入 mcp.json，重启后保持。"
+          onToggle={hotPlug.toggle}
+        />
+      ) : null}
+      <McpServersForm config={config} saveState={saveState} onSave={save} />
+    </div>
+  );
 }
 
 function SkillsBuffer(): ReactElement {
@@ -1986,6 +2043,13 @@ function SkillsBuffer(): ReactElement {
   const [saved, setSaved] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const hotPlug = useHotPlug();
+  const categoryCount = (item: SkillCategory): number => {
+    if (item === '技能') return skills.length;
+    if (item === 'MCP 服务器') return hotPlug.snapshot?.servers.length ?? 0;
+    if (item === '工具') return hotPlug.snapshot?.tools.length ?? 0;
+    return 0;
+  };
 
   const refresh = () => {
     setError(null);
@@ -2026,24 +2090,31 @@ function SkillsBuffer(): ReactElement {
         {SKILL_CATEGORIES.map((item) => (
           <button key={item} type="button" className={item === category ? 'active' : ''} onClick={() => setCategory(item)}>
             <span>{item}</span>
-            <b>{item === '技能' ? skills.length : 0}</b>
+            <b>{categoryCount(item)}</b>
           </button>
         ))}
       </nav>
       <div className="skills-main">
         {category === 'MCP 服务器' && <McpCategoryView />}
-        {category !== '技能' && category !== 'MCP 服务器' && <p className="skills-empty">{category} 暂未接入数据源。</p>}
+        {category === '工具' && <ToolsCategoryView />}
+        {category !== '技能' && category !== 'MCP 服务器' && category !== '工具' && <p className="skills-empty">{category} 暂未接入数据源。</p>}
         {category === '技能' && (
           <div className="skills-body">
             <ul className="skills-list">
-              {skills.map((skill) => (
-                <li key={skill.id}>
-                  <button type="button" className={skill.id === selectedId ? 'active' : ''} onClick={() => open(skill)}>
-                    <strong>{skill.name}</strong>
-                    <small>{SKILL_SCOPE_LABELS[skill.scope]} · {skill.description || '无描述'}</small>
-                  </button>
-                </li>
-              ))}
+              {skills.map((skill) => {
+                const enabled = hotPlug.snapshot?.skills.find((item) => item.name === skill.name)?.enabled !== false;
+                return (
+                  <li key={skill.id} className={enabled ? '' : 'disabled'}>
+                    <button type="button" className={skill.id === selectedId ? 'active' : ''} onClick={() => open(skill)}>
+                      <strong>{skill.name}</strong>
+                      <small>{SKILL_SCOPE_LABELS[skill.scope]} · {skill.description || '无描述'}{enabled ? '' : ' · 已停用'}</small>
+                    </button>
+                    {hotPlug.snapshot ? (
+                      <HotPlugToggle checked={enabled} label={`skill ${skill.name}`} onChange={(checked) => hotPlug.toggle('skill', skill.name, checked)} />
+                    ) : null}
+                  </li>
+                );
+              })}
               {skills.length === 0 && <li className="skills-empty">未找到技能。可在 .agent/skills、~/.copilot/skills 或 ~/.agents/skills 下新建 &lt;name&gt;/SKILL.md。</li>}
             </ul>
             <div className="skills-editor">
@@ -2501,7 +2572,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
     setCommand(next === null ? '' : commandHistory[next] ?? '');
   };
   return <div className="terminal-session" hidden={hidden}>
-    <TerminalView lines={lines} hidden={hidden} onActivate={() => inputRef.current?.focus()} />
+    <Suspense fallback={null}><LazyTerminalView lines={lines} hidden={hidden} onActivate={() => inputRef.current?.focus()} /></Suspense>
     <form className="terminal-input" onSubmit={run}>
       <span className="wt-prompt">{running ? '' : prompt}</span>
       <input ref={inputRef} value={command} onChange={(event) => { setCommand(event.target.value); setHistoryIndex(null); }} onKeyDown={recall} placeholder={running ? '执行中……' : ''} aria-label="终端命令" disabled={running} autoComplete="off" spellCheck={false} />
@@ -2509,7 +2580,13 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
   </div>;
 }
 
-const panelComponents = { chat: ChatPanel, mission: MissionControl, debug: DebugConsole, todo: TodoList, review: CodeReview, handoff: HandoffPanel, settings: SettingsBuffer, schedules: () => <SchedulesPanel wsUrl={RUNTIME_WS_URL} />, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
+const LazySchedulesPanel = lazy(() => import('./schedules-panel').then((module) => ({ default: module.SchedulesPanel })));
+function UsagePanelHost(): ReactElement {
+  const conversations = useChatStore((state) => state.conversations);
+  return <UsagePanel conversations={conversations} />;
+}
+
+const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <Suspense fallback={null}><LazySchedulesPanel wsUrl={RUNTIME_WS_URL} /></Suspense>, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, diff: DiffPanel, usage: UsagePanelHost, blank: BlankBuffer };
 
 function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
   const [maximized, setMaximized] = useState(() => api.isMaximized());
@@ -2542,11 +2619,7 @@ function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActions
 function buildDefaultLayout(api: DockviewApi): void {
   const group = api.addGroup({ id: 'main', direction: 'within' });
   api.addPanel({ id: 'chat', component: 'chat', title: PANEL_TITLES.chat, position: { referenceGroup: group } });
-  api.addPanel({ id: 'mission', component: 'mission', title: '任务控制台', position: { referencePanel: 'chat', direction: 'right' } });
-  api.addPanel({ id: 'debug', component: 'debug', title: '调试控制台', position: { referencePanel: 'mission', direction: 'below' } });
-  api.addPanel({ id: 'todo', component: 'todo', title: '待办清单', position: { referencePanel: 'mission', direction: 'right' } });
-  api.addPanel({ id: 'review', component: 'review', title: '代码审查', position: { referencePanel: 'todo', direction: 'below' } });
-  api.addPanel({ id: 'handoff', component: 'handoff', title: '交接文档', position: { referencePanel: 'review', direction: 'below' } });
+  api.addPanel({ id: 'debug', component: 'debug', title: '调试控制台', position: { referencePanel: 'chat', direction: 'right' } });
 }
 
 function addBufferPanel(api: DockviewApi, id: string, kind: PanelKind): void {
@@ -2572,7 +2645,7 @@ function CommandBar({ onRun }: { onRun: (kind: PanelKind) => void }): ReactEleme
     if (kind) onRun(kind);
     setValue('');
   };
-  return <form className="command-bar" onSubmit={(event) => { event.preventDefault(); submit(); }}><span className="command-prompt">&gt;</span><input value={value} onChange={(event) => setValue(event.target.value)} placeholder="输入命令：MS / DBG / TODO / REV / HO" aria-label="命令输入" /></form>;
+  return <form className="command-bar" onSubmit={(event) => { event.preventDefault(); submit(); }}><span className="command-prompt">&gt;</span><input value={value} onChange={(event) => setValue(event.target.value)} placeholder="输入命令：DBG / SET / FILES" aria-label="命令输入" /></form>;
 }
 
 function App(): ReactElement {
@@ -2594,6 +2667,8 @@ function App(): ReactElement {
   const [screenDraft, setScreenDraft] = useState('');
   const hotEdgeSidebar = usePreferences((state) => state.values.hotEdgeSidebar);
   const [railOpen, setRailOpen] = useState(() => !usePreferences.getState().values.hotEdgeSidebar);
+  const [runtimeConnected, setRuntimeConnected] = useState(false);
+  useEffect(() => runtimeSocketFor(RUNTIME_WS_URL).onStatus(setRuntimeConnected), []);
   const railHideTimer = useRef<number | undefined>(undefined);
   const railPinned = useRef(false);
   useEffect(() => {
@@ -2785,7 +2860,7 @@ function App(): ReactElement {
     <AskUserModal />
     <UpdateBanner />
     <header className="topbar">
-      <div className="brand"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><span>HIERO</span></div>
+      <div className="brand"><img className="brand-mark" src="/favicon.svg" alt="" aria-hidden="true" /><span>HIERO</span></div>
       <nav className="screen-tabs" aria-label="工作区">
         {Object.keys(screens).map((name) => <span key={name} className={`screen-tab-wrap ${name === activeScreen ? 'active' : ''}`}>
           <button type="button" className={`screen-tab ${name === activeScreen ? 'active' : ''}`} onClick={() => switchScreen(name)}>{name}</button>
@@ -2793,7 +2868,7 @@ function App(): ReactElement {
         </span>)}
         <form className="screen-add" onSubmit={(event) => { event.preventDefault(); onCreateScreen(); }}><input value={screenDraft} onChange={(event) => setScreenDraft(event.target.value)} placeholder="新工作区" aria-label="新工作区名称" /></form>
       </nav>
-      <span className="topbar-meta"><button type="button" className="layout-reset" onClick={() => openBuffer('docs')}>文档</button><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className="live-pill"><b /> 在线</span></span>
+      <span className="topbar-meta"><button type="button" className="layout-reset" onClick={() => openBuffer('docs')}>文档</button><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className={`live-pill ${runtimeConnected ? 'online' : 'offline'}`} role="status" aria-live="polite"><b /> {runtimeConnected ? '在线' : '离线'}</span></span>
     </header>
     <div className="workspace-body">
       <aside className={`quick-rail ${railOpen ? 'open' : 'closed'}`} aria-label="快捷入口" onPointerEnter={keepRailOpen} onPointerLeave={scheduleHideRail}>

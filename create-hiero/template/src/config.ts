@@ -52,7 +52,7 @@ function parseParams(raw: unknown): ModelParams {
 export function parseConfigLayer(text: string): Partial<HieroConfig> {
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch {
     return {};
   }
