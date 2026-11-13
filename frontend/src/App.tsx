@@ -4,7 +4,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
 import type { ReactElement } from 'react';
-import { McpServersForm, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus } from './settings';
+import { McpServersForm, usePreferences, useSubagentPreferences, useWorkspacePreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus } from './settings';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { handleCodeCopy, renderMarkdown, renderPartialMarkdown, splitStreamingBlocks } from './markdown';
 import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
@@ -691,7 +691,8 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const { model, permission, workspace } = state.options;
       const subagent = useSubagentPreferences.getState().values;
       const contractFields = taskCard ?? undefined;
-      const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, subagent, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
+      const nonGitPolicy = useWorkspacePreferences.getState().nonGitPolicy;
+    const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, subagent, conversation_id: conversation.id, non_git_policy: nonGitPolicy, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },

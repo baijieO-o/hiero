@@ -70,6 +70,7 @@ import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
+import { ensureConversationWorktree, type NonGitPolicy } from './worktree.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
 import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder } from './deep-memory.js';
@@ -110,6 +111,10 @@ export interface RuntimeChatRequest {
   model?: string;
   permission?: string;
   workspace?: string;
+  /** Stable id of the conversation; each one gets its own git worktree when the workspace is a repo. */
+  conversation_id?: string;
+  /** Non-git workspace handling: fallback = work in place, init = git init then isolate, ask = work in place and let the UI prompt. */
+  non_git_policy?: 'fallback' | 'init' | 'ask';
   context_mode?: string;
   /** Sub-agent preferences chosen in the settings page; normalised by the backend before use. */
   subagent?: Partial<SubagentSettings>;
@@ -1055,10 +1060,24 @@ export class HieroRuntime {
     return true;
   }
 
+  /** Each conversation works in its own git worktree; falls back to the plain folder if isolation is not possible. */
+  private async resolveConversationWorkspace(request: RuntimeChatRequest): Promise<string> {
+    const root = resolveChatWorkspace(request.workspace);
+    const id = typeof request.conversation_id === 'string' ? request.conversation_id : '';
+    if (!id) return root;
+    const policy: NonGitPolicy = request.non_git_policy === 'init' || request.non_git_policy === 'ask' ? request.non_git_policy : 'fallback';
+    try {
+      return (await ensureConversationWorktree(root, id, policy)).path;
+    } catch (error) {
+      console.warn('[worktree] isolation failed, using workspace directly:', error instanceof Error ? error.message : error);
+      return root;
+    }
+  }
+
   private async runChat(request: RuntimeChatRequest, model: string, run: ChatRunBuffer, signal: AbortSignal): Promise<void> {
     const requestId = request.request_id;
     const emit = (event: RuntimeEvent) => this.sendChat(requestId, run, event);
-    const workspacePath = resolveChatWorkspace(request.workspace);
+    const workspacePath = await this.resolveConversationWorkspace(request);
     const task: TaskContract = {
       task_id: randomUUID(),
       workspace_path: workspacePath,

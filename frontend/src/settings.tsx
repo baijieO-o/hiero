@@ -144,6 +144,18 @@ export const useSubagentPreferences = create<SubagentState>()(persist((set) => (
   },
 }));
 
+export type NonGitPolicyValue = 'fallback' | 'init' | 'ask';
+
+interface WorkspacePreferences {
+  nonGitPolicy: NonGitPolicyValue;
+  setNonGitPolicy: (value: NonGitPolicyValue) => void;
+}
+
+export const useWorkspacePreferences = create<WorkspacePreferences>()(persist((set) => ({
+  nonGitPolicy: 'init',
+  setNonGitPolicy: (value) => set({ nonGitPolicy: value }),
+}), { name: 'hiero-workspace' }));
+
 export const TASK_MODEL_KIND_ORDER = ['chat', 'planning', 'execution', 'subagent', 'compaction'] as const;
 export type TaskModelKindId = (typeof TASK_MODEL_KIND_ORDER)[number];
 export const TASK_MODEL_KIND_TEXT: Record<TaskModelKindId, string> = {
