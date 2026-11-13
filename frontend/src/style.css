@@ -811,3 +811,18 @@ button, textarea, select { font: inherit; }
 .hot-plug-toggle input:checked + .hot-plug-track::after { transform: translateX(16px); background: #f2f2f5; }
 .hot-plug-toggle input:focus-visible + .hot-plug-track { outline: 2px solid var(--accent, #6d5efc); outline-offset: 2px; }
 .hot-plug-toggle input:disabled + .hot-plug-track { opacity: .5; }
+/* Diff review panel */
+.diff-panel .diff-empty { padding: 16px; color: var(--text-muted); font-size: 13px; }
+.diff-panel .diff-body { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; flex: 1; min-height: 0; }
+.diff-panel .diff-files { list-style: none; margin: 0; padding: 6px; overflow: auto; border-right: 1px solid var(--border); }
+.diff-panel .diff-files button { width: 100%; text-align: left; padding: 4px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; font-size: 12px; cursor: pointer; overflow-wrap: anywhere; }
+.diff-panel .diff-files button.active { background: var(--surface); color: var(--text-strong); }
+.diff-panel .diff-view { min-width: 0; display: flex; flex-direction: column; }
+.diff-panel .diff-title { padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-strong); overflow-wrap: anywhere; }
+.diff-panel .diff-add { color: var(--accent); }
+.diff-panel .diff-del { color: #ff8a8a; }
+.diff-panel .diff-lines { margin: 0; padding: 4px 0; overflow: auto; flex: 1; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; }
+.diff-panel .diff-line { display: flex; white-space: pre; padding: 0 10px; }
+.diff-panel .diff-line.diff-add { background: rgba(165, 236, 104, .12); }
+.diff-panel .diff-line.diff-del { background: rgba(255, 110, 110, .12); }
+.diff-panel .diff-mark { flex: 0 0 14px; color: var(--text-muted); user-select: none; }

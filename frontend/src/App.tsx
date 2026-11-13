@@ -13,6 +13,7 @@ import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
 import { batchRisk } from './approval-model';
 import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
 import { DocsCenter } from './docs-center';
+import { DiffPanel } from './diff-panel';
 import { PanelHeader } from './panel-header';
 import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog } from './model-catalog-store';
 import { RUNTIME_WS_URL } from './runtime-url';
@@ -31,7 +32,7 @@ import { shortcutFromEvent, type ShortcutAction } from './shortcut-model';
 
 type RuntimeMessage = RuntimeSocketMessage;
 
-type PanelKind = 'chat' | 'debug' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
+type PanelKind = 'chat' | 'debug' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'diff' | 'blank';
 
 const PANEL_TITLES: Record<PanelKind, string> = {
   chat: '对话',
@@ -44,6 +45,7 @@ const PANEL_TITLES: Record<PanelKind, string> = {
   skills: '技能管理',
   memory: '记忆',
   docs: '文档',
+  diff: '变更审阅',
   blank: '空缓存窗口',
 };
 
@@ -151,6 +153,7 @@ const COMMAND_ALIASES: Record<string, PanelKind> = {
   TERM: 'terminal',
   FILES: 'files',
   FM: 'files',
+  DIFF: 'diff',
 };
 
 function resolveCommand(input: string): PanelKind | null {
@@ -2575,7 +2578,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
 }
 
 const LazySchedulesPanel = lazy(() => import('./schedules-panel').then((module) => ({ default: module.SchedulesPanel })));
-const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <Suspense fallback={null}><LazySchedulesPanel wsUrl={RUNTIME_WS_URL} /></Suspense>, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
+const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <Suspense fallback={null}><LazySchedulesPanel wsUrl={RUNTIME_WS_URL} /></Suspense>, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, diff: DiffPanel, blank: BlankBuffer };
 
 function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
   const [maximized, setMaximized] = useState(() => api.isMaximized());

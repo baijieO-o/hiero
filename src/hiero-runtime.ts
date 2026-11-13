@@ -1283,6 +1283,7 @@ export class HieroRuntime {
       if (checkpoint) this.stateStore.resumeTask(task.task_id);
       else this.stateStore.startTask(task.task_id, task.workspace_path, goal);
       const before = await snapshotTextFiles(task.workspace_path);
+      if (!checkpoint) this.runtime.broadcast({ type: 'FILE_DIFF_RESET', payload: { task_id: task.task_id } });
       const workflow = this.createWorkflow(task.workspace_path, {
         onCheckpoint: (messages, evidence) => this.stateStore.saveCheckpoint(task.task_id, messages, evidence),
         ...(checkpoint ? { resume: checkpoint } : {}),
