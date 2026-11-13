@@ -6,6 +6,7 @@ import type { ChatTraceEvent } from './chat-trace.js';
 import type { StoredChatTrace } from './trace-store.js';
 import type { TaskRecord } from './state-store.js';
 import type { ContextUsageBreakdown } from './context-usage.js';
+import type { UsageStats } from './usage-stats.js';
 import type { McpServerEntry } from './mcp-config.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { isAllowedOrigin, isLoopbackAddress } from './ws-guard.js';
@@ -34,6 +35,7 @@ export type RuntimeEvent =
   | { type: 'CHAT_CANCELLED'; payload: { request_id: string } }
   | { type: 'CHAT_UNKNOWN'; payload: { request_id: string } }
   | { type: 'CHAT_USAGE'; payload: { request_id: string; usage: ContextUsageBreakdown } }
+  | { type: 'USAGE_STATS'; payload: { request_id: string } & UsageStats }
   | { type: 'MODEL_LIST'; payload: { request_id: string; models: string[]; error?: string } }
   | { type: 'CHAT_COMPACTED'; payload: { request_id: string; summary: string; before_tokens: number; after_tokens: number; kept_messages: number } | { request_id: string; ok: false; message: string } }
   | { type: 'SETTINGS'; payload: { endpoint: string; model: string; token_count: number } }

@@ -828,3 +828,18 @@ button, textarea, select { font: inherit; }
 .diff-panel .diff-mark { flex: 0 0 14px; color: var(--text-muted); user-select: none; }
 .diff-panel .diff-revert { margin-left: 12px; }
 .diff-panel .diff-notice { margin: 6px 0; color: var(--text-muted); font-size: 12px; }
+
+/* Cost and usage panel */
+.usage-panel { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; overflow: auto; height: 100%; box-sizing: border-box; color: var(--text); }
+.usage-panel h3 { margin: 6px 0 0; font-size: 13px; color: var(--text-muted); font-weight: 600; }
+.usage-range { display: flex; gap: 6px; }
+.usage-range button { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px; }
+.usage-range button.is-active { color: var(--text); border-color: var(--accent, var(--text-muted)); }
+.usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.usage-summary div { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.usage-summary span { font-size: 12px; color: var(--text-muted); }
+.usage-summary strong { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.usage-table th, .usage-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; }
+.usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+.usage-empty, .usage-note { margin: 0; font-size: 12px; color: var(--text-muted); }

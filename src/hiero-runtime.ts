@@ -64,6 +64,7 @@ import { LOAD_SKILL_TOOL_DEFINITION, registerLoadSkillTool } from './skill-tool.
 import { CodeIndex, createSymbolSearchTool } from './code-index.js';
 import { paramsForModel, ConfigWatcher } from './config.js';
 import { Telemetry } from './telemetry.js';
+import { readUsageStats } from './usage-stats.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
@@ -410,6 +411,12 @@ function isCompletedChatEvent(type: string): boolean {
   return type === 'CHAT_REPLY' || type === 'CHAT_ERROR' || type === 'CHAT_CANCELLED';
 }
 
+interface UsageStatsRequest { type: 'usage_stats'; request_id: string }
+
+function isUsageStatsRequest(message: unknown): message is UsageStatsRequest {
+  return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'usage_stats' && typeof (message as { request_id?: unknown }).request_id === 'string';
+}
+
 interface ChatUsageRequest { type: 'chat_usage'; request_id: string; messages: RuntimeChatRequest['messages']; workspace?: string; subagent?: Partial<SubagentSettings>; compacted_summary?: string }
 
 function isChatUsageRequest(message: unknown): message is ChatUsageRequest {
@@ -618,6 +625,7 @@ export class HieroRuntime {
       }
       else if (isChatAttachRequest(message)) this.attachChat(message.request_id, client);
       else if (isChatUsageRequest(message)) await this.handleChatUsage(message, client);
+      else if (isUsageStatsRequest(message)) this.runtime.send({ type: 'USAGE_STATS', payload: { request_id: message.request_id, ...readUsageStats(this.configWatcher.current().logging.file) } }, client);
       else if (isChatCompactRequest(message)) await this.handleChatCompact(message, client);
       else if (isTaskHistoryRequest(message)) this.runtime.send({ type: 'TASK_HISTORY', payload: { tasks: this.stateStore.listTasks() } }, client);
       else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: resolveChatWorkspace(message.workspace), traces: await listChatTraces(resolveChatWorkspace(message.workspace)) } }, client);
