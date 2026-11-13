@@ -54,7 +54,7 @@ if (!endpoint || tokens.length === 0) {
     const written = await readFile(join(workspacePath, 'hello.txt'), 'utf8');
     if (written !== 'Hello Hiero') throw new Error(`Unexpected hello.txt contents: ${JSON.stringify(written)}`);
     const diffs = await diffSnapshots(before, await snapshotTextFiles(workspacePath));
-    for (const diff of diffs) server.broadcast({ type: 'FILE_DIFF', payload: diff });
+    for (const diff of diffs) server.broadcast({ type: 'FILE_DIFF', payload: { ...diff, workspace: workspacePath } });
     server.completeState(AgentState.Verify);
     if (!diffs.some((diff) => diff.path === 'hello.txt')) throw new Error('hello.txt exists, but no FILE_DIFF was generated.');
     console.log('Verified hello.txt contains exactly: Hello Hiero');

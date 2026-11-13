@@ -469,6 +469,12 @@ function isWriteRollbackRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'write_rollback';
 }
 
+function isFileRevertRequest(message: unknown): message is { type: 'file_revert'; workspace: string; path: string } {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as { type?: unknown; workspace?: unknown; path?: unknown };
+  return candidate.type === 'file_revert' && typeof candidate.workspace === 'string' && typeof candidate.path === 'string';
+}
+
 export type ScheduleRequest =
   | { type: 'SCHEDULE'; action: 'list' }
   | { type: 'SCHEDULE'; action: 'create'; payload: { name?: unknown; goal?: unknown; interval_minutes?: unknown; run_now?: unknown } }
@@ -601,6 +607,7 @@ export class HieroRuntime {
       if (isApprovalResponse(message)) this.approvals.respond(message.payload.approval_id, message.payload.approved);
       else if (isAskUserResponse(message)) this.askUsers.respond(message.payload.ask_id, message.payload.status === 'submitted' ? { status: 'submitted', values: message.payload.values ?? {} } : { status: 'declined' });
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
+      else if (isFileRevertRequest(message)) await this.handleFileRevert(message, client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) {
         if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
@@ -642,6 +649,20 @@ export class HieroRuntime {
       this.runtime.send({ type: 'ROLLBACK_RESULT', payload: { ok: true, restored: result.restored, skipped: result.skipped, warning } }, client);
     } catch (cause) {
       this.runtime.send({ type: 'ROLLBACK_RESULT', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
+    }
+  }
+
+  /** Reverts one file the agent changed in this task. Same human-edit check as the full rollback. */
+  private async handleFileRevert(request: { workspace: string; path: string }, client: WebSocket): Promise<void> {
+    const reply = (payload: { ok: true; status: 'restored' | 'skipped' } | { ok: false; message: string }) =>
+      this.runtime.send({ type: 'FILE_REVERT_RESULT', payload: { path: request.path, ...payload } }, client);
+    try {
+      const target = resolve(resolveChatWorkspace(request.workspace), request.path);
+      const outcome = await this.writeSnapshots.revertFile(target);
+      if (outcome === 'unknown') reply({ ok: false, message: '该文件没有可还原的 agent 写入记录。' });
+      else reply({ ok: true, status: outcome });
+    } catch (cause) {
+      reply({ ok: false, message: cause instanceof Error ? cause.message : String(cause) });
     }
   }
 
@@ -1295,7 +1316,7 @@ export class HieroRuntime {
         return { task_id: task.task_id, status: 'completed', summary: '已转入交接，无正文汇报' };
       }
       const after = await snapshotTextFiles(task.workspace_path);
-      for (const diff of await diffSnapshots(before, after)) this.runtime.broadcast({ type: 'FILE_DIFF', payload: diff });
+      for (const diff of await diffSnapshots(before, after)) this.runtime.broadcast({ type: 'FILE_DIFF', payload: { ...diff, workspace: task.workspace_path } });
       this.runtime.completeState(AgentState.Verify);
       this.stateStore.finishTask(task.task_id, 'completed');
       return { task_id: task.task_id, status: 'completed', summary: outcome.response.content ?? '' };

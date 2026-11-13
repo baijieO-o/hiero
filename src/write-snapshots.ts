@@ -63,6 +63,21 @@ export class WriteSnapshotStore {
     writeFileSync(this.file, JSON.stringify(this.snapshots), 'utf8');
   }
 
+  /** Reverts one file to its state before the agent's first write in this task. Returns false when a human edited it since. */
+  public async revertFile(path: string): Promise<'restored' | 'skipped' | 'unknown'> {
+    const matching = this.snapshots.filter((snapshot) => snapshot.path === path);
+    const first = matching[0];
+    const last = matching.at(-1);
+    if (!first || !last) return 'unknown';
+    const current = await readOrNull(path);
+    if (hashContent(current) !== last.writtenHash) return 'skipped';
+    if (first.previous === null) await rm(path, { force: true });
+    else await writeFile(path, first.previous, 'utf8');
+    this.snapshots = this.snapshots.filter((snapshot) => snapshot.path !== path);
+    this.persist();
+    return 'restored';
+  }
+
   /** Restores files in reverse write order. Files changed by a human since the agent wrote them are skipped. */
   public async rollback(): Promise<RollbackResult> {
     const result: RollbackResult = { restored: [], skipped: [] };

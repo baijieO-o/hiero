@@ -14,8 +14,9 @@ import type { ScheduledTask } from './scheduled-tasks.js';
 export type RuntimeEvent =
   | { type: 'SYSTEM_STATS'; payload: SystemStats & { timestamp: string } }
   | { type: 'STATE_CHANGE'; payload: { node: AgentState; status: 'running' | 'completed' } }
-  | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string } }
+  | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string; workspace: string } }
   | { type: 'FILE_DIFF_RESET'; payload: { task_id: string } }
+  | { type: 'FILE_REVERT_RESULT'; payload: { path: string; ok: true; status: 'restored' | 'skipped' } | { path: string; ok: false; message: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
   | { type: 'VERIFY_RESULT'; payload: VerificationResult }
   | { type: 'DAG_TASK'; payload: { task_id: string; goal: string; read_only: boolean; status: 'running' | 'completed' | 'failed'; error?: string } }

@@ -826,3 +826,5 @@ button, textarea, select { font: inherit; }
 .diff-panel .diff-line.diff-add { background: rgba(165, 236, 104, .12); }
 .diff-panel .diff-line.diff-del { background: rgba(255, 110, 110, .12); }
 .diff-panel .diff-mark { flex: 0 0 14px; color: var(--text-muted); user-select: none; }
+.diff-panel .diff-revert { margin-left: 12px; }
+.diff-panel .diff-notice { margin: 6px 0; color: var(--text-muted); font-size: 12px; }

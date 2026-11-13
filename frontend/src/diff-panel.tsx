@@ -4,7 +4,25 @@ import { runtimeSocketFor } from './runtime-socket';
 import { diffLines, diffStats } from './diff-model';
 import { PanelHeader } from './panel-header';
 
-interface FileDiffPayload { path: string; original: string; modified: string }
+interface FileDiffPayload { path: string; original: string; modified: string; workspace: string }
+
+/** Reverts one file through the backend. Files a human edited since are kept and reported back. */
+function revertFile(file: FileDiffPayload): Promise<string> {
+  return new Promise((resolve) => {
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    const finish = (text: string) => { resolve(text); socket.close(); };
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'file_revert', workspace: file.workspace, path: file.path }));
+    socket.onerror = () => finish('还原失败：无法连接后端。');
+    socket.onmessage = (event) => {
+      let message: { type?: string; payload?: { path?: string; ok?: boolean; status?: string; message?: string } };
+      try { message = JSON.parse(String(event.data)); } catch { return; }
+      if (message.type !== 'FILE_REVERT_RESULT' || message.payload?.path !== file.path) return;
+      if (!message.payload.ok) finish(`还原失败：${message.payload.message ?? '未知错误'}`);
+      else if (message.payload.status === 'skipped') finish('已保留：该文件在 agent 写入后被人工修改过。');
+      else finish('已还原。');
+    };
+  });
+}
 
 /** Keeps the earliest original and latest modified text per path, so repeated edits in one task read as one change. */
 function mergeDiff(current: FileDiffPayload[], next: FileDiffPayload): FileDiffPayload[] {
@@ -16,6 +34,8 @@ function mergeDiff(current: FileDiffPayload[], next: FileDiffPayload): FileDiffP
 export function DiffPanel(): ReactElement {
   const [files, setFiles] = useState<FileDiffPayload[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     const socket = runtimeSocketFor(RUNTIME_WS_URL);
@@ -35,6 +55,16 @@ export function DiffPanel(): ReactElement {
   const lines = useMemo(() => (active ? diffLines(active.original, active.modified) : []), [active]);
   const stats = diffStats(lines);
 
+  const revert = async () => {
+    if (!active) return;
+    setBusy(true);
+    setNotice(null);
+    const text = await revertFile(active);
+    setBusy(false);
+    setNotice(text);
+    if (text === '已还原。') setFiles((current) => current.filter((file) => file.path !== active.path));
+  };
+
   return (
     <section className="panel-content diff-panel">
       <PanelHeader eyebrow="变更" title="变更审阅" />
@@ -53,7 +83,11 @@ export function DiffPanel(): ReactElement {
           </ul>
           {active ? (
             <div className="diff-view">
-              <div className="diff-title">{active.path} <span className="diff-add">+{stats.added}</span> <span className="diff-del">-{stats.removed}</span></div>
+              <div className="diff-title">
+                {active.path} <span className="diff-add">+{stats.added}</span> <span className="diff-del">-{stats.removed}</span>
+                <button type="button" className="diff-revert" onClick={revert} disabled={busy}>{busy ? '还原中…' : '还原此文件'}</button>
+              </div>
+              {notice ? <p className="diff-notice" role="status">{notice}</p> : null}
               <pre className="diff-lines">
                 {lines.map((line, index) => (
                   <div key={index} className={`diff-line diff-${line.kind}`}>

@@ -33,6 +33,42 @@ test('rollback restores overwritten files and removes newly created ones', async
   }
 });
 
+test('revertFile restores one file and leaves the rest of the task untouched', async () => {
+  const root = await workspace();
+  try {
+    const snapshots = new WriteSnapshotStore();
+    const gateway = new ToolGateway();
+    gateway.register(createWriteFileTool(root, snapshots));
+    await writeFile(join(root, 'a.txt'), 'original', 'utf8');
+    await gateway.execute('write_file', { path: 'a.txt', content: 'changed' }, 'intent-1', 'auto');
+    await gateway.execute('write_file', { path: 'b.txt', content: 'fresh' }, 'intent-1', 'auto');
+
+    assert.equal(await snapshots.revertFile(join(root, 'a.txt')), 'restored');
+
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'original');
+    assert.equal(await readFile(join(root, 'b.txt'), 'utf8'), 'fresh');
+    assert.equal(await snapshots.revertFile(join(root, 'missing.txt')), 'unknown');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('revertFile keeps a file a human edited after the agent wrote it', async () => {
+  const root = await workspace();
+  try {
+    const snapshots = new WriteSnapshotStore();
+    const gateway = new ToolGateway();
+    gateway.register(createWriteFileTool(root, snapshots));
+    await gateway.execute('write_file', { path: 'a.txt', content: 'agent' }, 'intent-1', 'auto');
+    await writeFile(join(root, 'a.txt'), 'human', 'utf8');
+
+    assert.equal(await snapshots.revertFile(join(root, 'a.txt')), 'skipped');
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'human');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('rollback skips files a human edited after the agent wrote them', async () => {
   const root = await workspace();
   try {
