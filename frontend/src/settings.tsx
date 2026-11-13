@@ -351,7 +351,10 @@ function ThemePaletteControl({ palette, onChange }: { palette: ThemePalette; onC
 
 function PreferenceControl({ field, value, onChange }: { field: PreferenceField; value: PreferenceValues[keyof PreferenceValues]; onChange: (value: PreferenceValues[keyof PreferenceValues]) => void }): ReactElement {
   if (field.type === 'boolean') {
-    return <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} aria-label={field.title} />;
+    return <label className="settings-switch">
+      <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} aria-label={field.title} />
+      <span className="settings-switch-track" aria-hidden="true" />
+    </label>;
   }
   if (field.type === 'enum') {
     return <select value={String(value)} onChange={(event) => onChange(event.target.value)} aria-label={field.title}>
@@ -760,7 +763,10 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList
           <h3>子代理</h3>
           <label className="settings-row">
             <span><strong>启用只读子代理</strong><small>允许模型把调研任务交给只读子代理（只能读文件、列目录、查记忆）。关闭后模型不再看到 delegate_read 工具。</small></span>
-            <input type="checkbox" checked={subagent.enabled} onChange={(event) => updateSubagent('enabled', event.target.checked)} aria-label="启用只读子代理" />
+            <label className="settings-switch">
+              <input type="checkbox" checked={subagent.enabled} onChange={(event) => updateSubagent('enabled', event.target.checked)} aria-label="启用只读子代理" />
+              <span className="settings-switch-track" aria-hidden="true" />
+            </label>
           </label>
           <label className="settings-row">
             <span><strong>最大轮数</strong><small>子代理最多调用模型几轮（1–10）。越大越能深入调研，耗时和成本也越高。</small></span>

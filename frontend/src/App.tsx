@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewHeaderActionsProps } from 'dockview-react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
@@ -1355,19 +1355,26 @@ function ChatPanel(): ReactElement {
             <button className="chat-icon-button" type="button" aria-label="多选" title="多选" onClick={() => setSelectMode(true)}><SelectIcon /></button>
           </div>}
         <ul className="chat-history">
-          {sortedConversations.map((conv) => <li key={conv.id} className={[conv.pinnedAt !== undefined ? 'chat-history-row pinned' : 'chat-history-row', selectMode && selectedIds.has(conv.id) ? 'selected' : ''].join(' ').trim()} onContextMenu={(event) => { if (!selectMode) openMenu(event, conv.id); }}>
-            {selectMode
-              ? <label className="chat-history-select">
-                <input type="checkbox" checked={selectedIds.has(conv.id)} disabled={pending && conv.id === active?.id} onChange={() => toggleSelected(conv.id)} />
-                <span className="chat-history-item-text" title={conv.title}>{conv.pinnedAt !== undefined && <span aria-label="已置顶">📌 </span>}{conv.title}</span>
-              </label>
-              : renameInput(conv.id) ?? <button type="button" className={conv.id === active?.id ? 'chat-history-item active' : 'chat-history-item'} onClick={() => selectConversation(conv.id)}>{conv.pinnedAt !== undefined && <span aria-label="已置顶">📌 </span>}{conv.title}</button>}
-            {!selectMode && <div className="chat-history-actions">
-              <button type="button" className="chat-icon-button" title={conv.pinnedAt !== undefined ? '取消置顶' : '置顶'} aria-label={conv.pinnedAt !== undefined ? '取消置顶' : '置顶'} onClick={() => togglePin(conv.id)}>📌</button>
-              <button type="button" className="chat-icon-button" title="重命名" aria-label="重命名" onClick={() => rename(conv.id)} disabled={pending}><PencilIcon /></button>
-              <button type="button" className="chat-icon-button" title="删除" aria-label="删除" onClick={() => remove(conv.id)} disabled={pending}><TrashIcon /></button>
-            </div>}
-          </li>)}
+          {sortedConversations.filter((conv) => conv.pinnedAt !== undefined).length > 0 && <li className="chat-history-group-label" aria-hidden="true">已置顶</li>}
+          {sortedConversations.map((conv, index) => {
+            const pinned = conv.pinnedAt !== undefined;
+            const firstUnpinned = !pinned && (index === 0 || sortedConversations[index - 1].pinnedAt !== undefined) && sortedConversations.some((item) => item.pinnedAt !== undefined);
+            return <Fragment key={conv.id}>
+              {firstUnpinned && <li className="chat-history-group-label" aria-hidden="true">其他对话</li>}
+              <li className={[pinned ? 'chat-history-row pinned' : 'chat-history-row', selectMode && selectedIds.has(conv.id) ? 'selected' : ''].join(' ').trim()} onContextMenu={(event) => { if (!selectMode) openMenu(event, conv.id); }}>
+                {selectMode
+                  ? <label className="chat-history-select">
+                    <input type="checkbox" checked={selectedIds.has(conv.id)} disabled={pending && conv.id === active?.id} onChange={() => toggleSelected(conv.id)} />
+                    <span className="chat-history-item-text" title={conv.title}>{conv.title}</span>
+                  </label>
+                  : renameInput(conv.id) ?? <button type="button" className={conv.id === active?.id ? 'chat-history-item active' : 'chat-history-item'} title={conv.title} onClick={() => selectConversation(conv.id)}>{conv.title}</button>}
+                {!selectMode && editing?.id !== conv.id && <div className="chat-history-actions">
+                  <button type="button" className="chat-icon-button" title="重命名" aria-label="重命名" onClick={() => rename(conv.id)} disabled={pending}><PencilIcon /></button>
+                  <button type="button" className="chat-icon-button" title="删除" aria-label="删除" onClick={() => remove(conv.id)} disabled={pending}><TrashIcon /></button>
+                </div>}
+              </li>
+            </Fragment>;
+          })}
         </ul>
         {selectMode && <div className="chat-batch-bar">
           <button type="button" className="chat-batch-action" disabled={selectedIds.size === 0} onClick={() => selectedIds.forEach((id) => togglePin(id))}><PinIcon /><span>置顶</span></button>
@@ -2790,11 +2797,7 @@ function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActions
 function buildDefaultLayout(api: DockviewApi): void {
   const group = api.addGroup({ id: 'main', direction: 'within' });
   api.addPanel({ id: 'chat', component: 'chat', title: PANEL_TITLES.chat, position: { referenceGroup: group } });
-  api.addPanel({ id: 'mission', component: 'mission', title: '任务控制台', position: { referencePanel: 'chat', direction: 'right' } });
-  api.addPanel({ id: 'debug', component: 'debug', title: '调试控制台', position: { referencePanel: 'mission', direction: 'below' } });
-  api.addPanel({ id: 'todo', component: 'todo', title: '待办清单', position: { referencePanel: 'mission', direction: 'right' } });
-  api.addPanel({ id: 'review', component: 'review', title: '代码审查', position: { referencePanel: 'todo', direction: 'below' } });
-  api.addPanel({ id: 'handoff', component: 'handoff', title: '交接文档', position: { referencePanel: 'review', direction: 'below' } });
+  api.addPanel({ id: 'debug', component: 'debug', title: '调试控制台', position: { referencePanel: 'chat', direction: 'right' } });
 }
 
 function addBufferPanel(api: DockviewApi, id: string, kind: PanelKind): void {

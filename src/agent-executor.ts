@@ -29,11 +29,12 @@ export class HandoffRequiredError extends Error {
 function estimateTokenCount(text: string): number { return Math.ceil(text.length / 4); }
 const MAX_REPEATED_CALLS = 3;
 /** Cap on one tool result sent back to the model. The full record stays in evidence and checkpoints. */
-const MAX_TOOL_RESULT_CHARS = 8_000;
+const MAX_TOOL_RESULT_CHARS = 16_000;
 
 /** Keeps the head and tail of an oversized tool result so the model sees both the start and the final status. */
 function clipToolResult(serialized: string): string {
-  if (serialized.length <= MAX_TOOL_RESULT_CHARS) return serialized;
+  // HIERO_TOOL_RESULT_CAP=0 disables clipping; used by the eval harness to compare with and without the cap.
+  if (process.env.HIERO_TOOL_RESULT_CAP === '0' || serialized.length <= MAX_TOOL_RESULT_CHARS) return serialized;
   const head = Math.ceil(MAX_TOOL_RESULT_CHARS * 0.7);
   const tail = MAX_TOOL_RESULT_CHARS - head;
   return `${serialized.slice(0, head)}\n…[${serialized.length - MAX_TOOL_RESULT_CHARS} chars omitted]…\n${serialized.slice(-tail)}`;
@@ -101,7 +102,7 @@ export class AgentExecutor {
       this.assertWithinContextBudget(task, messages, goal, tools);
       const response = await this.modelGateway.complete(task, { prompt: goal, messages, tools });
       if (!response.tool_calls || response.tool_calls.length === 0) return { response, evidence, messages };
-      messages.push({ role: 'assistant', content: response.content });
+      messages.push({ role: 'assistant', content: response.content, tool_calls: response.tool_calls });
       for (const call of response.tool_calls) {
         let args: unknown;
         try { args = JSON.parse(call.function.arguments) as unknown; } catch { throw error('MOD-004', 'blocker', `Unable to parse arguments for tool '${call.function.name}'.`, 'Return valid JSON in the function call arguments.'); }
