@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, lazy, Suspense, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewHeaderActionsProps } from 'dockview-react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
@@ -9,15 +9,11 @@ import { SchedulesPanel } from './schedules-panel';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { handleCodeCopy, renderMarkdown, renderPartialMarkdown, splitStreamingBlocks } from './markdown';
 import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
-import { PermissionModePicker, isPermissionLabel, readStoredPermission, storePermission, toPermissionMode, type PermissionLabel } from './permission-mode';
-import { TaskCard } from './task-card';
+import { PermissionModePicker, isPermissionLabel, readStoredPermission } from './permission-mode';
 import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
 import { batchRisk } from './approval-model';
 import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
 import { DocsCenter } from './docs-center';
-import { clarifyComplete, clarifyQuestions, type ClarifyAnswers } from './clarify-model';
-import { ClarifyWizard } from './clarify-wizard';
-import { DEFAULT_BUDGET, toContractFields, validateTaskCard, type TaskCardBudget } from './task-card-model';
 import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog, storeModelCatalog } from './model-catalog-store';
 import { RUNTIME_WS_URL } from './runtime-url';
 import { SystemStatus } from './system-status';
@@ -29,30 +25,14 @@ import { FileRefChip, FilePreviewDialog, type DroppedFileRef } from './file-ref'
 import { compactionBoundary, insertDivider, sendableMessages } from './compaction';
 import { shortcutFromEvent, type ShortcutAction } from './shortcut-model';
 
-type TodoStatus = 'done' | 'active' | 'pending';
 
 type RuntimeMessage = RuntimeSocketMessage;
 
-const TODO_ITEMS = ['定义任务契约', '运行执行网关', '验证工具证据', '准备交接文档'];
-
-/** Read-only panels subscribe to every broadcast through one shared, reconnecting socket. */
-function connectRuntime(onMessage: (message: RuntimeMessage) => void): () => void {
-  const socket = runtimeSocketFor(RUNTIME_WS_URL);
-  const unsubscribers = BROADCAST_TYPES.map((type) => socket.subscribe(type, onMessage));
-  return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
-}
-
-const BROADCAST_TYPES = ['SNAPSHOT', 'STATE_CHANGE', 'VERIFY_RESULT', 'REWIND_RESULT', 'FILE_DIFF', 'HANDOFF_TRIGGERED'];
-
-type PanelKind = 'chat' | 'mission' | 'debug' | 'todo' | 'review' | 'handoff' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
+type PanelKind = 'chat' | 'debug' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'blank';
 
 const PANEL_TITLES: Record<PanelKind, string> = {
   chat: '对话',
-  mission: '任务控制台',
   debug: '调试控制台',
-  todo: '待办清单',
-  review: '代码审查',
-  handoff: '交接文档',
   settings: '设置',
   schedules: '定时任务',
   browser: '浏览器',
@@ -66,7 +46,7 @@ const PANEL_TITLES: Record<PanelKind, string> = {
 
 const PANEL_KINDS = Object.keys(PANEL_TITLES).filter((kind) => kind !== 'blank') as PanelKind[];
 
-const HIDDEN_RAIL_KINDS: PanelKind[] = ['mission', 'todo', 'review', 'handoff', 'docs'];
+const HIDDEN_RAIL_KINDS: PanelKind[] = ['docs'];
 const RAIL_KINDS = PANEL_KINDS.filter((kind) => !HIDDEN_RAIL_KINDS.includes(kind));
 
 const DEFAULT_SCREEN = '默认';
@@ -157,15 +137,8 @@ function activeWorkspaceRoot(): string | undefined {
 
 const COMMAND_ALIASES: Record<string, PanelKind> = {
   CHAT: 'chat',
-  MS: 'mission',
-  TASK: 'mission',
   DBG: 'debug',
   DEBUG: 'debug',
-  TODO: 'todo',
-  REV: 'review',
-  DIFF: 'review',
-  HO: 'handoff',
-  HANDOFF: 'handoff',
   SET: 'settings',
   SETTINGS: 'settings',
   BROWSER: 'browser',
@@ -1552,54 +1525,6 @@ function ChatOptionSelect({ label, value, options, disabled, onChange }: { label
   </label>;
 }
 
-function MissionControl(): ReactElement {
-  const [goal, setGoal] = useState('');
-  const [model, setModel] = useState(readStoredDefaultModel);
-  const [permission, setPermissionState] = useState<PermissionLabel>(readStoredPermission);
-  const setPermission = (value: PermissionLabel) => {
-    storePermission(value);
-    setPermissionState(value);
-  };
-  const workspace = useChatStore((state) => state.options.workspace);
-  const setWorkspace = (value: string) => useChatStore.getState().setOption('workspace', value);
-  const [contextMode, setContextMode] = useState('临时会话');
-  const [started, setStarted] = useState(false);
-  const [criteria, setCriteria] = useState('');
-  const [budget, setBudget] = useState<TaskCardBudget>({ ...DEFAULT_BUDGET });
-  const [confirmed, setConfirmed] = useState(false);
-  const [clarifyAnswers, setClarifyAnswers] = useState<ClarifyAnswers>({ allowWrites: null });
-  const draft = { goal, criteria, budget };
-  const validation = validateTaskCard(draft);
-  const questions = clarifyQuestions({ goal, criteria }, workspace);
-  const clarified = clarifyComplete(questions, criteria, clarifyAnswers, workspace);
-  const effectivePermission: PermissionLabel = clarifyAnswers.allowWrites === false ? '严格' : permission;
-  const changeGoal = (value: string) => {
-    setGoal(value);
-    setConfirmed(false);
-  };
-  const changePermission = (value: PermissionLabel) => {
-    setPermission(value);
-    setConfirmed(false);
-  };
-  const launch = () => {
-    if (validation || !confirmed || !clarified) return;
-    const nextGoal = goal.trim();
-    setStarted(true);
-    setConfirmed(false);
-    const socket = new WebSocket(RUNTIME_WS_URL);
-    socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ goal: nextGoal, task: { workspace_path: workspace, model_config: { preferred_model: model, fallback_chain: [] }, permission_mode: toPermissionMode(effectivePermission), context_mode: contextMode === '持久化 Markdown' ? 'persistent_md' : 'ephemeral', ...toContractFields(draft) } }));
-      window.setTimeout(() => socket.close(), 500);
-    });
-  };
-  return <section className="panel-content"><PanelHeader eyebrow="任务控制台" title="开始一个任务" /><label className="field-label" htmlFor="goal">你希望 Hiero 做什么？</label><textarea id="goal" value={goal} onChange={(event) => changeGoal(event.target.value)} placeholder="描述你想要达成的结果……" /><div className="field-grid"><Select label="模型" value={model} onChange={setModel} options={chatModelOptions(readStoredModelCatalog(), model)} /><div className="field-wide"><span className="field-label">权限模式（启动前确认）</span><PermissionModePicker value={permission} onChange={changePermission} /></div><label className="chat-option chat-option-wide"><span>工作区</span><input value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="绝对路径" /></label><Select label="上下文模式" value={contextMode} onChange={setContextMode} options={['临时会话', '持久化 Markdown']} /></div><ClarifyWizard questions={questions} answers={clarifyAnswers} criteria={criteria} onCriteriaChange={setCriteria} onAnswersChange={setClarifyAnswers} complete={clarified} /><TaskCard summary={{ goal: goal.trim(), workspace, model, permissionLabel: effectivePermission, contextMode }} criteria={criteria} budget={budget} onCriteriaChange={setCriteria} onBudgetChange={setBudget} confirmed={confirmed} onConfirmedChange={setConfirmed} disabled={started} /><button className="primary-button" type="button" onClick={launch} disabled={started || !confirmed || !clarified || validation !== null}>{started ? '任务已发送' : '启动任务'} <span>→</span></button>{validation && <p className="task-card-hint">{validation}</p>}<div style={{ marginTop: 12 }}><RollbackButton /></div></section>;
-}
-
-
-function Select({ label, options, value, onChange }: { label: string; options: string[]; value: string; onChange: (value: string) => void }): ReactElement {
-  return <label className="select-wrap"><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)}>{options.map((option) => <option key={option}>{option}</option>)}</select></label>;
-}
-
 function PanelHeader({ eyebrow, title }: { eyebrow: string; title: string }): ReactElement {
   return <header className="panel-header"><span className="eyebrow">{eyebrow}</span><h2>{title}</h2></header>;
 }
@@ -1643,6 +1568,7 @@ function DebugConsole(): ReactElement {
     <div className="devtools-toolbar">
       <button type="button" onClick={clearConsoleEntries} aria-label="清空控制台" title="清空控制台">⊘</button>
       <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选" aria-label="筛选日志" />
+      <RollbackButton />
       {tab === 'console' && <span className="devtools-counts"><span className="count-error">✕ {counts.error}</span><span className="count-warn">⚠ {counts.warn}</span></span>}
     </div>
     <div className="devtools-output" ref={outputRef} aria-live="polite">
@@ -1658,45 +1584,6 @@ function DebugConsole(): ReactElement {
   </section>;
 }
 
-function TodoList(): ReactElement {
-  const [currentNode, setCurrentNode] = useState('Plan');
-  const [verify, setVerify] = useState<{ verified: boolean; checks: { criterion: string; status: string; reason?: string }[] } | null>(null);
-  const [rewind, setRewind] = useState<{ restored: string[]; skipped: string[] } | null>(null);
-  useEffect(() => connectRuntime((message) => {
-    if (message.type === 'VERIFY_RESULT') { setVerify(message.payload as unknown as typeof verify); return; }
-    if (message.type === 'REWIND_RESULT') { setRewind(message.payload as unknown as typeof rewind); return; }
-    if (message.type !== 'STATE_CHANGE' && message.type !== 'SNAPSHOT') return;
-    const node = typeof message.payload?.node === 'string' ? message.payload.node : undefined;
-    const status = typeof message.payload?.status === 'string' ? message.payload.status : undefined;
-    // SNAPSHOT carries only the node, so resync from it on every (re)connect.
-    if (message.type === 'SNAPSHOT' && node) setCurrentNode(node);
-    else if (node && status) setCurrentNode(node);
-  }), []);
-  const statuses: TodoStatus[] = TODO_ITEMS.map((_, index) => index < Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'done' : index === Math.max(0, ['Plan', 'Exec', 'Verify', 'Handoff'].indexOf(currentNode)) ? 'active' : 'pending');
-  return <section className="panel-content"><PanelHeader eyebrow="状态机" title="待办清单" /><div className="todo-list">{TODO_ITEMS.map((label, index) => <div className={`todo-item ${statuses[index]}`} key={label}><span className="todo-mark">{statuses[index] === 'done' ? '✓' : statuses[index] === 'active' ? '◌' : ''}</span><span>{label}</span></div>)}</div><p className="todo-note">仅根据状态机广播同步 · 当前节点：{currentNode}</p>{verify && <div className={`verify-result ${verify.verified ? 'passed' : 'failed'}`}><strong>{verify.verified ? 'Verify passed' : 'Verify failed'}</strong>{verify.checks.map((check) => <div className="verify-check" key={check.criterion}><span>{check.status}</span> {check.criterion}{check.reason ? <em> ({check.reason})</em> : null}</div>)}</div>}{rewind && <div className="rewind-result"><strong>Rewind</strong> restored {rewind.restored.length} file(s){rewind.skipped.length > 0 ? `, skipped ${rewind.skipped.length} human-edited` : ''}</div>}</section>;
-}
-
-const DiffEditor = lazy(async () => {
-  const { DiffEditor: MonacoDiffEditor } = await import('@monaco-editor/react');
-  return { default: MonacoDiffEditor };
-});
-
-function CodeReview(): ReactElement {
-  const [diff, setDiff] = useState({ path: '等待 FILE_DIFF 事件', original: '', modified: '' });
-  useEffect(() => connectRuntime((message) => {
-    if (message.type !== 'FILE_DIFF' || typeof message.payload?.path !== 'string') return;
-    setDiff({ path: message.payload.path, original: typeof message.payload.original === 'string' ? message.payload.original : '', modified: typeof message.payload.modified === 'string' ? message.payload.modified : '' });
-  }), []);
-  return <section className="panel-content review-panel"><PanelHeader eyebrow="代码审查" title="文件修改对比" /><div className="diff-path">{diff.path}</div><div className="editor-frame"><Suspense fallback={<div className="editor-loading">正在加载代码编辑器…</div>}><DiffEditor key={`${diff.path}:${diff.original.length}:${diff.modified.length}`} height="100%" language="typescript" original={diff.original} modified={diff.modified} theme="vs-dark" options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: true }} /></Suspense></div></section>;
-}
-
-function HandoffPanel(): ReactElement {
-  const [handoff, setHandoff] = useState<Record<string, unknown> | null>(null);
-  useEffect(() => connectRuntime((message) => { if (message.type === 'HANDOFF_TRIGGERED') setHandoff(message.payload ?? null); }), []);
-  return <section className={`panel-content handoff-panel ${handoff ? 'has-handoff' : ''}`}><PanelHeader eyebrow="上下文交接" title="Handoff Document" />{handoff ? <div className="handoff-card"><HandoffField label="任务目标" value={handoff.task_goal} /><HandoffField label="当前状态" value={handoff.current_state} /><HandoffField label="下一步" value={handoff.next_steps} /><HandoffField label="已完成步骤" value={handoff.completed_steps} /></div> : <div className="empty-state">等待后端广播 HANDOFF_TRIGGERED<br /><span>交接文档生成后将在这里显示</span></div>}</section>;
-}
-
-function HandoffField({ label, value }: { label: string; value: unknown }): ReactElement { return <div className="handoff-field"><span>{label}</span><p>{Array.isArray(value) ? value.join('、') : String(value ?? '—')}</p></div>; }
 
 
 let openBufferFromPanel: ((kind: PanelKind) => void) | null = null;
@@ -1716,7 +1603,7 @@ function BlankBuffer(): ReactElement {
     }
     setCommand('');
   };
-  return <section className="panel-content blank-panel"><PanelHeader eyebrow="命令入口" title="空缓存窗口" /><form className="command-bar" onSubmit={(event) => { event.preventDefault(); if (command.trim()) run(); }}><span className="command-prompt">&gt;</span><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="输入命令：MS / DBG / TODO / REV / HO" aria-label="缓存窗口命令" /></form><div className="console-output">{output.map((line, index) => <p key={index}>{line}</p>)}</div></section>;
+  return <section className="panel-content blank-panel"><PanelHeader eyebrow="命令入口" title="空缓存窗口" />  <form className="command-bar" onSubmit={(event) => { event.preventDefault(); if (command.trim()) run(); }}><span className="command-prompt">&gt;</span><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="输入命令：DBG / SET / FILES"  aria-label="缓存窗口命令" /></form><div className="console-output">{output.map((line, index) => <p key={index}>{line}</p>)}</div></section>;
 }
 
 function SettingsBuffer(): ReactElement {
@@ -2764,7 +2651,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
   </div>;
 }
 
-const panelComponents = { chat: ChatPanel, mission: MissionControl, debug: DebugConsole, todo: TodoList, review: CodeReview, handoff: HandoffPanel, settings: SettingsBuffer, schedules: () => <SchedulesPanel wsUrl={RUNTIME_WS_URL} />, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
+const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <SchedulesPanel wsUrl={RUNTIME_WS_URL} />, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
 
 function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
   const [maximized, setMaximized] = useState(() => api.isMaximized());
@@ -2823,7 +2710,7 @@ function CommandBar({ onRun }: { onRun: (kind: PanelKind) => void }): ReactEleme
     if (kind) onRun(kind);
     setValue('');
   };
-  return <form className="command-bar" onSubmit={(event) => { event.preventDefault(); submit(); }}><span className="command-prompt">&gt;</span><input value={value} onChange={(event) => setValue(event.target.value)} placeholder="输入命令：MS / DBG / TODO / REV / HO" aria-label="命令输入" /></form>;
+  return <form className="command-bar" onSubmit={(event) => { event.preventDefault(); submit(); }}><span className="command-prompt">&gt;</span><input value={value} onChange={(event) => setValue(event.target.value)} placeholder="输入命令：DBG / SET / FILES" aria-label="命令输入" /></form>;
 }
 
 function App(): ReactElement {
