@@ -1,11 +1,10 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewHeaderActionsProps } from 'dockview-react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
 import type { ReactElement } from 'react';
 import { McpServersForm, SettingsPanel, usePreferences, useSubagentPreferences, applyPreferenceTheme, type McpConfigState, type McpSaveState, type McpServerEntry, type McpServerStatus, type ModelListState, type ModelSettings, type SaveState, type TaskModelKindId } from './settings';
-import { SchedulesPanel } from './schedules-panel';
 import { clearConsoleEntries, evaluateInPage, getDevtoolsSnapshot, subscribeDevtools } from './devtools';
 import { handleCodeCopy, renderMarkdown, renderPartialMarkdown, splitStreamingBlocks } from './markdown';
 import { renderMarkmaps, renderMermaidBlocks } from './diagram-render';
@@ -19,7 +18,9 @@ import { RUNTIME_WS_URL } from './runtime-url';
 import { SystemStatus } from './system-status';
 import { runtimeSocketFor, type RuntimeSocketMessage } from './runtime-socket';
 import { estimateCostUsd, formatCost } from './token-cost';
-import { TerminalView, type TerminalWriteLine } from './terminal-view';
+import type { TerminalWriteLine } from './terminal-view';
+
+const LazyTerminalView = lazy(() => import('./terminal-view').then((module) => ({ default: module.TerminalView })));
 import { MAX_TEXT_PREVIEW_BYTES, classifyFile, folderNameFromEntry } from './dropped-files';
 import { FileRefChip, FilePreviewDialog, type DroppedFileRef } from './file-ref';
 import { compactionBoundary, insertDivider, sendableMessages } from './compaction';
@@ -870,9 +871,15 @@ function MarkdownBody({ content }: { content: string }): ReactElement {
       if (img.naturalWidth > 0) img.dataset.loaded = '';
       else img.dataset.failed = '';
     });
-    const instances = renderMarkmaps(root);
+    let cancelled = false;
+    const instancesPromise = renderMarkmaps(root);
     void renderMermaidBlocks(root);
-    return () => instances.forEach((instance) => instance.destroy?.());
+    return () => {
+      cancelled = true;
+      void instancesPromise.then((instances) => {
+        if (cancelled) instances.forEach((instance) => instance.destroy?.());
+      });
+    };
   }, [html]);
   return <div ref={ref} className="chat-markdown" onClick={(event) => { handleCodeCopy(event.target); }}   onLoadCapture={(event) => { markImageLoaded(event.target); }} onErrorCapture={(event) => { markImageFailed(event.target); }} dangerouslySetInnerHTML={{ __html: html }} />;
 }
@@ -2643,7 +2650,7 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
     setCommand(next === null ? '' : commandHistory[next] ?? '');
   };
   return <div className="terminal-session" hidden={hidden}>
-    <TerminalView lines={lines} hidden={hidden} onActivate={() => inputRef.current?.focus()} />
+    <Suspense fallback={null}><LazyTerminalView lines={lines} hidden={hidden} onActivate={() => inputRef.current?.focus()} /></Suspense>
     <form className="terminal-input" onSubmit={run}>
       <span className="wt-prompt">{running ? '' : prompt}</span>
       <input ref={inputRef} value={command} onChange={(event) => { setCommand(event.target.value); setHistoryIndex(null); }} onKeyDown={recall} placeholder={running ? '执行中……' : ''} aria-label="终端命令" disabled={running} autoComplete="off" spellCheck={false} />
@@ -2651,7 +2658,8 @@ function TerminalSession({ hidden }: { hidden: boolean }): ReactElement {
   </div>;
 }
 
-const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <SchedulesPanel wsUrl={RUNTIME_WS_URL} />, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
+const LazySchedulesPanel = lazy(() => import('./schedules-panel').then((module) => ({ default: module.SchedulesPanel })));
+const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <Suspense fallback={null}><LazySchedulesPanel wsUrl={RUNTIME_WS_URL} /></Suspense>, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, blank: BlankBuffer };
 
 function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
   const [maximized, setMaximized] = useState(() => api.isMaximized());
