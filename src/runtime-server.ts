@@ -22,6 +22,8 @@ export type RuntimeEvent =
   | { type: 'WORKTREE_RESULT'; payload: { action: 'worktree_merge' | 'worktree_remove'; conversation_id: string; ok: boolean; message?: string; outcome?: unknown } }
   | { type: 'PROCESS_STATE'; payload: { processes: ManagedProcessInfo[] } }
   | { type: 'PROCESS_OUTPUT'; payload: { id: string; lines: ManagedProcessLine[] } }
+  | { type: 'ALLOWLIST_STATE'; payload: { roots: string[] } }
+  | { type: 'ALLOWLIST_ERROR'; payload: { message: string } }
   | { type: 'FILE_REVERT_RESULT'; payload: { path: string; ok: true; status: 'restored' | 'skipped' } | { path: string; ok: false; message: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
   | { type: 'VERIFY_RESULT'; payload: VerificationResult }

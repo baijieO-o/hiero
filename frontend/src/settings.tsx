@@ -709,6 +709,56 @@ export type SaveState = { status: 'idle' } | { status: 'saving' } | { status: 's
 
 type UpdateCheckResult = { ok: boolean; current_version: string; latest_version?: string; update_available?: boolean; message?: string };
 
+/** Lists the folders the runtime may use as a workspace, and lets the user add or remove them. */
+function WorkspaceAllowlistSection(): ReactElement {
+  const [roots, setRoots] = useState<string[] | null>(null);
+  const [draft, setDraft] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    socketRef.current = socket;
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'allowlist_get' }));
+    socket.onmessage = (event) => {
+      const message = JSON.parse(String(event.data)) as { type?: string; payload?: { roots?: string[]; message?: string } };
+      if (message.type === 'ALLOWLIST_STATE' && message.payload?.roots) { setRoots(message.payload.roots); setError(null); }
+      if (message.type === 'ALLOWLIST_ERROR') setError(message.payload?.message ?? '保存失败');
+    };
+    return () => { socket.close(); socketRef.current = null; };
+  }, []);
+
+  const save = (next: string[]) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) { setError('无法连接到运行时'); return; }
+    socket.send(JSON.stringify({ type: 'allowlist_set', roots: next }));
+  };
+  const add = () => {
+    const value = draft.trim();
+    if (!value || !roots) return;
+    if (roots.includes(value)) { setError('该目录已在白名单中'); return; }
+    save([...roots, value]);
+    setDraft('');
+  };
+
+  return <div className="settings-domain">
+    <h3>工作区白名单</h3>
+    <p className="settings-hint">Agent 只能在这些文件夹（及其子目录）内读写文件和启动进程。列表保存在本机 ~/.hiero/workspace-allowlist.json，不进入仓库。</p>
+    {roots === null ? <p className="chat-empty">正在读取白名单……</p> : <ul className="allowlist-roots">
+      {roots.map((root) => <li key={root}>
+        <code>{root}</code>
+        <button type="button" className="ghost-button" onClick={() => save(roots.filter((item) => item !== root))} aria-label={`移除 ${root}`}>移除</button>
+      </li>)}
+    </ul>}
+    <div className="settings-row">
+      <span><strong>添加文件夹</strong><small>输入绝对路径，必须是已存在的文件夹。</small></span>
+      <input type="text" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="例如 D:\\projects\\my-app" aria-label="白名单文件夹路径" />
+      <button type="button" className="ghost-button" onClick={add} disabled={!draft.trim()}>添加</button>
+    </div>
+    {error && <p className="chat-empty" role="alert">{error}</p>}
+  </div>;
+}
+
 /** Asks the backend to compare the local version with the latest GitHub tag on demand. */
 function UpdateCheckSection(): ReactElement {
   const [busy, setBusy] = useState(false);
@@ -851,6 +901,7 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList
               <option value="ask">每次询问</option>
             </select>
           </label>
+          <WorkspaceAllowlistSection />
         </div>}
         {showCategory('model') && <div className="settings-domain">
           <h3>模型与网关</h3>

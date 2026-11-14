@@ -1,5 +1,5 @@
-﻿import { randomUUID } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { AgentExecutor } from './agent-executor.js';
@@ -31,6 +31,7 @@ import { ApprovalBroker } from './approval-broker.js';
 import { checkForUpdate, type UpdateStatus } from './update-check.js';
 import { AskUserBroker, type AskUserField, type AskUserResult } from './ask-user-broker.js';
 import { createScheduledTask, defaultSchedulesPath, dueTasks, loadSchedules, nextRunAfter, saveSchedules, type ScheduledTask } from './scheduled-tasks.js';
+import { defaultAllowlistPath, isAllowedWorkspace, loadAllowlist, saveAllowlist } from './workspace-allowlist.js';
 
 /** Result of one agent run, returned so scheduled tasks can record their report. */
 export interface TaskRunResult { task_id: string; status: 'completed' | 'failed'; summary: string }
@@ -300,7 +301,7 @@ const SUBAGENT_TOOL_NAMES = new Set(['delegate_read', 'delegate_write', 'delegat
  * Maps the workspace selected in the chat UI to a directory the read tool may use.
  * Only existing directories are accepted; anything else falls back to the runtime's working directory.
  */
-export function resolveChatWorkspace(workspace: string | undefined): string {
+export function resolveChatWorkspace(workspace: string | undefined, allowedRoots?: string[]): string {
   const trimmed = workspace?.trim();
   if (!trimmed) return process.cwd();
   const candidate = isAbsolute(trimmed) ? trimmed : resolve(process.cwd(), trimmed);
@@ -311,6 +312,9 @@ export function resolveChatWorkspace(workspace: string | undefined): string {
     isDirectory = false;
   }
   if (!isDirectory) throw new Error(`工作区不存在或不是文件夹：${trimmed}`);
+  if (allowedRoots && !isAllowedWorkspace(allowedRoots, candidate)) {
+    throw new Error(`工作区不在允许列表中：${candidate}。请在设置里把它加入白名单后再试。`);
+  }
   return candidate;
 }
 
@@ -492,6 +496,13 @@ function isConversationWorktreeRequest(message: unknown): message is { type: 'wo
     && typeof candidate.workspace === 'string' && typeof candidate.conversation_id === 'string';
 }
 
+function isAllowlistRequest(message: unknown): message is { type: 'allowlist_get' } | { type: 'allowlist_set'; roots: string[] } {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as { type?: unknown; roots?: unknown };
+  if (candidate.type === 'allowlist_get') return true;
+  return candidate.type === 'allowlist_set' && Array.isArray(candidate.roots) && candidate.roots.every((root) => typeof root === 'string');
+}
+
 function isProcessRequest(message: unknown): message is { type: 'process_start'; command: string; workspace: string } | { type: 'process_stop'; id: string } | { type: 'process_output'; id: string } | { type: 'process_list' } {
   if (typeof message !== 'object' || message === null) return false;
   const candidate = message as { type?: unknown; command?: unknown; workspace?: unknown; id?: unknown };
@@ -610,6 +621,22 @@ export class HieroRuntime {
   });
   secrets = new SecretStore(join(homedir(), '.hiero'));
   private readonly writeSnapshots = new WriteSnapshotStore(join(homedir(), '.hiero', 'write-snapshots.json'));
+  /** Re-read on each call so edits to the allowlist file apply without restarting the backend. */
+  private allowedWorkspaceRoots(): string[] {
+    return loadAllowlist(defaultAllowlistPath(), process.cwd());
+  }
+  private workspaceFor(workspace: string | undefined): string {
+    return resolveChatWorkspace(workspace, this.allowedWorkspaceRoots());
+  }
+  /** Interface-selected folders join the allowlist automatically; other paths are still checked. */
+  private admitUiWorkspace(workspace: string | undefined): void {
+    if (!workspace?.trim()) return;
+    const root = resolve(workspace.trim());
+    if (!existsSync(root) || !statSync(root).isDirectory()) return;
+    const roots = this.allowedWorkspaceRoots();
+    if (roots.some((item) => isAllowedWorkspace([item], root))) return;
+    saveAllowlist(defaultAllowlistPath(), [...roots, root]);
+  }
   private readonly codeIndexes = new Map<string, CodeIndex>();
   private readonly configWatcher = new ConfigWatcher({ home: homedir() });
   private readonly telemetry = new Telemetry(this.configWatcher.current().logging.file);
@@ -644,6 +671,7 @@ export class HieroRuntime {
       else if (isFileRevertRequest(message)) await this.handleFileRevert(message, client);
       else if (isConversationWorktreeRequest(message)) await this.handleConversationWorktree(message, client);
       else if (isProcessRequest(message)) this.handleProcessRequest(message, client);
+      else if (isAllowlistRequest(message)) this.handleAllowlistRequest(message, client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) {
         if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
@@ -657,7 +685,7 @@ export class HieroRuntime {
       else if (isUsageStatsRequest(message)) this.runtime.send({ type: 'USAGE_STATS', payload: { request_id: message.request_id, ...readUsageStats(this.configWatcher.current().logging.file) } }, client);
       else if (isChatCompactRequest(message)) await this.handleChatCompact(message, client);
       else if (isTaskHistoryRequest(message)) this.runtime.send({ type: 'TASK_HISTORY', payload: { tasks: this.stateStore.listTasks() } }, client);
-      else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: resolveChatWorkspace(message.workspace), traces: await listChatTraces(resolveChatWorkspace(message.workspace)) } }, client);
+      else if (isChatTraceHistoryRequest(message)) this.runtime.send({ type: 'CHAT_TRACE_HISTORY', payload: { workspace: this.workspaceFor(message.workspace), traces: await listChatTraces(this.workspaceFor(message.workspace)) } }, client);
       else if (isSettingsRequest(message)) this.runtime.send({ type: 'SETTINGS', payload: this.readModelSettings() }, client);
       else if (isUpdateCheckRequest(message)) void this.broadcastUpdateStatus(client);
       else if (isScheduleRequest(message)) this.handleScheduleRequest(message, client);
@@ -691,7 +719,7 @@ export class HieroRuntime {
 
   /** Merges or removes a conversation's git worktree. Results go back as WORKTREE_RESULT. */
   private async handleConversationWorktree(request: { type: 'worktree_merge' | 'worktree_remove'; workspace: string; conversation_id: string; force?: boolean }, client: WebSocket): Promise<void> {
-    const root = resolveChatWorkspace(request.workspace);
+    const root = this.workspaceFor(request.workspace);
     const reply = (payload: { ok: boolean; message?: string; outcome?: unknown }) => this.runtime.send({ type: 'WORKTREE_RESULT', payload: { action: request.type, conversation_id: request.conversation_id, ...payload } }, client);
     try {
       if (request.type === 'worktree_merge') {
@@ -710,7 +738,7 @@ export class HieroRuntime {
     const reply = (payload: { ok: true; status: 'restored' | 'skipped' } | { ok: false; message: string }) =>
       this.runtime.send({ type: 'FILE_REVERT_RESULT', payload: { path: request.path, ...payload } }, client);
     try {
-      const target = resolve(resolveChatWorkspace(request.workspace), request.path);
+      const target = resolve(this.workspaceFor(request.workspace), request.path);
       const outcome = await this.writeSnapshots.revertFile(target);
       if (outcome === 'unknown') reply({ ok: false, message: '该文件没有可还原的 agent 写入记录。' });
       else reply({ ok: true, status: outcome });
@@ -726,7 +754,7 @@ export class HieroRuntime {
         reply({ ok: true, path: await pickFolder(request.initialPath) });
         return;
       }
-      const root = resolveChatWorkspace(request.workspace);
+      const root = this.workspaceFor(request.workspace);
       if (request.type === 'fs_list') reply({ ok: true, root, ...(await listDirectory(root, request.path ?? '')) });
       else if (request.type === 'fs_read') reply({ ok: true, ...(await readTextFile(root, request.path)) });
       else if (request.type === 'skill_list') reply({ ok: true, skills: await listSkills(root, { dedupe: true }) });
@@ -808,7 +836,7 @@ export class HieroRuntime {
   }
 
   private async handleChatUsage(request: ChatUsageRequest, client: WebSocket | undefined): Promise<void> {
-   const workspacePath = resolveChatWorkspace(request.workspace);
+   const workspacePath = this.workspaceFor(request.workspace);
    const subagent = normalizeSubagentSettings(request.subagent);
    const tools = chatToolDefinitions(subagent);
    const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
@@ -817,7 +845,7 @@ export class HieroRuntime {
 
   /** Summarizes older history on demand. The client keeps the returned summary and drops the messages it covers. */
   private async handleChatCompact(request: ChatCompactRequest, client: WebSocket | undefined): Promise<void> {
-   const workspacePath = resolveChatWorkspace(request.workspace);
+   const workspacePath = this.workspaceFor(request.workspace);
    const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'auto';
    const task: TaskContract = {
      task_id: randomUUID(),
@@ -1035,6 +1063,7 @@ export class HieroRuntime {
   }
 
   public async handleChat(request: RuntimeChatRequest, client?: WebSocket): Promise<void> {
+    this.admitUiWorkspace(request.workspace);
     const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'auto';
     const controller = new AbortController();
     this.activeChats.set(request.request_id, controller);
@@ -1102,7 +1131,7 @@ export class HieroRuntime {
 
   /** Each conversation works in its own git worktree; falls back to the plain folder if isolation is not possible. */
   private async resolveConversationWorkspace(request: RuntimeChatRequest): Promise<string> {
-    const root = resolveChatWorkspace(request.workspace);
+    const root = this.workspaceFor(request.workspace);
     const id = typeof request.conversation_id === 'string' ? request.conversation_id : '';
     if (!id) return root;
     const policy: NonGitPolicy = request.non_git_policy === 'init' || request.non_git_policy === 'ask' ? request.non_git_policy : 'fallback';
@@ -1119,7 +1148,7 @@ export class HieroRuntime {
     const emit = (event: RuntimeEvent) => this.sendChat(requestId, run, event);
     const workspacePath = await this.resolveConversationWorkspace(request);
     if (typeof request.conversation_id === 'string' && request.conversation_id) {
-      this.runtime.broadcast({ type: 'WORKTREE_STATE', payload: { conversation_id: request.conversation_id, workspace: resolveChatWorkspace(request.workspace), path: workspacePath } });
+      this.runtime.broadcast({ type: 'WORKTREE_STATE', payload: { conversation_id: request.conversation_id, workspace: this.workspaceFor(request.workspace), path: workspacePath } });
     }
     const task: TaskContract = {
       task_id: randomUUID(),
@@ -1361,9 +1390,10 @@ export class HieroRuntime {
       const resumable = message.resume_task_id ? this.stateStore.getTask(message.resume_task_id) : undefined;
       const checkpoint = resumable?.status === 'interrupted' ? this.stateStore.latestCheckpoint(resumable.task_id) : undefined;
       if (message.resume_task_id && !checkpoint) throw new Error(`Task ${message.resume_task_id} has no checkpoint to resume from.`);
+      this.admitUiWorkspace(message.task?.workspace_path);
       const task: TaskContract = {
         task_id: checkpoint && resumable ? resumable.task_id : message.task?.task_id ?? randomUUID(),
-        workspace_path: resolveChatWorkspace(message.task?.workspace_path),
+        workspace_path: this.workspaceFor(message.task?.workspace_path),
         model_config: message.task?.model_config ?? { preferred_model: this.modelForKind('execution') ?? process.env.HIERO_LLM_MODEL ?? 'auto', fallback_chain: [] },
         permission_mode: message.task?.permission_mode ?? 'standard',
         context_mode: message.task?.context_mode ?? 'ephemeral',
@@ -1410,13 +1440,32 @@ export class HieroRuntime {
     }
   }
 
+  /** Returns or replaces the workspace allowlist. Each saved root must be an existing folder. */
+  private handleAllowlistRequest(message: { type: 'allowlist_get' } | { type: 'allowlist_set'; roots: string[] }, client: WebSocket): void {
+    const path = defaultAllowlistPath();
+    if (message.type === 'allowlist_get') {
+      this.runtime.send({ type: 'ALLOWLIST_STATE', payload: { roots: this.allowedWorkspaceRoots() } }, client);
+      return;
+    }
+    try {
+      const roots = message.roots.map((root) => root.trim()).filter(Boolean);
+      for (const root of roots) {
+        if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error(`不是存在的文件夹：${root}`);
+      }
+      saveAllowlist(path, roots);
+      this.runtime.send({ type: 'ALLOWLIST_STATE', payload: { roots: this.allowedWorkspaceRoots() } }, client);
+    } catch (cause) {
+      this.runtime.send({ type: 'ALLOWLIST_ERROR', payload: { message: cause instanceof Error ? cause.message : String(cause) } }, client);
+    }
+  }
+
   /** Adds, removes, enables/disables, or lists scheduled prompts. Every change is persisted immediately. */
   private handleProcessRequest(message: { type: 'process_start'; command: string; workspace: string } | { type: 'process_stop'; id: string } | { type: 'process_output'; id: string } | { type: 'process_list' }, client: WebSocket): void {
     if (message.type === 'process_list') {
       this.runtime.send({ type: 'PROCESS_STATE', payload: { processes: this.processes.list() } }, client);
     } else if (message.type === 'process_start') {
       try {
-        this.processes.start(message.command, resolveChatWorkspace(message.workspace), 'manual');
+        this.processes.start(message.command, this.workspaceFor(message.workspace), 'manual');
       } catch (error) {
         this.runtime.send({ type: 'PROCESS_OUTPUT', payload: { id: '', lines: [{ stream: 'stderr', text: error instanceof Error ? error.message : String(error), error: true }] } }, client);
       }
