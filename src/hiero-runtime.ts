@@ -82,6 +82,8 @@ import type { ExtensionReady, SystemAgentError } from './system_agent.js';
 import type { WebSocket } from 'ws';
 
 const DEFAULT_MAX_CONTEXT_TOKENS = 32_000;
+/** Scheduled checks read the workspace with list_dir/read_file, so they need more room than interactive chat. */
+const SCHEDULED_MAX_CONTEXT_TOKENS = 128_000;
 const CHAT_DEFAULT_MAX_TOKENS = 4_000;
 const CHAT_DEFAULT_MAX_TIME_MS = 120_000;
 const CHAT_BUDGET_LIMITS = { maxTokens: { min: 100, max: 200_000 }, maxTimeMs: { min: 10_000, max: 3_600_000 } } as const;
@@ -180,7 +182,9 @@ const EDIT_FILE_TOOL_DEFINITION: ModelToolDefinition = {
     description: 'Replace one exact text span in a UTF-8 workspace file. old_string must match exactly once in the file (include enough surrounding lines to make it unique). Prefer this over write_file for changing part of an existing file.',
     parameters: { type: 'object', additionalProperties: false, properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] },
   },
-};const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
+};
+const READ_ONLY_WORKSPACE_TOOLS: ReadonlySet<string> = new Set(['read_file', 'list_dir']);
+const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
   {
     type: 'function',
     function: {
@@ -904,6 +908,8 @@ export class HieroRuntime {
   private createWorkflow(workspacePath: string = process.cwd(), extra: Pick<WorkflowOptions, 'onCheckpoint' | 'resume'> = {}): AgentWorkflow {
     // Per-step Verify is opt-in (HIERO_STEP_VERIFY=1) because each run starts a sandbox container.
     const tools = new ToolGateway();
+    tools.register(createReadFileTool(workspacePath));
+    tools.register(createListDirTool(workspacePath));
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
     tools.register(createEditFileTool(workspacePath, this.writeSnapshots));
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
@@ -1424,7 +1430,7 @@ export class HieroRuntime {
         onCheckpoint: (messages, evidence) => this.stateStore.saveCheckpoint(task.task_id, messages, evidence),
         ...(checkpoint ? { resume: checkpoint } : {}),
       });
-      const outcome = await workflow.run(task, goal, [WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION, ...(message.tools ?? [])]);
+      const outcome = await workflow.run(task, goal, [...CHAT_TOOL_DEFINITIONS.filter((tool) => READ_ONLY_WORKSPACE_TOOLS.has(tool.function.name)), WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION, ...(message.tools ?? [])]);
       if ('handoff' in outcome) {
         this.runtime.completeState(AgentState.Handoff);
         this.stateStore.finishTask(task.task_id, 'completed');
@@ -1509,7 +1515,7 @@ export class HieroRuntime {
         const now = new Date();
         this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_run_at: now.toISOString(), next_run_at: nextRunAfter(now, item.interval_minutes) } : item);
         saveSchedules(this.schedulesPath, this.schedules);
-        const result = await this.handleMessage({ goal: task.goal });
+        const result = await this.handleMessage({ goal: task.goal, task: { acceptance_criteria: task.acceptance_criteria ?? [], budget_envelope: { max_tokens: SCHEDULED_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 } } });
         if (result) {
           this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_task_id: result.task_id, last_status: result.status, last_summary: result.summary } : item);
           saveSchedules(this.schedulesPath, this.schedules);

@@ -10,6 +10,8 @@ export interface ScheduledTask {
   name: string;
   /** Prompt sent to the agent each time the task fires. */
   goal: string;
+  /** Acceptance criteria checked after each run; entries prefixed with "cmd:" run as shell commands. */
+  acceptance_criteria?: string[];
   /** Fixed interval between runs, in minutes. */
   interval_minutes: number;
   enabled: boolean;
@@ -38,7 +40,7 @@ export function nextRunAfter(from: Date, intervalMinutes: number): string {
 }
 
 /** Validates user input and returns the cleaned task fields, or throws with a readable message. */
-export function normalizeScheduleInput(input: { name?: unknown; goal?: unknown; interval_minutes?: unknown }): { name: string; goal: string; interval_minutes: number } {
+export function normalizeScheduleInput(input: { name?: unknown; goal?: unknown; interval_minutes?: unknown; acceptance_criteria?: unknown }): { name: string; goal: string; interval_minutes: number; acceptance_criteria: string[] } {
   const goal = typeof input.goal === 'string' ? input.goal.trim() : '';
   if (!goal) throw new Error('定时任务需要一条非空的 prompt。');
   const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim() : goal.slice(0, 40);
@@ -46,7 +48,10 @@ export function normalizeScheduleInput(input: { name?: unknown; goal?: unknown; 
   if (!Number.isInteger(interval) || interval < MIN_INTERVAL_MINUTES || interval > MAX_INTERVAL_MINUTES) {
     throw new Error(`间隔必须是 ${MIN_INTERVAL_MINUTES}–${MAX_INTERVAL_MINUTES} 之间的整数分钟。`);
   }
-  return { name, goal, interval_minutes: interval };
+  const acceptance_criteria = Array.isArray(input.acceptance_criteria)
+    ? input.acceptance_criteria.filter((item): item is string => typeof item === 'string' && item.trim() !== '').map((item) => item.trim()).slice(0, 100)
+    : [];
+  return { name, goal, interval_minutes: interval, acceptance_criteria };
 }
 
 /** Reads schedules from disk. A missing or corrupt file yields an empty list instead of crashing the runtime. */
@@ -68,7 +73,7 @@ export function saveSchedules(path: string, tasks: ScheduledTask[]): void {
   renameSync(temp, path);
 }
 
-export function createScheduledTask(input: { name?: unknown; goal?: unknown; interval_minutes?: unknown; run_now?: unknown }, now = new Date()): ScheduledTask {
+export function createScheduledTask(input: { name?: unknown; goal?: unknown; interval_minutes?: unknown; acceptance_criteria?: unknown; run_now?: unknown }, now = new Date()): ScheduledTask {
   const fields = normalizeScheduleInput(input);
   return {
     id: randomUUID(),
