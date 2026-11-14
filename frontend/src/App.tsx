@@ -13,7 +13,7 @@ import { ApprovalDialog, type ApprovalDialogRequest } from './approval-dialog';
 import { batchRisk } from './approval-model';
 import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
 import { DocsCenter } from './docs-center';
-import { DiffPanel } from './diff-panel';
+import { DiffPanel, requestWorktreeAction } from './diff-panel';
 import { UsagePanel } from './usage-panel';
 import { PanelHeader } from './panel-header';
 import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog } from './model-catalog-store';
@@ -1293,8 +1293,9 @@ function ChatPanel(): ReactElement {
     setEditing(null);
     setConfirmDeleteId(id);
   };
-  const confirmRemove = (id: string) => {
+  const confirmRemove = (id: string, removeWorktree: boolean) => {
     setConfirmDeleteId(null);
+    if (removeWorktree) void removeConversationWorktreeRequest(id);
     deleteConversation(id);
   };
   const [selectMode, setSelectMode] = useState(false);
@@ -1325,7 +1326,7 @@ function ChatPanel(): ReactElement {
   const deleteConfirm = confirmDeleteId
     ? <DeleteConversationConfirm
       title={conversations.find((item) => item.id === confirmDeleteId)?.title ?? '这段对话'}
-      onConfirm={() => confirmRemove(confirmDeleteId)}
+      onConfirm={(removeWorktree) => confirmRemove(confirmDeleteId, removeWorktree)}
       onCancel={() => setConfirmDeleteId(null)}
     />
     : null;
@@ -1733,17 +1734,24 @@ function requestWorkspace(body: WorkspaceRequestBody): Promise<Record<string, un
 type ApprovalRequest = ApprovalDialogRequest;
 
 /** Inline confirmation before deleting a conversation; cancel is the default and Esc cancels. */
-function DeleteConversationConfirm({ title, onConfirm, onCancel }: { title: string; onConfirm: () => void; onCancel: () => void }): ReactElement {
+/** Removes the conversation's worktree on the backend. Uncommitted work is kept (the backend refuses without force). */
+function removeConversationWorktreeRequest(conversationId: string): Promise<{ ok: boolean; message?: string }> {
+  return requestWorktreeAction('worktree_remove', useChatStore.getState().options.workspace, conversationId);
+}
+
+function DeleteConversationConfirm({ title, onConfirm, onCancel }: { title: string; onConfirm: (removeWorktree: boolean) => void; onCancel: () => void }): ReactElement {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const [removeWorktree, setRemoveWorktree] = useState(true);
   useEffect(() => { cancelRef.current?.focus(); }, []);
   return <div className="chat-delete-confirm" role="alertdialog" aria-labelledby="chat-delete-title" aria-describedby="chat-delete-desc" onKeyDown={(event) => { if (event.key === 'Escape') onCancel(); }}>
     <div className="chat-delete-confirm-text">
       <strong id="chat-delete-title">删除「{title}」？</strong>
       <span id="chat-delete-desc">对话记录会被永久删除，无法恢复。</span>
+      <label className="chat-delete-worktree"><input type="checkbox" checked={removeWorktree} onChange={(event) => setRemoveWorktree(event.target.checked)} /> 同时删除隔离工作树（有未提交改动时不会删除）</label>
     </div>
     <div className="chat-delete-confirm-actions">
       <button ref={cancelRef} type="button" className="chat-delete-cancel" onClick={onCancel}>保留</button>
-      <button type="button" className="chat-delete-danger" onClick={onConfirm}>删除对话</button>
+      <button type="button" className="chat-delete-danger" onClick={() => onConfirm(removeWorktree)}>删除对话</button>
     </div>
   </div>;
 }

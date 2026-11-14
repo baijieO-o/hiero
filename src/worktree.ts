@@ -62,6 +62,37 @@ export async function hasUncommittedChanges(path: string): Promise<boolean> {
   return git(path, ['status', '--porcelain']).then((out) => out.length > 0, () => false);
 }
 
+export type MergeOutcome =
+  | { status: 'merged'; branch: string }
+  | { status: 'nothing'; branch: string }
+  | { status: 'conflict'; branch: string; files: string[] };
+
+/**
+ * Merges a conversation's branch into the branch checked out in `root`. Uncommitted work in the
+ * worktree is committed first. A conflicting merge is aborted, so the main folder is left unchanged.
+ */
+export async function mergeConversationWorktree(root: string, conversationId: string): Promise<MergeOutcome> {
+  const slug = worktreeSlug(conversationId);
+  const path = join(root, '.hiero', 'worktrees', slug);
+  const branch = `hiero/${slug}`;
+  if (!existsSync(path)) throw new Error(`No worktree for conversation ${slug}.`);
+  if (await hasUncommittedChanges(path)) {
+    await git(path, ['add', '-A']);
+    await git(path, ['commit', '-m', `hiero: changes from conversation ${slug}`, '--no-verify']);
+  }
+  const ahead = await git(root, ['rev-list', '--count', `HEAD..${branch}`]);
+  if (ahead === '0') return { status: 'nothing', branch };
+  try {
+    await git(root, ['merge', '--no-edit', branch]);
+    return { status: 'merged', branch };
+  } catch (error) {
+    const files = await git(root, ['diff', '--name-only', '--diff-filter=U']).then((out) => out.split(/\r?\n/).filter(Boolean), () => []);
+    await git(root, ['merge', '--abort']).catch(() => undefined);
+    if (files.length === 0) throw error;
+    return { status: 'conflict', branch, files };
+  }
+}
+
 /**
  * Removes a conversation's worktree and its branch. Refuses while there are uncommitted changes
  * unless `force` is set, so the caller can ask the user first.

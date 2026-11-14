@@ -17,6 +17,8 @@ export type RuntimeEvent =
   | { type: 'STATE_CHANGE'; payload: { node: AgentState; status: 'running' | 'completed' } }
   | { type: 'FILE_DIFF'; payload: { path: string; original: string; modified: string; workspace: string } }
   | { type: 'FILE_DIFF_RESET'; payload: { task_id: string } }
+  | { type: 'WORKTREE_STATE'; payload: { conversation_id: string; workspace: string; path: string } }
+  | { type: 'WORKTREE_RESULT'; payload: { action: 'worktree_merge' | 'worktree_remove'; conversation_id: string; ok: boolean; message?: string; outcome?: unknown } }
   | { type: 'FILE_REVERT_RESULT'; payload: { path: string; ok: true; status: 'restored' | 'skipped' } | { path: string; ok: false; message: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
   | { type: 'VERIFY_RESULT'; payload: VerificationResult }

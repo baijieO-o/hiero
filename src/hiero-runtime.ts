@@ -70,7 +70,7 @@ import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
-import { ensureConversationWorktree, type NonGitPolicy } from './worktree.js';
+import { ensureConversationWorktree, mergeConversationWorktree, removeConversationWorktree, type NonGitPolicy } from './worktree.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
 import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder } from './deep-memory.js';
@@ -481,6 +481,13 @@ function isWriteRollbackRequest(message: unknown): boolean {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'write_rollback';
 }
 
+function isConversationWorktreeRequest(message: unknown): message is { type: 'worktree_merge' | 'worktree_remove'; workspace: string; conversation_id: string; force?: boolean } {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as { type?: unknown; workspace?: unknown; conversation_id?: unknown };
+  return (candidate.type === 'worktree_merge' || candidate.type === 'worktree_remove')
+    && typeof candidate.workspace === 'string' && typeof candidate.conversation_id === 'string';
+}
+
 function isFileRevertRequest(message: unknown): message is { type: 'file_revert'; workspace: string; path: string } {
   if (typeof message !== 'object' || message === null) return false;
   const candidate = message as { type?: unknown; workspace?: unknown; path?: unknown };
@@ -620,6 +627,7 @@ export class HieroRuntime {
       else if (isAskUserResponse(message)) this.askUsers.respond(message.payload.ask_id, message.payload.status === 'submitted' ? { status: 'submitted', values: message.payload.values ?? {} } : { status: 'declined' });
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isFileRevertRequest(message)) await this.handleFileRevert(message, client);
+      else if (isConversationWorktreeRequest(message)) await this.handleConversationWorktree(message, client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) {
         if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
@@ -662,6 +670,22 @@ export class HieroRuntime {
       this.runtime.send({ type: 'ROLLBACK_RESULT', payload: { ok: true, restored: result.restored, skipped: result.skipped, warning } }, client);
     } catch (cause) {
       this.runtime.send({ type: 'ROLLBACK_RESULT', payload: { ok: false, message: cause instanceof Error ? cause.message : String(cause) } }, client);
+    }
+  }
+
+  /** Merges or removes a conversation's git worktree. Results go back as WORKTREE_RESULT. */
+  private async handleConversationWorktree(request: { type: 'worktree_merge' | 'worktree_remove'; workspace: string; conversation_id: string; force?: boolean }, client: WebSocket): Promise<void> {
+    const root = resolveChatWorkspace(request.workspace);
+    const reply = (payload: { ok: boolean; message?: string; outcome?: unknown }) => this.runtime.send({ type: 'WORKTREE_RESULT', payload: { action: request.type, conversation_id: request.conversation_id, ...payload } }, client);
+    try {
+      if (request.type === 'worktree_merge') {
+        reply({ ok: true, outcome: await mergeConversationWorktree(root, request.conversation_id) });
+      } else {
+        await removeConversationWorktree(root, request.conversation_id, request.force === true);
+        reply({ ok: true });
+      }
+    } catch (cause) {
+      reply({ ok: false, message: cause instanceof Error ? cause.message : String(cause) });
     }
   }
 
@@ -1078,6 +1102,9 @@ export class HieroRuntime {
     const requestId = request.request_id;
     const emit = (event: RuntimeEvent) => this.sendChat(requestId, run, event);
     const workspacePath = await this.resolveConversationWorkspace(request);
+    if (typeof request.conversation_id === 'string' && request.conversation_id) {
+      this.runtime.broadcast({ type: 'WORKTREE_STATE', payload: { conversation_id: request.conversation_id, workspace: resolveChatWorkspace(request.workspace), path: workspacePath } });
+    }
     const task: TaskContract = {
       task_id: randomUUID(),
       workspace_path: workspacePath,

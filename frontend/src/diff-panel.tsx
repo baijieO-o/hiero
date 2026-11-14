@@ -31,11 +31,38 @@ function mergeDiff(current: FileDiffPayload[], next: FileDiffPayload): FileDiffP
   return current.map((item) => (item.path === next.path ? { ...item, modified: next.modified } : item));
 }
 
+/** Sends a worktree merge or remove request and resolves with the backend's reply. */
+export function requestWorktreeAction(type: 'worktree_merge' | 'worktree_remove', workspace: string, conversationId: string, force = false): Promise<{ ok: boolean; message?: string; outcome?: MergeOutcomePayload }> {
+  return new Promise((resolve) => {
+    const socket = new WebSocket(RUNTIME_WS_URL);
+    const finish = (value: { ok: boolean; message?: string; outcome?: MergeOutcomePayload }) => { resolve(value); socket.close(); };
+    socket.onopen = () => socket.send(JSON.stringify({ type, workspace, conversation_id: conversationId, ...(force ? { force: true } : {}) }));
+    socket.onerror = () => finish({ ok: false, message: '无法连接后端。' });
+    socket.onmessage = (event) => {
+      let message: { type?: string; payload?: { action?: string; conversation_id?: string; ok?: boolean; message?: string; outcome?: MergeOutcomePayload } };
+      try { message = JSON.parse(String(event.data)); } catch { return; }
+      if (message.type !== 'WORKTREE_RESULT' || message.payload?.conversation_id !== conversationId || message.payload.action !== type) return;
+      finish({ ok: message.payload.ok === true, ...(message.payload.message ? { message: message.payload.message } : {}), ...(message.payload.outcome ? { outcome: message.payload.outcome } : {}) });
+    };
+  });
+}
+
+type MergeOutcomePayload = { status: 'merged' } | { status: 'nothing' } | { status: 'conflict'; files: string[] };
+
+function mergeNotice(result: { ok: boolean; message?: string; outcome?: MergeOutcomePayload }): string {
+  if (!result.ok) return `合并失败：${result.message ?? '未知错误'}`;
+  if (result.outcome?.status === 'merged') return '已合并到主分支。';
+  if (result.outcome?.status === 'nothing') return '没有需要合并的改动。';
+  if (result.outcome?.status === 'conflict') return `存在冲突，已取消合并。冲突文件：${result.outcome.files.join('、')}`;
+  return '合并完成。';
+}
+
 export function DiffPanel(): ReactElement {
   const [files, setFiles] = useState<FileDiffPayload[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [worktree, setWorktree] = useState<{ conversationId: string; workspace: string; path: string } | null>(null);
 
   useEffect(() => {
     const socket = runtimeSocketFor(RUNTIME_WS_URL);
@@ -47,8 +74,22 @@ export function DiffPanel(): ReactElement {
       setFiles((current) => mergeDiff(current, payload));
       setSelected((current) => current ?? payload.path);
     });
-    return () => { unsubscribe(); unsubscribeReset(); };
+    const unsubscribeWorktree = socket.subscribe('WORKTREE_STATE', (message) => {
+      const payload = message.payload as unknown as { conversation_id?: string; workspace?: string; path?: string } | undefined;
+      if (!payload?.conversation_id || !payload.workspace || !payload.path) return;
+      setWorktree({ conversationId: payload.conversation_id, workspace: payload.workspace, path: payload.path });
+    });
+    return () => { unsubscribe(); unsubscribeReset(); unsubscribeWorktree(); };
   }, []);
+
+  const merge = async () => {
+    if (!worktree) return;
+    setBusy(true);
+    setNotice(null);
+    const result = await requestWorktreeAction('worktree_merge', worktree.workspace, worktree.conversationId);
+    setBusy(false);
+    setNotice(mergeNotice(result));
+  };
 
   const activePath = selected && files.some((file) => file.path === selected) ? selected : files[0]?.path ?? null;
   const active = files.find((file) => file.path === activePath) ?? null;
@@ -68,6 +109,13 @@ export function DiffPanel(): ReactElement {
   return (
     <section className="panel-content diff-panel">
       <PanelHeader eyebrow="变更" title="变更审阅" />
+      {worktree ? (
+        <div className="diff-worktree-bar">
+          <span>隔离工作树：{worktree.path === worktree.workspace ? '（未隔离，直接修改主目录）' : worktree.path}</span>
+          {worktree.path !== worktree.workspace ? <button type="button" className="diff-revert" onClick={merge} disabled={busy}>{busy ? '合并中…' : '合并到主分支'}</button> : null}
+        </div>
+      ) : null}
+      {notice && files.length === 0 ? <p className="diff-notice" role="status">{notice}</p> : null}
       {files.length === 0 ? (
         <p className="diff-empty">本次任务还没有文件改动。Agent 写入文件后会显示在这里。</p>
       ) : (
