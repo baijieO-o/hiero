@@ -14,6 +14,7 @@ import { batchRisk } from './approval-model';
 import { AskUserDialog, type AskUserRequest } from './ask-user-dialog';
 import { DocsCenter } from './docs-center';
 import { DiffPanel, requestWorktreeAction } from './diff-panel';
+import { ProcessPanel } from './process-panel';
 import { UsagePanel } from './usage-panel';
 import { PanelHeader } from './panel-header';
 import { chatModelOptions, readStoredDefaultModel, readStoredModelCatalog } from './model-catalog-store';
@@ -33,7 +34,7 @@ import { shortcutFromEvent, type ShortcutAction } from './shortcut-model';
 
 type RuntimeMessage = RuntimeSocketMessage;
 
-type PanelKind = 'chat' | 'debug' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'diff' | 'usage' | 'blank';
+type PanelKind = 'chat' | 'debug' | 'settings' | 'schedules' | 'browser' | 'terminal' | 'files' | 'skills' | 'memory' | 'docs' | 'diff' | 'usage' | 'process' | 'blank';
 
 const PANEL_TITLES: Record<PanelKind, string> = {
   chat: '对话',
@@ -48,6 +49,7 @@ const PANEL_TITLES: Record<PanelKind, string> = {
   docs: '文档',
   diff: '变更审阅',
   usage: '成本 / 用量',
+  process: '后台进程',
   blank: '空缓存窗口',
 };
 
@@ -157,6 +159,8 @@ const COMMAND_ALIASES: Record<string, PanelKind> = {
   FM: 'files',
   DIFF: 'diff',
   USAGE: 'usage',
+  PROCESS: 'process',
+  PROC: 'process',
 };
 
 function resolveCommand(input: string): PanelKind | null {
@@ -2596,7 +2600,7 @@ function UsagePanelHost(): ReactElement {
   return <UsagePanel conversations={conversations} />;
 }
 
-const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <Suspense fallback={null}><LazySchedulesPanel wsUrl={RUNTIME_WS_URL} /></Suspense>, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, diff: DiffPanel, usage: UsagePanelHost, blank: BlankBuffer };
+const panelComponents = { chat: ChatPanel, debug: DebugConsole, settings: SettingsBuffer, schedules: () => <Suspense fallback={null}><LazySchedulesPanel wsUrl={RUNTIME_WS_URL} /></Suspense>, browser: BrowserBuffer, terminal: TerminalBuffer, files: FileManagerBuffer, skills: SkillsBuffer, memory: MemoryBuffer, docs: DocsCenter, diff: DiffPanel, usage: UsagePanelHost, process: ProcessPanel, blank: BlankBuffer };
 
 function GroupHeaderActions({ api, containerApi, group }: IDockviewHeaderActionsProps): ReactElement {
   const [maximized, setMaximized] = useState(() => api.isMaximized());

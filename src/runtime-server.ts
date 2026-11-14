@@ -4,6 +4,7 @@ import { AgentStateMachine, type AgentState, type StateTransition } from './stat
 import type { VerificationResult } from './verification.js';
 import type { ChatTraceEvent } from './chat-trace.js';
 import type { StoredChatTrace } from './trace-store.js';
+import type { ManagedProcessInfo, ManagedProcessLine } from './process-manager.js';
 import type { TaskRecord } from './state-store.js';
 import type { ContextUsageBreakdown } from './context-usage.js';
 import type { UsageStats } from './usage-stats.js';
@@ -19,6 +20,8 @@ export type RuntimeEvent =
   | { type: 'FILE_DIFF_RESET'; payload: { task_id: string } }
   | { type: 'WORKTREE_STATE'; payload: { conversation_id: string; workspace: string; path: string } }
   | { type: 'WORKTREE_RESULT'; payload: { action: 'worktree_merge' | 'worktree_remove'; conversation_id: string; ok: boolean; message?: string; outcome?: unknown } }
+  | { type: 'PROCESS_STATE'; payload: { processes: ManagedProcessInfo[] } }
+  | { type: 'PROCESS_OUTPUT'; payload: { id: string; lines: ManagedProcessLine[] } }
   | { type: 'FILE_REVERT_RESULT'; payload: { path: string; ok: true; status: 'restored' | 'skipped' } | { path: string; ok: false; message: string } }
   | { type: 'HANDOFF_TRIGGERED'; payload: HandoffDocument }
   | { type: 'VERIFY_RESULT'; payload: VerificationResult }

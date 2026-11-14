@@ -838,6 +838,27 @@ button, textarea, select { font: inherit; }
 .usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .usage-summary div { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
 .usage-summary span { font-size: 12px; color: var(--text-muted); }
+.process-panel { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; height: 100%; box-sizing: border-box; color: var(--text); overflow: hidden; }
+.process-start { display: flex; gap: 6px; }
+.process-start input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text); font-family: monospace; font-size: 12px; }
+.process-start button, .process-stop { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; }
+.process-start button:disabled { opacity: 0.5; cursor: default; }
+.process-error { margin: 0; color: #e5484d; font-size: 12px; }
+.process-empty { color: var(--text-muted); font-size: 12px; }
+.process-list { display: flex; flex-direction: column; gap: 4px; overflow: auto; max-height: 40%; }
+.process-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; text-align: left; font-size: 12px; }
+.process-row.is-selected { border-color: var(--accent, var(--text-muted)); }
+.process-status { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.process-status-running { color: #30a46c; }
+.process-status-stopped { color: #d49a2a; }
+.process-command { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; }
+.process-origin, .process-errors { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.process-errors { color: #e5484d; }
+.process-detail { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
+.process-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.process-detail-head code { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.process-output { margin: 0; flex: 1; min-height: 0; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.process-line-error { color: #e5484d; }
 .usage-summary strong { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .usage-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 .usage-table th, .usage-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; }

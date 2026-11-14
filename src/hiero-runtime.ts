@@ -72,6 +72,7 @@ import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
 import { ensureConversationWorktree, mergeConversationWorktree, removeConversationWorktree, type NonGitPolicy } from './worktree.js';
+import { ProcessManager } from './process-manager.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
 import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder } from './deep-memory.js';
@@ -491,6 +492,15 @@ function isConversationWorktreeRequest(message: unknown): message is { type: 'wo
     && typeof candidate.workspace === 'string' && typeof candidate.conversation_id === 'string';
 }
 
+function isProcessRequest(message: unknown): message is { type: 'process_start'; command: string; workspace: string } | { type: 'process_stop'; id: string } | { type: 'process_output'; id: string } | { type: 'process_list' } {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as { type?: unknown; command?: unknown; workspace?: unknown; id?: unknown };
+  if (candidate.type === 'process_list') return true;
+  if (candidate.type === 'process_start') return typeof candidate.command === 'string' && typeof candidate.workspace === 'string';
+  if (candidate.type === 'process_stop' || candidate.type === 'process_output') return typeof candidate.id === 'string';
+  return false;
+}
+
 function isFileRevertRequest(message: unknown): message is { type: 'file_revert'; workspace: string; path: string } {
   if (typeof message !== 'object' || message === null) return false;
   const candidate = message as { type?: unknown; workspace?: unknown; path?: unknown };
@@ -611,6 +621,7 @@ export class HieroRuntime {
   private schedules: ScheduledTask[] = [];
   private scheduleTimer: NodeJS.Timeout | undefined;
   private scheduleRunning = false;
+  private readonly processes: ProcessManager;
 
   public constructor(port = 8080, storePath?: string, schedulesPath = defaultSchedulesPath()) {
     this.stateStore = new StateStore(storePath);
@@ -620,6 +631,7 @@ export class HieroRuntime {
     this.scheduleTimer = setInterval(() => void this.runDueSchedules(), 60_000);
     this.scheduleTimer.unref();
     this.runtime = new RuntimeWebSocketServer(this.machine, port);
+    this.processes = new ProcessManager(4000, () => this.runtime.broadcast({ type: 'PROCESS_STATE', payload: { processes: this.processes.list() } }));
     this.runtime.onTransition = (transition) => this.currentTaskId && this.stateStore.recordTransition(this.currentTaskId, transition.from, transition.to);
     this.approvals = new ApprovalBroker((request) => this.runtime.broadcast({ type: 'APPROVAL_REQUIRED', payload: request }));
     this.askUsers = new AskUserBroker((request) => this.runtime.broadcast({ type: 'ASK_USER_REQUIRED', payload: request }));
@@ -631,6 +643,7 @@ export class HieroRuntime {
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isFileRevertRequest(message)) await this.handleFileRevert(message, client);
       else if (isConversationWorktreeRequest(message)) await this.handleConversationWorktree(message, client);
+      else if (isProcessRequest(message)) this.handleProcessRequest(message, client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
       else if (isChatCancelRequest(message)) {
         if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
@@ -1270,6 +1283,15 @@ export class HieroRuntime {
         return { ok: true, length: record.content.length, limit: record.limit };
       },
     });
+    tools.register({
+      name: 'start_process',
+      inputSchema: z.object({ command: z.string().min(1) }),
+      effect: 'external',
+      execute: async (args) => {
+        const info = this.processes.start(args.command, workspacePath, 'agent');
+        return { ok: true, id: info.id, status: info.status };
+      },
+    });
     tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
     tools.setBreakpoints(hitlBreakpointsFromEnv());
     if (applyHotPlug) for (const name of this.hotPlug.disabledToolNames()) tools.unregister(name);
@@ -1389,6 +1411,22 @@ export class HieroRuntime {
   }
 
   /** Adds, removes, enables/disables, or lists scheduled prompts. Every change is persisted immediately. */
+  private handleProcessRequest(message: { type: 'process_start'; command: string; workspace: string } | { type: 'process_stop'; id: string } | { type: 'process_output'; id: string } | { type: 'process_list' }, client: WebSocket): void {
+    if (message.type === 'process_list') {
+      this.runtime.send({ type: 'PROCESS_STATE', payload: { processes: this.processes.list() } }, client);
+    } else if (message.type === 'process_start') {
+      try {
+        this.processes.start(message.command, resolveChatWorkspace(message.workspace), 'manual');
+      } catch (error) {
+        this.runtime.send({ type: 'PROCESS_OUTPUT', payload: { id: '', lines: [{ stream: 'stderr', text: error instanceof Error ? error.message : String(error), error: true }] } }, client);
+      }
+    } else if (message.type === 'process_stop') {
+      this.processes.stop(message.id);
+    } else {
+      this.runtime.send({ type: 'PROCESS_OUTPUT', payload: { id: message.id, lines: this.processes.output(message.id) } }, client);
+    }
+  }
+
   private handleScheduleRequest(message: ScheduleRequest, client: WebSocket): void {
     try {
       if (message.action === 'create') {
@@ -1431,6 +1469,7 @@ export class HieroRuntime {
 
   public async close(): Promise<void> {
     if (this.scheduleTimer) clearInterval(this.scheduleTimer);
+    this.processes.stopAll();
     await this.runtime.close();
     await this.browserSessions.close();
     await this.systemAgent.close();
