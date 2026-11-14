@@ -692,7 +692,8 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       const subagent = useSubagentPreferences.getState().values;
       const contractFields = taskCard ?? undefined;
       const nonGitPolicy = useWorkspacePreferences.getState().nonGitPolicy;
-    const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, subagent, conversation_id: conversation.id, non_git_policy: nonGitPolicy, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
+      const categoryRules = useWorkspacePreferences.getState().categoryRules;
+    const payload = JSON.stringify({ type: 'chat', request_id: requestId, messages: sendableHistory(conversation, [message]), compacted_summary: conversation.compactedSummary, model, permission, workspace, subagent, conversation_id: conversation.id, non_git_policy: nonGitPolicy, category_rules: categoryRules, ...(contractFields ? { ...contractFields } : {}), ...(sharedUrls.length > 0 ? { shared_urls: sharedUrls } : {}) });
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },

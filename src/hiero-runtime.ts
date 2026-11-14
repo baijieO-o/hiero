@@ -26,6 +26,7 @@ import { loadLocalLlmEnv, modelsEndpoint, normalizeEndpoint, writeLocalEnv } fro
 import { SecretStore, type SecretName } from './secret-store.js';
 import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
+import { normalizeCategoryRules } from './tool-category-policy.js';
 import { ApprovalBroker } from './approval-broker.js';
 import { checkForUpdate, type UpdateStatus } from './update-check.js';
 import { AskUserBroker, type AskUserField, type AskUserResult } from './ask-user-broker.js';
@@ -115,6 +116,8 @@ export interface RuntimeChatRequest {
   conversation_id?: string;
   /** Non-git workspace handling: fallback = work in place, init = git init then isolate, ask = work in place and let the UI prompt. */
   non_git_policy?: 'fallback' | 'init' | 'ask';
+  /** Per-category approval rules from settings (read/write/execute/network = auto|ask). Missing entries use the defaults. */
+  category_rules?: Partial<Record<'read' | 'write' | 'execute' | 'network', 'auto' | 'ask'>>;
   context_mode?: string;
   /** Sub-agent preferences chosen in the settings page; normalised by the backend before use. */
   subagent?: Partial<SubagentSettings>;
@@ -1165,11 +1168,11 @@ export class HieroRuntime {
           let result: string;
           if (isDelegate) {
             const mode = call.function.name === 'delegate_task' ? 'general' : call.function.name === 'delegate_write' ? 'write' : 'read';
-            result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent);
+            result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent, request.category_rules);
           } else if (call.function.name === 'ask_user') {
             result = await this.runAskUser(call.function.arguments, signal);
           } else {
-            result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode);
+            result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode, request.category_rules);
           }
           endToolCall({ ok: !isToolErrorResult(result), detail: summarizeForTrace(result) });
           sendTrace();
@@ -1225,8 +1228,9 @@ export class HieroRuntime {
    * Memory writes change persistent state, so they are irreversible and need approval outside auto mode.
    */
   /** Builds the per-chat tool set. `applyHotPlug=false` keeps disabled tools listed, for the management API. */
-  private createChatToolGateway(workspacePath: string, applyHotPlug = true): ToolGateway {
+  private createChatToolGateway(workspacePath: string, applyHotPlug = true, categoryRules?: unknown): ToolGateway {
     const tools = new ToolGateway();
+    tools.setCategoryRules(normalizeCategoryRules(categoryRules));
     tools.register(createReadFileTool(workspacePath));
     tools.register(createListDirTool(workspacePath));
     tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
@@ -1286,7 +1290,7 @@ export class HieroRuntime {
    * Runs a sub-agent with a fixed tool allowlist. It cannot delegate further, and it shares the parent's
    * ToolGateway so write_file still goes through the approval policy. Write mode never widens the parent's permission.
    */
-  private async runDelegatedTask(mode: 'read' | 'write' | 'general', rawArguments: string, workspacePath: string, task: TaskContract, signal: AbortSignal, settings: SubagentSettings): Promise<string> {
+  private async runDelegatedTask(mode: 'read' | 'write' | 'general', rawArguments: string, workspacePath: string, task: TaskContract, signal: AbortSignal, settings: SubagentSettings, categoryRules?: unknown): Promise<string> {
     try {
       const args = JSON.parse(rawArguments) as { task?: unknown; tools?: unknown };
       const goal = typeof args.task === 'string' ? args.task.trim() : '';
@@ -1297,7 +1301,7 @@ export class HieroRuntime {
         const decision = await this.requestToolApproval(toolName, { task: goal, tools: args.tools });
         if (!decision.approved) return JSON.stringify({ error: `${toolName} was denied by the operator.` });
       }
-      const toolGateway = this.createChatToolGateway(workspacePath);
+      const toolGateway = this.createChatToolGateway(workspacePath, true, categoryRules);
       const allowlist = mode === 'write' || mode === 'general' ? WRITE_SUBAGENT_TOOLS : READ_ONLY_SUBAGENT_TOOLS;
       const allowedTools: ModelToolDefinition[] = CHAT_TOOL_DEFINITIONS.filter((tool) => allowlist.has(tool.function.name));
       if (mode === 'general' && typeof args.tools === 'string' && args.tools.trim()) {
@@ -1313,10 +1317,10 @@ export class HieroRuntime {
     }
   }
 
-  private async runChatTool(name: string, rawArguments: string, workspacePath: string, mode: PermissionMode): Promise<string> {
+  private async runChatTool(name: string, rawArguments: string, workspacePath: string, mode: PermissionMode, categoryRules?: unknown): Promise<string> {
     try {
       const args = JSON.parse(rawArguments) as unknown;
-      const record = await this.createChatToolGateway(workspacePath).execute(name, args, randomUUID(), mode);
+      const record = await this.createChatToolGateway(workspacePath, true, categoryRules).execute(name, args, randomUUID(), mode);
       return JSON.stringify(record.result);
     } catch (cause) {
       return JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) });

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z, type ZodType } from 'zod';
 import { error, type EvidenceRecord, type PermissionMode } from './contracts.js';
+import { categoryOf, DEFAULT_CATEGORY_RULES, type CategoryRules } from './tool-category-policy.js';
 
 /**
  * Where a tool's effects land. `workspace` effects stay inside the task workspace and are
@@ -24,9 +25,15 @@ export class ToolGateway {
   private readonly tools = new Map<string, RegisteredTool<unknown, unknown>>();
   private approver: ApprovalHook | undefined;
   private breakpoints: ReadonlySet<string> = new Set();
+  private categoryRules: CategoryRules = DEFAULT_CATEGORY_RULES;
 
   public setApprover(approver: ApprovalHook | undefined): void {
     this.approver = approver;
+  }
+
+  /** Per-category approval rules; `ask` pauses non-read calls for approval outside auto mode. */
+  public setCategoryRules(rules: CategoryRules): void {
+    this.categoryRules = rules;
   }
 
   /** Tools that always pause for approval outside `auto` mode, whatever their effect (human-in-the-loop breakpoints). */
@@ -69,9 +76,11 @@ export class ToolGateway {
       throw error('GOV-002', 'blocker', `Invalid parameters for tool '${toolName}'.`, 'Correct the tool arguments to match its schema.');
     }
 
+    const categoryAsks = this.categoryRules[categoryOf(tool)] === 'ask';
     const needsApproval = tool.networkAccess === true
       || (tool.irreversible === true && (tool.effect ?? 'external') === 'external')
       || (tool.irreversible === true && permissionMode === 'strict')
+      || (categoryAsks && tool.effect !== 'read')
       || this.breakpoints.has(toolName);
     if (needsApproval && permissionMode !== 'auto') {
       if (!this.approver) {

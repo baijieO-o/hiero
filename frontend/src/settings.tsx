@@ -146,14 +146,32 @@ export const useSubagentPreferences = create<SubagentState>()(persist((set) => (
 
 export type NonGitPolicyValue = 'fallback' | 'init' | 'ask';
 
+export type ToolCategoryId = 'read' | 'write' | 'execute' | 'network';
+export type CategoryRuleValue = 'auto' | 'ask';
+export type CategoryRulesValue = Record<ToolCategoryId, CategoryRuleValue>;
+
+export const TOOL_CATEGORY_TEXT: Record<ToolCategoryId, string> = {
+  read: '读取（读文件、列目录、回忆记忆）',
+  write: '写入（修改工作区文件、记忆写入）',
+  execute: '执行（浏览器点击、输入等外部操作）',
+  network: '网络（搜索、抓取网页）',
+};
+
+export const DEFAULT_CATEGORY_RULES: CategoryRulesValue = { read: 'auto', write: 'ask', execute: 'ask', network: 'ask' };
+export const TOOL_CATEGORY_IDS: ToolCategoryId[] = ['read', 'write', 'execute', 'network'];
+
 interface WorkspacePreferences {
   nonGitPolicy: NonGitPolicyValue;
   setNonGitPolicy: (value: NonGitPolicyValue) => void;
+  categoryRules: CategoryRulesValue;
+  setCategoryRule: (category: ToolCategoryId, value: CategoryRuleValue) => void;
 }
 
 export const useWorkspacePreferences = create<WorkspacePreferences>()(persist((set) => ({
   nonGitPolicy: 'init',
   setNonGitPolicy: (value) => set({ nonGitPolicy: value }),
+  categoryRules: DEFAULT_CATEGORY_RULES,
+  setCategoryRule: (category, value) => set((state) => ({ categoryRules: { ...state.categoryRules, [category]: value } })),
 }), { name: 'hiero-workspace' }));
 
 export const TASK_MODEL_KIND_ORDER = ['chat', 'planning', 'execution', 'subagent', 'compaction'] as const;
@@ -732,6 +750,10 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList
   const subagent = useSubagentPreferences((state) => state.values);
   const updateSubagent = useSubagentPreferences((state) => state.update);
   const resetSubagent = useSubagentPreferences((state) => state.reset);
+  const categoryRules = useWorkspacePreferences((state) => state.categoryRules);
+  const setCategoryRule = useWorkspacePreferences((state) => state.setCategoryRule);
+  const nonGitPolicy = useWorkspacePreferences((state) => state.nonGitPolicy);
+  const setNonGitPolicy = useWorkspacePreferences((state) => state.setNonGitPolicy);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<SettingsCategoryKey>('appearance');
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -810,6 +832,25 @@ export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList
           <div className="settings-form-actions">
             <button type="button" className="ghost-button" onClick={resetSubagent}>恢复子代理默认值</button>
           </div>
+        </div>}
+        {showCategory('subagent') && <div className="settings-domain">
+          <h3>工具审批</h3>
+          <p className="settings-hint">选择每类工具是自动执行还是需要你确认。仅在"标准"权限模式下生效；"自动"模式不审批，"严格"模式始终审批不可逆工具。</p>
+          {TOOL_CATEGORY_IDS.map((id) => <label className="settings-row" key={id}>
+            <span><strong>{TOOL_CATEGORY_TEXT[id].split('（')[0]}</strong><small>{TOOL_CATEGORY_TEXT[id]}</small></span>
+            <select value={categoryRules[id]} onChange={(event) => setCategoryRule(id, event.target.value as CategoryRuleValue)} aria-label={`${TOOL_CATEGORY_TEXT[id].split('（')[0]}审批规则`}>
+              <option value="auto">自动执行</option>
+              <option value="ask">需要确认</option>
+            </select>
+          </label>)}
+          <label className="settings-row">
+            <span><strong>非 Git 文件夹策略</strong><small>会话工作目录不是 Git 仓库时：初始化为 Git 仓库（默认）、直接在原目录工作，或每次询问。</small></span>
+            <select value={nonGitPolicy} onChange={(event) => setNonGitPolicy(event.target.value as NonGitPolicyValue)} aria-label="非 Git 文件夹策略">
+              <option value="init">初始化 Git 仓库</option>
+              <option value="fallback">直接在原目录工作</option>
+              <option value="ask">每次询问</option>
+            </select>
+          </label>
         </div>}
         {showCategory('model') && <div className="settings-domain">
           <h3>模型与网关</h3>
