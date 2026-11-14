@@ -650,15 +650,20 @@ export class HieroRuntime {
   private scheduleRunning = false;
   private readonly processes: ProcessManager;
 
-  public constructor(port = 8080, storePath?: string, schedulesPath = defaultSchedulesPath()) {
+  public constructor(port = 8080, storePath?: string, schedulesPath = defaultSchedulesPath(), processesPath = join(homedir(), '.hiero', 'processes.json')) {
     this.stateStore = new StateStore(storePath);
     this.stateStore.markRunningAsInterrupted();
     this.schedulesPath = schedulesPath;
     this.schedules = loadSchedules(schedulesPath);
     this.scheduleTimer = setInterval(() => void this.runDueSchedules(), 60_000);
     this.scheduleTimer.unref();
-    this.runtime = new RuntimeWebSocketServer(this.machine, port);
-    this.processes = new ProcessManager(4000, () => this.runtime.broadcast({ type: 'PROCESS_STATE', payload: { processes: this.processes.list() } }));
+    this.runtime = new RuntimeWebSocketServer(this.machine, port, 500, () => ({
+      version: process.env.npm_package_version ?? 'unknown',
+      uptimeSeconds: Math.round(process.uptime()),
+      runningProcesses: this.processes.list().filter((info) => info.status === 'running').length,
+      allowlistedWorkspaces: this.allowedWorkspaceRoots().length,
+    }));
+    this.processes = new ProcessManager(4000, () => this.runtime.broadcast({ type: 'PROCESS_STATE', payload: { processes: this.processes.list() } }), processesPath);
     this.runtime.onTransition = (transition) => this.currentTaskId && this.stateStore.recordTransition(this.currentTaskId, transition.from, transition.to);
     this.approvals = new ApprovalBroker((request) => this.runtime.broadcast({ type: 'APPROVAL_REQUIRED', payload: request }));
     this.askUsers = new AskUserBroker((request) => this.runtime.broadcast({ type: 'ASK_USER_REQUIRED', payload: request }));

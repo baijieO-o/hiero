@@ -1,3 +1,4 @@
+import { createServer, type Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ErrorRecord, HandoffDocument } from './contracts.js';
 import { AgentStateMachine, type AgentState, type StateTransition } from './state-machine.js';
@@ -83,6 +84,7 @@ function isSnapshotRequestData(data: unknown): boolean {
 
 export class RuntimeWebSocketServer {
   private readonly server: WebSocketServer;
+  private readonly httpServer: HttpServer;
   private readonly clients = new Set<WebSocket>();
   private seq = 0;
   /** Recent broadcast messages keyed by seq, so a reconnecting client can replay what it missed. */
@@ -90,9 +92,26 @@ export class RuntimeWebSocketServer {
   private readonly statsSampler = new SystemStatsSampler();
   private statsTimer: NodeJS.Timeout | undefined;
 
-  public constructor(private readonly machine: AgentStateMachine, port = 8080, private readonly replayCapacity = 500) {
+  public constructor(
+    private readonly machine: AgentStateMachine,
+    port = 8080,
+    private readonly replayCapacity = 500,
+    private readonly health: () => Record<string, unknown> = () => ({}),
+  ) {
+    this.httpServer = createServer((req, res) => {
+      if (req.url !== '/health' || req.method !== 'GET') {
+        res.writeHead(404).end('Not found');
+        return;
+      }
+      if (!isLoopbackAddress(req.socket.remoteAddress)) {
+        res.writeHead(403).end('Forbidden');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({ status: 'ok', ...this.health() }));
+    });
+    this.httpServer.listen(port, '127.0.0.1');
     this.server = new WebSocketServer({
-      port,
+      server: this.httpServer,
       verifyClient: ({ origin, req }, done) => {
         if (!isLoopbackAddress(req.socket.remoteAddress)) return done(false, 403, 'Forbidden: loopback clients only');
         if (!isAllowedOrigin(origin)) return done(false, 403, 'Forbidden: origin not allowed');
@@ -212,6 +231,7 @@ export class RuntimeWebSocketServer {
     this.statsTimer = undefined;
     for (const client of this.clients) client.close();
     await new Promise<void>((resolve, reject) => this.server.close((cause) => cause ? reject(cause) : resolve()));
+    await new Promise<void>((resolve) => this.httpServer.close(() => resolve()));
   }
 }
 

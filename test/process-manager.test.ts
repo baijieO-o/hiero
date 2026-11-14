@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { ProcessManager } from '../src/process-manager.js';
 
@@ -35,6 +38,37 @@ test('ProcessManager keeps only the newest lines within its buffer limit', async
   const output = manager.output(info.id);
   assert.equal(output.length, 5);
   assert.ok(output.at(-1)?.text.includes('line 20'));
+});
+
+test('ProcessManager restores earlier running processes as detached and cannot stop them', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiero-proc-'));
+  try {
+    const storePath = join(dir, 'processes.json');
+    const record = { id: 'old-1', command: 'npm run dev', cwd: dir, origin: 'agent', status: 'running', exitCode: null, startedAt: new Date().toISOString(), errorLines: 0 };
+    writeFileSync(storePath, JSON.stringify([record]), 'utf8');
+
+    const manager = new ProcessManager(100, undefined, storePath);
+    const restored = manager.list().find((p) => p.id === 'old-1');
+    assert.equal(restored?.status, 'detached');
+    assert.equal(manager.stop('old-1'), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ProcessManager writes process metadata to its store as processes change', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiero-proc-'));
+  try {
+    const storePath = join(dir, 'processes.json');
+    const manager = new ProcessManager(100, undefined, storePath);
+    const info = manager.start('Write-Output saved', dir, 'manual');
+    await waitFor(() => manager.list().find((p) => p.id === info.id)?.status === 'exited');
+
+    const stored = JSON.parse(readFileSync(storePath, 'utf8')) as { id: string; status: string }[];
+    assert.equal(stored.find((p) => p.id === info.id)?.status, 'exited');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('ProcessManager stop returns false for unknown or already-finished processes', async () => {

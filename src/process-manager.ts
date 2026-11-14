@@ -1,7 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
-export type ProcessStatus = 'running' | 'exited' | 'stopped';
+/** `detached`: recorded by an earlier Hiero run; Hiero no longer owns the process, so it cannot stop it. */
+export type ProcessStatus = 'running' | 'exited' | 'stopped' | 'detached';
 export type ProcessOrigin = 'agent' | 'manual';
 
 export interface ManagedProcessInfo {
@@ -24,9 +27,20 @@ export interface ManagedProcessLine {
 
 interface Entry {
   info: ManagedProcessInfo;
-  child: ChildProcess;
+  /** Undefined for entries restored from disk: they were started by an earlier run. */
+  child: ChildProcess | undefined;
   lines: ManagedProcessLine[];
   partial: Record<'stdout' | 'stderr', string>;
+}
+
+function loadStored(storePath: string | undefined): ManagedProcessInfo[] {
+  if (!storePath) return [];
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(storePath, 'utf8'));
+    return Array.isArray(parsed) ? (parsed as ManagedProcessInfo[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Lines matching this are flagged as errors in the panel. Heuristic, not a parser. */
@@ -39,7 +53,17 @@ const ERROR_PATTERN = /\b(error|err!|exception|traceback|fatal|failed|failure)\b
 export class ProcessManager {
   private readonly entries = new Map<string, Entry>();
 
-  constructor(private readonly maxLines = 4000, private readonly onChange: () => void = () => undefined) {}
+  /**
+   * `storePath` persists process metadata (not output). Entries left over from a previous run
+   * are loaded as `detached`, because this run cannot stop or observe them.
+   */
+  constructor(private readonly maxLines = 4000, private readonly onChange: () => void = () => undefined, private readonly storePath?: string) {
+    for (const info of loadStored(storePath)) {
+      const status: ProcessStatus = info.status === 'running' ? 'detached' : info.status;
+      this.entries.set(info.id, { info: { ...info, status }, child: undefined, lines: [], partial: { stdout: '', stderr: '' } });
+    }
+    if (this.entries.size > 0) this.persist();
+  }
 
   start(command: string, cwd: string, origin: ProcessOrigin): ManagedProcessInfo {
     const shell = process.platform === 'win32' ? { file: 'powershell.exe', args: ['-NoProfile', '-Command', command] } : { file: '/bin/sh', args: ['-c', command] };
@@ -55,8 +79,10 @@ export class ProcessManager {
       this.flushPartial(entry);
       if (entry.info.status === 'running') entry.info.status = 'exited';
       entry.info.exitCode = code;
+      this.persist();
       this.onChange();
     });
+    this.persist();
     this.onChange();
     return info;
   }
@@ -64,15 +90,29 @@ export class ProcessManager {
   /** Stops a process. Returns false when the id is unknown or the process already ended. */
   stop(id: string): boolean {
     const entry = this.entries.get(id);
-    if (!entry || entry.info.status !== 'running') return false;
+    if (!entry || entry.info.status !== 'running' || !entry.child) return false;
     entry.info.status = 'stopped';
     if (entry.child.pid !== undefined) {
       // Kill the whole tree on Windows, where the shell spawns the real server as a child.
       if (process.platform === 'win32') spawn('taskkill', ['/pid', String(entry.child.pid), '/T', '/F'], { windowsHide: true });
       else entry.child.kill('SIGTERM');
     }
+    this.persist();
     this.onChange();
     return true;
+  }
+
+  private persist(): void {
+    if (!this.storePath) return;
+    try {
+      mkdirSync(dirname(this.storePath), { recursive: true });
+      const tmp = `${this.storePath}.tmp`;
+      const records = [...this.entries.values()].map((entry) => entry.info);
+      writeFileSync(tmp, JSON.stringify(records, null, 2), 'utf8');
+      renameSync(tmp, this.storePath);
+    } catch {
+      // Persistence is best-effort; a failed write must not break process control.
+    }
   }
 
   list(): ManagedProcessInfo[] {
