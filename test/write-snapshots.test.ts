@@ -89,11 +89,28 @@ test('rollback skips files a human edited after the agent wrote them', async () 
   }
 });
 
-test('standard mode auto-allows workspace writes without approval', async () => {
+test('standard mode asks before workspace writes by default', async () => {
   const root = await workspace();
   try {
     const gateway = new ToolGateway();
     gateway.register(createWriteFileTool(root));
+    let asked = false;
+    gateway.setApprover(async () => { asked = true; return { approved: false }; });
+
+    await assert.rejects(gateway.execute('write_file', { path: 'ok.txt', content: 'x' }, 'intent-1', 'standard'), /GOV-001/);
+
+    assert.equal(asked, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the write category rule can allow standard-mode workspace writes without approval', async () => {
+  const root = await workspace();
+  try {
+    const gateway = new ToolGateway();
+    gateway.register(createWriteFileTool(root));
+    gateway.setCategoryRules({ read: 'auto', write: 'auto', execute: 'ask', network: 'ask' });
     let asked = false;
     gateway.setApprover(async () => { asked = true; return { approved: false }; });
 

@@ -4,8 +4,8 @@ import { error, type EvidenceRecord, type PermissionMode } from './contracts.js'
 import { categoryOf, DEFAULT_CATEGORY_RULES, type CategoryRules } from './tool-category-policy.js';
 
 /**
- * Where a tool's effects land. `workspace` effects stay inside the task workspace and are
- * auto-allowed in standard mode; `external` effects (commands, network, deletion) always need approval outside auto.
+ * Where a tool's effects land. `workspace` effects stay inside the task workspace and need approval
+ * by default (the `write` category rule); `external` effects (commands, network, deletion) always need approval outside auto.
  */
 export type ToolEffect = 'read' | 'workspace' | 'external';
 
