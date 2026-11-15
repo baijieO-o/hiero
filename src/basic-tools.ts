@@ -54,6 +54,7 @@ function realpathOfExisting(target: string): string {
 const PAGE_CHARS = 12_000;
 
 export function createReadFileTool(workspacePath: string): RegisteredTool<z.infer<typeof readFileInput>, { path: string; content: string }> {
+  const listDirTool = createListDirTool(workspacePath);
   return {
     name: 'read_file',
     inputSchema: readFileInput,
@@ -61,7 +62,10 @@ export function createReadFileTool(workspacePath: string): RegisteredTool<z.infe
     execute: async ({ path, offset, limit }) => {
       const target = resolveWorkspacePath(workspacePath, path);
       const info = await stat(target);
-      if (info.isDirectory()) throw new Error(`"${path}" is a directory; use list_dir to list its entries.`);
+      if (info.isDirectory()) {
+        const listing = await listDirTool.execute({ path });
+        return { path: target, content: JSON.stringify(listing.entries) };
+      }
       const text = await readFile(target, 'utf8');
       if (offset === undefined && limit === undefined) {
         if (text.length <= PAGE_CHARS) return { path: target, content: text };

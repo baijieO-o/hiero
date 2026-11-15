@@ -116,7 +116,7 @@ test('scheduled runs hide write tools and report a failed check as failed, not c
   assert.ok(!toolNames.has('write_file'), 'scheduled runs must not offer write_file');
 });
 
-test('list_dir returns workspace entries and read_file explains directories', async () => {
+test('list_dir returns workspace entries and read_file returns directory listings', async () => {
   const workDir = await mkdtemp(join(tmpdir(), 'hiero-list-'));
   await mkdir(join(workDir, 'sub'));
   await writeFile(join(workDir, 'note.txt'), 'x', 'utf8');
@@ -127,7 +127,11 @@ test('list_dir returns workspace entries and read_file explains directories', as
     { name: 'note.txt', type: 'file' },
   ]);
   const readTool = createReadFileTool(workDir);
-  await assert.rejects(async () => readTool.execute({ path: '.' }), /use list_dir/);
+  const read = await readTool.execute({ path: '.' });
+  assert.deepEqual(JSON.parse(read.content), [
+    { name: 'sub', type: 'directory' },
+    { name: 'note.txt', type: 'file' },
+  ]);
   await assert.rejects(async () => listTool.execute({ path: '..' }), /outside|escape|workspace/i);
 });
 
