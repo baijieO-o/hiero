@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { test } from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
 import { AgentExecutor } from '../src/agent-executor.js';
 import { AgentWorkflow } from '../src/agent-workflow.js';
 import { AgentState, AgentStateMachine } from '../src/state-machine.js';
@@ -9,7 +12,10 @@ import { ToolGateway } from '../src/tool-gateway.js';
 import { z } from 'zod';
 import type { TaskContract } from '../src/contracts.js';
 
-const task: TaskContract = { task_id: 'react-integration', workspace_path: '.', model_config: { preferred_model: 'mock-model', fallback_chain: [] }, permission_mode: 'standard', context_mode: 'ephemeral', acceptance_criteria: [], budget_envelope: { max_tokens: 1000, max_time_ms: 5000 } };
+// Isolated so the agent's memory scan does not read the repo's own .hiero/ directory.
+const isolatedWorkspace = mkdtempSync(join(tmpdir(), 'hiero-llm-integration-'));
+after(() => rmSync(isolatedWorkspace, { recursive: true, force: true }));
+const task: TaskContract = { task_id: 'react-integration', workspace_path: isolatedWorkspace, model_config: { preferred_model: 'mock-model', fallback_chain: [] }, permission_mode: 'standard', context_mode: 'ephemeral', acceptance_criteria: [], budget_envelope: { max_tokens: 1000, max_time_ms: 5000 } };
 
 test('runs Plan and Exec through a mock OpenAI-compatible Function Call server', async () => {
   let requestCount = 0;
