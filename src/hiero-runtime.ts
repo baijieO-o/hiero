@@ -84,6 +84,20 @@ import type { WebSocket } from 'ws';
 const DEFAULT_MAX_CONTEXT_TOKENS = 32_000;
 /** Scheduled checks read the workspace with list_dir/read_file, so they need more room than interactive chat. */
 const SCHEDULED_MAX_CONTEXT_TOKENS = 128_000;
+/** Hard cap on one scheduled run, so a stuck model call or command cannot block later schedules. */
+const SCHEDULED_WALL_CLOCK_MS = 150_000;
+
+/** Rejects if `work` has not settled within `ms`. The timer is cleared as soon as `work` settles. */
+function withWallClockLimit<T>(work: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onTimeout();
+      reject(new Error(`超过 ${ms / 1000} 秒的墙钟上限`));
+    }, ms);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+}
 const CHAT_DEFAULT_MAX_TOKENS = 4_000;
 const CHAT_DEFAULT_MAX_TIME_MS = 120_000;
 const CHAT_BUDGET_LIMITS = { maxTokens: { min: 100, max: 200_000 }, maxTimeMs: { min: 10_000, max: 3_600_000 } } as const;
@@ -650,6 +664,10 @@ export class HieroRuntime {
   private readonly chatRuns = new Map<string, ChatRunBuffer>();
   private readonly stateStore: StateStore;
   private currentTaskId: string | undefined;
+  /** Tasks the wall-clock limit gave up on; their late return must not overwrite the failed state. */
+  private readonly abandonedTaskIds = new Set<string>();
+  /** Overridable per instance so tests can exercise the limit without waiting 150 seconds. */
+  public scheduledWallClockMs = SCHEDULED_WALL_CLOCK_MS;
   private readonly schedulesPath: string;
   private schedules: ScheduledTask[] = [];
   private scheduleTimer: NodeJS.Timeout | undefined;
@@ -1399,6 +1417,7 @@ export class HieroRuntime {
       return undefined;
     }
     if (!message.goal?.trim()) return undefined;
+    let taskIdForCleanup: string | undefined;
     try {
       const resumable = message.resume_task_id ? this.stateStore.getTask(message.resume_task_id) : undefined;
       const checkpoint = resumable?.status === 'interrupted' ? this.stateStore.latestCheckpoint(resumable.task_id) : undefined;
@@ -1424,6 +1443,7 @@ export class HieroRuntime {
       this.machine.beginTask();
       this.writeSnapshots.clear();
       this.currentTaskId = task.task_id;
+      taskIdForCleanup = task.task_id;
       if (checkpoint) this.stateStore.resumeTask(task.task_id);
       else this.stateStore.startTask(task.task_id, task.workspace_path, goal);
       const before = await snapshotTextFiles(task.workspace_path);
@@ -1447,15 +1467,17 @@ export class HieroRuntime {
       const after = await snapshotTextFiles(task.workspace_path);
       for (const diff of await diffSnapshots(before, after)) this.runtime.broadcast({ type: 'FILE_DIFF', payload: { ...diff, workspace: task.workspace_path } });
       this.runtime.completeState(AgentState.Verify);
+      // A run abandoned by the wall-clock limit was already marked failed; do not let it overwrite that.
+      if (this.abandonedTaskIds.delete(task.task_id)) return { task_id: task.task_id, status: 'failed', summary: '定时检查已因超时被放弃' };
       this.stateStore.finishTask(task.task_id, 'completed');
       return { task_id: task.task_id, status: 'completed', summary: outcome.response.content ?? '' };
     } catch (cause) {
       const failedTaskId = this.currentTaskId;
-      if (failedTaskId) this.stateStore.finishTask(failedTaskId, 'failed');
+      if (failedTaskId && failedTaskId === taskIdForCleanup && !this.abandonedTaskIds.has(failedTaskId)) this.stateStore.finishTask(failedTaskId, 'failed');
       this.runtime.reportError(cause);
       return failedTaskId ? { task_id: failedTaskId, status: 'failed', summary: cause instanceof Error ? cause.message : String(cause) } : undefined;
     } finally {
-      this.currentTaskId = undefined;
+      if (this.currentTaskId === taskIdForCleanup) this.currentTaskId = undefined;
     }
   }
 
@@ -1512,6 +1534,25 @@ export class HieroRuntime {
     }
   }
 
+  /** Marks the running task failed and frees the slot so later schedules can run. The stuck call itself is not interrupted. */
+  private abortCurrentTask(): void {
+    const taskId = this.currentTaskId;
+    if (!taskId) return;
+    this.abandonedTaskIds.add(taskId);
+    this.stateStore.finishTask(taskId, 'failed');
+    this.currentTaskId = undefined;
+  }
+
+  /** Runs one scheduled goal under the wall-clock limit. A timeout or error is reported as `failed` with the reason. */
+  public async runScheduledTask(goal: string, acceptanceCriteria: string[]): Promise<TaskRunResult | undefined> {
+    let abandonedId: string | undefined;
+    return withWallClockLimit(
+      this.handleMessage({ goal, scheduled: true, task: { acceptance_criteria: acceptanceCriteria, budget_envelope: { max_tokens: SCHEDULED_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 } } }),
+      this.scheduledWallClockMs,
+      () => { abandonedId = this.currentTaskId; this.abortCurrentTask(); },
+    ).catch((cause): TaskRunResult => ({ task_id: abandonedId ?? randomUUID(), status: 'failed', summary: `定时检查超时或异常：${cause instanceof Error ? cause.message : String(cause)}` }));
+  }
+
   /** Runs every enabled schedule that is due, then advances its next run time. Runs are sequential to avoid overlapping agent tasks. */
   private async runDueSchedules(): Promise<void> {
     if (this.currentTaskId || this.scheduleRunning) return;
@@ -1523,7 +1564,7 @@ export class HieroRuntime {
         const now = new Date();
         this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_run_at: now.toISOString(), next_run_at: nextRunAfter(now, item.interval_minutes) } : item);
         saveSchedules(this.schedulesPath, this.schedules);
-        const result = await this.handleMessage({ goal: task.goal, scheduled: true, task: { acceptance_criteria: task.acceptance_criteria ?? [], budget_envelope: { max_tokens: SCHEDULED_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 } } });
+        const result = await this.runScheduledTask(task.goal, task.acceptance_criteria ?? []);
         if (result) {
           this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_task_id: result.task_id, last_status: result.status, last_summary: result.summary } : item);
           saveSchedules(this.schedulesPath, this.schedules);
