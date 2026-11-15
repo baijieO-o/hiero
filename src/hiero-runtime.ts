@@ -1432,7 +1432,7 @@ export class HieroRuntime {
         onCheckpoint: (messages, evidence) => this.stateStore.saveCheckpoint(task.task_id, messages, evidence),
         ...(checkpoint ? { resume: checkpoint } : {}),
       });
-      const writeTools = message.scheduled ? [] : [WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION];
+      const writeTools = [WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION];
       const outcome = await workflow.run(task, goal, [...CHAT_TOOL_DEFINITIONS.filter((tool) => READ_ONLY_WORKSPACE_TOOLS.has(tool.function.name)), ...writeTools, ...(message.tools ?? [])]);
       if ('handoff' in outcome) {
         this.runtime.completeState(AgentState.Handoff);

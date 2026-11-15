@@ -72,7 +72,7 @@ test('chat runs read_file tool call and returns final answer', async () => {
   assert.equal(reply.payload.content, 'the file says hello');
 });
 
-test('scheduled runs hide write tools and report a failed check as failed, not completed', async () => {
+test('scheduled runs offer write tools and report a failed check as failed, not completed', async () => {
   const requests: Array<{ tools?: Array<{ function: { name: string } }>; messages: Array<{ role: string; content?: string }> }> = [];
   const server = createServer((req, res) => {
     let body = '';
@@ -112,8 +112,8 @@ test('scheduled runs hide write tools and report a failed check as failed, not c
   }
 
   const toolNames = new Set(requests.flatMap((request) => (request.tools ?? []).map((tool) => tool.function.name)));
-  assert.ok(!toolNames.has('edit_file'), 'scheduled runs must not offer edit_file');
-  assert.ok(!toolNames.has('write_file'), 'scheduled runs must not offer write_file');
+  assert.ok(toolNames.has('edit_file'), 'scheduled runs offer edit_file, constrained by acceptance commands');
+  assert.ok(toolNames.has('write_file'), 'scheduled runs offer write_file, constrained by acceptance commands');
 });
 
 test('list_dir returns workspace entries and read_file returns directory listings', async () => {
