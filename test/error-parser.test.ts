@@ -1,4 +1,7 @@
 ﻿import { strict as assert } from 'node:assert';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { classifyFailure, summarizeErrors } from '../src/error-parser.js';
 import { AgentWorkflow, type WorkflowOutcome } from '../src/agent-workflow.js';
@@ -89,7 +92,7 @@ test('a retry plans with the previous failure details in its goal', async () => 
   });
   const task: TaskContract = {
     task_id: 'retry-context',
-    workspace_path: process.cwd(),
+    workspace_path: await mkdtemp(join(tmpdir(), 'hiero-retry-')),
     model_config: { preferred_model: 'test', fallback_chain: [] },
     permission_mode: 'standard',
     context_mode: 'ephemeral',
@@ -102,6 +105,37 @@ test('a retry plans with the previous failure details in its goal', async () => 
   assert.equal(seenGoals[0], 'add feature');
   assert.match(seenGoals[1] ?? '', /previous attempt failed/);
   assert.match(seenGoals[1] ?? '', /src\/a\.ts:12: TS2322: bad type/);
+});
+
+test('turn exhaustion surfaces as an error instead of being retried or handed off', async () => {
+  let execCalls = 0;
+  let verifyCalls = 0;
+  const executor = {
+    planWithCapabilities: async () => ({ response: { content: 'plan' }, tools: [] }),
+    exec: async () => {
+      execCalls += 1;
+      throw Object.assign(new Error('Model exceeded the maximum ReAct turns (8).'), { code: 'MOD-004' });
+    },
+  } as unknown as AgentExecutor;
+  const workflow = new AgentWorkflow(new AgentStateMachine(), executor, undefined, undefined, {
+    verify: async () => {
+      verifyCalls += 1;
+      return { verified: false, checks: [] };
+    },
+    rewind: async () => {},
+  });
+  const task: TaskContract = {
+    task_id: 'turn-exhaustion',
+    workspace_path: await mkdtemp(join(tmpdir(), 'hiero-turns-')),
+    model_config: { preferred_model: 'test', fallback_chain: [] },
+    permission_mode: 'standard',
+    context_mode: 'ephemeral',
+    acceptance_criteria: [],
+    budget_envelope: { max_tokens: 4000, max_time_ms: 120_000 },
+  };
+  await assert.rejects(workflow.run(task, 'reply one line'), /maximum ReAct turns/);
+  assert.equal(execCalls, 1);
+  assert.equal(verifyCalls, 0);
 });
 
 test('classifies failed verification output into an actionable kind', () => {

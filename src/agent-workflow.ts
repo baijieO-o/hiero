@@ -129,6 +129,7 @@ export class AgentWorkflow {
           return { handoff: document, usedTokens: cause.usedTokens };
         }
         if (this.machine.state !== AgentState.Exec && this.machine.state !== AgentState.Verify) throw cause;
+        if (cause instanceof Error && 'code' in cause && (cause as { code?: unknown }).code === 'MOD-004' && cause.message.includes('maximum ReAct turns')) throw cause;
         lastFailure = cause instanceof Error ? cause.message : String(cause);
         previousFailure = lastFailure;
       }
