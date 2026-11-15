@@ -72,6 +72,50 @@ test('chat runs read_file tool call and returns final answer', async () => {
   assert.equal(reply.payload.content, 'the file says hello');
 });
 
+test('scheduled runs hide write tools and report a failed check as failed, not completed', async () => {
+  const requests: Array<{ tools?: Array<{ function: { name: string } }>; messages: Array<{ role: string; content?: string }> }> = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += String(chunk); });
+    req.on('end', () => {
+      requests.push(JSON.parse(body));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ model: 'mock', choices: [{ message: { role: 'assistant', content: 'done' } }] }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+
+  const workDir = await mkdtemp(join(tmpdir(), 'hiero-scheduled-'));
+  const previousCwd = process.cwd();
+  const previousEnv = { endpoint: process.env.HIERO_LLM_ENDPOINT, tokens: process.env.HIERO_LLM_TOKENS };
+  process.env.HIERO_LLM_ENDPOINT = `http://127.0.0.1:${address.port}/v1`;
+  process.env.HIERO_LLM_TOKENS = 'test-token';
+  process.chdir(workDir);
+
+  const runtime = new HieroRuntime(0);
+  try {
+    const result = await runtime.handleMessage({
+      goal: 'check',
+      scheduled: true,
+      task: { permission_mode: 'strict', acceptance_criteria: ['cmd: node -e "process.exit(1)"'] },
+    });
+    assert.equal(result?.status, 'failed');
+    assert.match(result?.summary ?? '', /定时检查未通过/);
+  } finally {
+    await runtime.close();
+    process.chdir(previousCwd);
+    process.env.HIERO_LLM_ENDPOINT = previousEnv.endpoint;
+    process.env.HIERO_LLM_TOKENS = previousEnv.tokens;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  const toolNames = new Set(requests.flatMap((request) => (request.tools ?? []).map((tool) => tool.function.name)));
+  assert.ok(!toolNames.has('edit_file'), 'scheduled runs must not offer edit_file');
+  assert.ok(!toolNames.has('write_file'), 'scheduled runs must not offer write_file');
+});
+
 test('list_dir returns workspace entries and read_file explains directories', async () => {
   const workDir = await mkdtemp(join(tmpdir(), 'hiero-list-'));
   await mkdir(join(workDir, 'sub'));

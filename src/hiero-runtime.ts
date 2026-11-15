@@ -105,6 +105,8 @@ export interface RuntimeTaskRequest {
   extension?: { github_url: string; install_root?: string };
   /** Continues an `interrupted` task from its last checkpoint instead of starting a new one. */
   resume_task_id?: string;
+  /** Scheduled checks are read-only and report a handoff as failure, since nobody is watching to resume it. */
+  scheduled?: boolean;
 }
 
 export interface RuntimeChatRequest {
@@ -1430,9 +1432,15 @@ export class HieroRuntime {
         onCheckpoint: (messages, evidence) => this.stateStore.saveCheckpoint(task.task_id, messages, evidence),
         ...(checkpoint ? { resume: checkpoint } : {}),
       });
-      const outcome = await workflow.run(task, goal, [...CHAT_TOOL_DEFINITIONS.filter((tool) => READ_ONLY_WORKSPACE_TOOLS.has(tool.function.name)), WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION, ...(message.tools ?? [])]);
+      const writeTools = message.scheduled ? [] : [WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION];
+      const outcome = await workflow.run(task, goal, [...CHAT_TOOL_DEFINITIONS.filter((tool) => READ_ONLY_WORKSPACE_TOOLS.has(tool.function.name)), ...writeTools, ...(message.tools ?? [])]);
       if ('handoff' in outcome) {
         this.runtime.completeState(AgentState.Handoff);
+        const reason = outcome.handoff.completed_steps?.join('; ') || 'verification did not pass';
+        if (message.scheduled) {
+          this.stateStore.finishTask(task.task_id, 'failed');
+          return { task_id: task.task_id, status: 'failed', summary: `定时检查未通过，已转入交接：${reason}` };
+        }
         this.stateStore.finishTask(task.task_id, 'completed');
         return { task_id: task.task_id, status: 'completed', summary: '已转入交接，无正文汇报' };
       }
@@ -1515,7 +1523,7 @@ export class HieroRuntime {
         const now = new Date();
         this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_run_at: now.toISOString(), next_run_at: nextRunAfter(now, item.interval_minutes) } : item);
         saveSchedules(this.schedulesPath, this.schedules);
-        const result = await this.handleMessage({ goal: task.goal, task: { acceptance_criteria: task.acceptance_criteria ?? [], budget_envelope: { max_tokens: SCHEDULED_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 } } });
+        const result = await this.handleMessage({ goal: task.goal, scheduled: true, task: { acceptance_criteria: task.acceptance_criteria ?? [], budget_envelope: { max_tokens: SCHEDULED_MAX_CONTEXT_TOKENS, max_time_ms: 120_000 } } });
         if (result) {
           this.schedules = this.schedules.map((item) => item.id === task.id ? { ...item, last_task_id: result.task_id, last_status: result.status, last_summary: result.summary } : item);
           saveSchedules(this.schedulesPath, this.schedules);
