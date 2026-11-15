@@ -1,11 +1,11 @@
 # Hiero 交接文档（当前状态快照）
 
-更新时间：2026-11-09。本文只描述**当前**状态。日期堆叠的历史已删除。
+更新时间：2026-11-10。本文只描述**当前**状态。日期堆叠的历史已删除。
 
 - 功能说明与配置：[docs/FEATURES.md](docs/FEATURES.md)
 - 架构与实现状态：[ARCHITECTURE.md](ARCHITECTURE.md) 第 7 节
 - 未实现与待决策事项：见下文第 5 节
-- 提交状态：工作区干净，最新提交为 `a007ac7`（前端批量审批），已推送到 `origin/main`。
+- 提交状态：最新提交为 `6379b81`（定时任务墙钟上限）及其之前的 19 个本地提交，尚未推送到 `origin/main`（`1cb88dc`）。推送前需用户确认。
 - 手动冒烟验证步骤见 [docs/SMOKE-TEST.md](docs/SMOKE-TEST.md)；真实模型、真实文件读写与 Docker 运行均需按清单实测，文档本身不代表验证通过。
 
 ## 1. 项目
@@ -25,7 +25,7 @@ npm start                 # 后端
 Set-Location frontend; npm run dev   # 前端
 ```
 
-- 后端测试：`npm test`（= `tsc && node --test dist/test/*.test.js`）。当前 59 个测试文件、256 个用例，串行运行。
+- 后端测试：`npm test`（= `tsc && node --test dist/test/*.test.js`）。当前 69 个测试文件、302 个用例，串行运行，约 40 秒。全量运行须用 `Get-ChildItem dist\test -Filter *.test.js` 展开文件列表（PowerShell 不展开通配符）。
 - 类型检查：`npx tsc -p .`（不要传文件参数，TS5112）。
 - 前端构建：`npm run build`（= `tsc && vite build`）。
 - 构建需要 `NODE_OPTIONS=--max-old-space-size=4096`。测试挂起时，优先检查是否有未关闭的句柄（`runtime.close()` 应放在 `finally`）。
@@ -33,8 +33,8 @@ Set-Location frontend; npm run dev   # 前端
 ## 3. 当前能力（已验证或已有单元测试）
 
 - **安全边界**：WebSocket 仅接受回环地址；浏览器 Origin 必须是 localhost / 127.0.0.1 / [::1]（`src/ws-guard.ts`）。
-- **终端与 `cmd:` 验收的 Docker 沙箱**（`src/workspace-services.ts` `dockerRunArgs`）：`--network none`、`--read-only` 根文件系统、`--cap-drop=ALL`、资源限制。工作区以可写 bind mount 挂载到 `/workspace`。Docker 不可用时失败关闭，不回退宿主机 shell。**未在真实 Docker 中端到端验证。**
-- **执行保护**（`src/agent-executor.ts`）：同一工具同一参数连续 3 次触发 `MOD-005` 熔断；超时触发 `MOD-006`。工具结果超过 8,000 字符时截断（头 70% + 尾 30%）。
+- **终端与 `cmd:` 验收的 Docker 沙箱**（`src/workspace-services.ts` `dockerRunArgs`）：`--network none`、`--read-only` 根文件系统、`--cap-drop=ALL`、资源限制。工作区以可写 bind mount 挂载到 `/workspace`。Docker 不可用时失败关闭，不回退宿主机 shell。**未在真实 Docker 中端到端验证。** 本机 Docker CLI 位于 `C:\Program Files\Docker\Docker\resources\bin`，不在 PATH 中；且 `alpine:3` 镜像拉取会超时。
+- **定时任务墙钟上限**（`src/hiero-runtime.ts`）：每次定时任务的 `handleMessage` 外层有 150 秒上限，超时写回 `failed` 并释放 `scheduleRunning`，避免挂起任务阻塞后续调度。只放弃等待，**不中断底层模型请求**（执行器与网关尚未接受 `AbortSignal`）。离线 e2e 见 `test/scheduled-e2e.test.ts`。\n- **执行保护**（`src/agent-executor.ts`）：同一工具同一参数连续 3 次触发 `MOD-005` 熔断；超时触发 `MOD-006`。工具结果超过 8,000 字符时截断（头 70% + 尾 30%）。
 - **上下文压缩**（`src/context-compactor.ts`）：超阈值时把旧历史压缩为摘要，保留首条用户消息原文（锚点）、未完成待办与精确路径，并保留最近 6 条原文。聊天路径由 `handleChatCompact` 驱动，固定预算 24,000 token。前端 `/compact` 与摘要分隔线已实现。
 - **用户中断**：Stop 按钮发送 `chat_cancel`，后端中止模型请求，已生成的部分文本保存为助手消息。
 - **MCP**：stdio / sse / http；`${VAR}` 占位符从环境变量展开，凭据不写入 `mcp.json`；预设（filesystem、GitHub、Postgres）默认禁用；管理 UI 已实现。
@@ -89,7 +89,7 @@ Set-Location frontend; npm run dev   # 前端
 - 聊天工作区 MCP 默认根目录随工作区（`defaultMcpConfig(root)`）。
 - create-hiero 模板（`create-hiero/template/`）与主仓库同步，同步策略见 [docs/DEVELOPING.md](docs/DEVELOPING.md)。
 - create-hiero 当前发布为 0.1.0，模板已同步但**未发布**，需用户确认。
-- `write_file` 的效果为 `workspace` 且未标记 `irreversible`，单次调用不弹审批。
+- `write_file` 的效果为 `workspace`，类别规则 `write` 默认为 `ask`，标准模式下需要审批；设为 `auto` 才免审批（`src/tool-category-policy.ts`）。
 - 标准模式下 git 只读子命令的路径检查只做字符串层面，不能防御符号链接。
 - 只配置一个令牌时，429 会冷却 60 秒，连续对话容易触发 `MOD-003`。这是限流，不是压缩逻辑错误。
 

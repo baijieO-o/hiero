@@ -13,7 +13,7 @@ Hiero 是一个个人自用、开源的 Agent 工作台。它用显式状态机�
 - **人工审批（HITL）**：通过 `HIERO_HITL_TOOLS` 指定的工具在每次调用前暂停，等待你确认。
 - **精确编辑与回滚**：`edit_file` 做唯一匹配的字符串替换；写入前保存快照（持久化到 `~/.hiero/write-snapshots.json`），并能检测人工修改。
 - **代码符号搜索**：只读的 `symbol_search` 基于正则扫描 TypeScript、JavaScript、Python 的符号定义。
-- **安全边界**：模型网关支持令牌池与 fallback；`strict` / `standard` / `auto` 三种权限模式；终端命令在禁网、只读根文件系统的 Docker 容器中执行，Docker 不可用时失败关闭。
+- **安全边界**：模型网关支持令牌池与 fallback；`strict` / `standard` / `auto` 三种权限模式；终端命令在禁网、只读根文件系统的 Docker 容器中执行，Docker 不可用时失败关闭。定时任务单次执行有 150 秒墙钟上限，超时标记为失败。
 
 ## 环境要求
 
@@ -155,7 +155,7 @@ npm run build:frontend
 npm test
 ```
 
-当前共有 59 个测试文件、256 个后端测试用例。并行运行偶尔会出现不稳定的失败，建议串行运行：
+当前共有 69 个测试文件、302 个后端测试用例。并行运行偶尔会出现不稳定的失败，建议串行运行：
 
 ```powershell
 node --test --test-concurrency=1 dist/test/*.test.js
