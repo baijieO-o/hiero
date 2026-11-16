@@ -14,6 +14,8 @@ import { CapabilityRouter } from './capability-router.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
 import { McpToolClient } from './mcp-client.js';
 import { HotPlugRegistry } from './hot-plug.js';
+import { SNOWDOME_NAME, readSnowdomeConfig, saveSnowdomeConfig, type SnowdomeConfig } from './snowdome-config.js';
+import { snowdomeAdapterPlug, wsSocketFactory } from './snowdome-adapter.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { RuntimeWebSocketServer, type RuntimeEvent } from './runtime-server.js';
 import type { ModelMessage, ModelResponse, ModelToolCall, ModelToolDefinition } from './model-gateway.js';
@@ -587,9 +589,10 @@ function isMcpConfigSave(message: unknown): message is { type: 'mcp_config_save'
 
 interface HotPlugMessage {
   type: 'hot_plug_list' | 'hot_plug_set';
-  kind?: 'mcp' | 'skill' | 'tool';
+  kind?: 'mcp' | 'skill' | 'tool' | 'adapter';
   name?: string;
   enabled?: boolean;
+  snowdome?: Partial<SnowdomeConfig>;
 }
 
 function isHotPlugRequest(message: unknown): message is HotPlugMessage {
@@ -1028,7 +1031,10 @@ export class HieroRuntime {
   private async handleHotPlug(message: HotPlugMessage, client?: WebSocket): Promise<void> {
     try {
       const kind = message.kind ?? 'mcp';
-      if (message.type === 'hot_plug_set') {
+      if (message.type === 'hot_plug_set' && message.snowdome) {
+        saveSnowdomeConfig(message.snowdome);
+        await this.applySnowdome();
+      } else if (message.type === 'hot_plug_set') {
         if (!message.name) throw new Error('hot_plug_set requires name');
         const enabled = message.enabled !== false;
         if (kind === 'mcp') {
@@ -1038,6 +1044,10 @@ export class HieroRuntime {
           target.enabled = enabled;
           const saved = saveMcpConfig(config);
           await this.applyMcpConfig(saved.servers);
+        } else if (kind === 'adapter') {
+          if (message.name !== SNOWDOME_NAME) throw new Error(`Adapter '${message.name}' is not known`);
+          saveSnowdomeConfig({ enabled });
+          await this.applySnowdome();
         } else if (kind === 'skill') {
           this.hotPlug.setSkillEnabled(message.name, enabled);
         } else {
@@ -1052,6 +1062,7 @@ export class HieroRuntime {
           ok: true,
           servers: config.servers,
           statuses: this.hotPlug.mcpStatuses(),
+          adapters: [{ name: SNOWDOME_NAME, config: readSnowdomeConfig(), status: this.hotPlug.status(`adapter:${SNOWDOME_NAME}`) }],
           skills: this.capabilityRouter.discoveredSkillSummaries().map((skill) => ({ name: skill.name, enabled: this.hotPlug.isSkillEnabled(skill.name) })),
           tools: this.createChatToolGateway(resolveChatWorkspace(undefined), false).registeredNames().map((name) => ({ name, enabled: this.hotPlug.isToolEnabled(name) })),
         },
@@ -1068,6 +1079,41 @@ export class HieroRuntime {
     } catch (cause) {
       console.warn(`MCP config ignored: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
+    void this.applySnowdome();
+  }
+
+  /**
+   * Applies the saved Snowdome config: defines the adapter from the current settings and enables or disables it.
+   * Redefining on every apply means a changed actorId or URL takes effect after a toggle.
+   */
+  private async applySnowdome(): Promise<void> {
+    const config = readSnowdomeConfig();
+    const id = `adapter:${SNOWDOME_NAME}`;
+    await this.hotPlug.disable(id);
+    if (!config.enabled) return;
+    this.hotPlug.defineAdapter(SNOWDOME_NAME, () => snowdomeAdapterPlug({
+      actorId: config.actorId,
+      url: config.url,
+      autoBehavior: config.autoBehavior,
+      connect: wsSocketFactory,
+      gateway: this.gateway,
+      task: this.snowdomeTask(),
+      onError: (message) => console.warn(`Snowdome: ${message}`),
+    }));
+    await this.hotPlug.enableAdapter(SNOWDOME_NAME);
+  }
+
+  /** Model contract for Snowdome decisions: the same routing as chat, scoped to a short single-shot request. */
+  private snowdomeTask(): TaskContract {
+    return {
+      task_id: randomUUID(),
+      workspace_path: process.cwd(),
+      model_config: { preferred_model: process.env.HIERO_LLM_MODEL ?? 'auto', fallback_chain: [] },
+      permission_mode: 'strict',
+      context_mode: 'ephemeral',
+      acceptance_criteria: ['返回一个 Snowdome 行动意图 JSON'],
+      budget_envelope: { max_tokens: 512, max_time_ms: 30_000 },
+    };
   }
 
   /**

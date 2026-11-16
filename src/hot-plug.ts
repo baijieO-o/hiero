@@ -4,7 +4,13 @@ import type { McpServerConfig, McpServerStatus, McpToolClient } from './mcp-clie
 import { mcpToolDefinition } from './mcp-client.js';
 import { readHotPlugState, writeHotPlugState } from './hot-plug-state.js';
 
-export type PlugKind = 'mcp' | 'tool' | 'skill';
+export type PlugKind = 'mcp' | 'tool' | 'skill' | 'adapter';
+
+/** A world adapter. `start` connects and returns; `stop` disconnects. Enabling and disabling mirror MCP servers. */
+export interface AdapterPlug {
+  start(): Promise<void>;
+  stop(): void;
+}
 
 export interface PlugStatus {
   id: string;
@@ -30,6 +36,7 @@ export class HotPlugRegistry {
   private readonly ctx: Context;
   private readonly plugs = new Map<string, PlugRecord>();
   private readonly configs = new Map<string, McpServerConfig>();
+  private readonly adapters = new Map<string, () => AdapterPlug>();
 
   public constructor(private readonly mcp: McpToolClient, private readonly root = process.cwd()) {
     this.ctx = new Context();
@@ -65,6 +72,41 @@ export class HotPlugRegistry {
     record.fiber = fiber;
     await fiber;
     return this.status(id);
+  }
+
+  /** Registers an adapter factory. Each enable builds a fresh adapter so stale connection state never leaks across restarts. */
+  public defineAdapter(name: string, create: () => AdapterPlug): void {
+    this.adapters.set(name, create);
+  }
+
+  public async enableAdapter(name: string): Promise<PlugStatus> {
+    const id = HotPlugRegistry.id('adapter', name);
+    const create = this.adapters.get(name);
+    if (!create) throw new Error(`Adapter '${name}' is not defined`);
+    await this.disable(id);
+    const record: PlugRecord = { kind: 'adapter', name };
+    this.plugs.set(id, record);
+    const adapter = create();
+    const fiber = this.ctx.plugin((ctx: Context) => {
+      ctx.effect(() => () => {
+        const teardown = Promise.resolve().then(() => adapter.stop());
+        this.pendingTeardown.add(teardown);
+        void teardown.finally(() => this.pendingTeardown.delete(teardown));
+      });
+      return this.startAdapter(adapter, record);
+    });
+    record.fiber = fiber;
+    await fiber;
+    return this.status(id);
+  }
+
+  private async startAdapter(adapter: AdapterPlug, record: PlugRecord): Promise<void> {
+    try {
+      await adapter.start();
+      delete record.error;
+    } catch (cause) {
+      record.error = cause instanceof Error ? cause.message : String(cause);
+    }
   }
 
   private async connectMcp(name: string, config: McpServerConfig, record: PlugRecord): Promise<void> {

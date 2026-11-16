@@ -1917,11 +1917,12 @@ const SKILL_CATEGORIES = ['MCP 服务器', '技能', '指令', '智能体', '挂
 type SkillCategory = (typeof SKILL_CATEGORIES)[number];
 
 type HotPlugItem = { name: string; enabled: boolean };
-type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; skills: HotPlugItem[]; tools: HotPlugItem[] };
-type HotPlugKind = 'mcp' | 'skill' | 'tool';
+type SnowdomeAdapterState = { name: string; config: { enabled: boolean; actorId: string; url: string; autoBehavior: boolean }; status: { enabled: boolean; error?: string } | undefined };
+type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; adapters: SnowdomeAdapterState[]; skills: HotPlugItem[]; tools: HotPlugItem[] };
+type HotPlugKind = 'mcp' | 'skill' | 'tool' | 'adapter';
 
 /** Hot-plug state for MCP servers, skills and built-in tools, sharing one backend socket per view. */
-function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null; toggle: (kind: HotPlugKind, name: string, enabled: boolean) => void } {
+function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null; toggle: (kind: HotPlugKind, name: string, enabled: boolean) => void; saveAdapter: (name: string, config: Partial<SnowdomeAdapterState['config']>) => void } {
   const [snapshot, setSnapshot] = useState<HotPlugSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -1947,7 +1948,12 @@ function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null;
     if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
     socket.send(JSON.stringify({ type: 'hot_plug_set', kind, name, enabled }));
   };
-  return { snapshot, error, toggle };
+  const saveAdapter = (name: string, config: Partial<SnowdomeAdapterState['config']>) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
+    socket.send(JSON.stringify({ type: 'hot_plug_set', name, snowdome: config }));
+  };
+  return { snapshot, error, toggle, saveAdapter };
 }
 
 function HotPlugToggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }): ReactElement {
@@ -2044,7 +2050,40 @@ function McpCategoryView(): ReactElement {
           onToggle={hotPlug.toggle}
         />
       ) : null}
+      {hotPlug.snapshot?.adapters.map((adapter) => (
+        <SnowdomeAdapterView
+          key={adapter.name}
+          adapter={adapter}
+          error={hotPlug.error}
+          onToggle={hotPlug.toggle}
+          onSave={(next) => hotPlug.saveAdapter(adapter.name, next)}
+        />
+      ))}
       <McpServersForm config={config} saveState={saveState} onSave={save} />
+    </div>
+  );
+}
+
+/** Snowdome adapter: start/stop plus the actor settings. Saved to the runtime config, so a toggle or edit applies at once. */
+function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: SnowdomeAdapterState; error: string | null; onSave: (config: Partial<SnowdomeAdapterState['config']>) => void; onToggle: HotPlugToggleFn }): ReactElement {
+  const [draft, setDraft] = useState(adapter.config);
+  useEffect(() => { setDraft(adapter.config); }, [adapter.config]);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(adapter.config);
+  return (
+    <div className="hot-plug-list">
+      {error ? <p role="alert">{error}</p> : null}
+      <ul>
+        <li className={adapter.config.enabled ? '' : 'disabled'}>
+          <span>Snowdome 适配器</span>
+          <HotPlugToggle checked={adapter.config.enabled} label="adapter snowdome" onChange={(checked) => onToggle('adapter', 'snowdome', checked)} />
+        </li>
+      </ul>
+      <p className="skills-empty">启停立即生效。开启后以 actorId 订阅 Snowdome 世界，由模型决定移动与发言。</p>
+      {adapter.status?.error ? <p role="alert">{adapter.status.error}</p> : null}
+      <label>actorId <input value={draft.actorId} onChange={(event) => setDraft({ ...draft, actorId: event.target.value })} /></label>
+      <label>服务端地址 <input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
+      <label><input type="checkbox" checked={draft.autoBehavior} onChange={(event) => setDraft({ ...draft, autoBehavior: event.target.checked })} /> 自动决策（由模型决定行动）</label>
+      <button type="button" disabled={!dirty} onClick={() => onSave(draft)}>保存配置</button>
     </div>
   );
 }
