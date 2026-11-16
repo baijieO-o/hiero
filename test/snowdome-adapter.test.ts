@@ -364,3 +364,49 @@ test('the decision prompt carries recent conversation from both sides, oldest fi
   assert.ok(prompt.indexOf('hiore：你好') < prompt.indexOf('我：嗨'));
   assert.doesNotMatch(buildDecisionPrompt({ kind: 'observation', tick: 1, self: { id: 'hiero', position: { x: 0, y: 0, z: 0 }, room: 0, group: 'a' }, nearby: [], heard: [] }), /最近的对话/);
 });
+
+test('observations arriving while a decision is in flight do not stack model calls', async () => {
+  const socket = new FakeSocket();
+  let calls = 0;
+  let release: () => void = () => {};
+  const gateway: CompletionGateway = {
+    complete: async () => {
+      calls += 1;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { model: 'm', token_id: 'x', content: '{"kind":"move","target":{"x":1,"y":0,"z":0}}' };
+    },
+  };
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway, task });
+  await adapter.start();
+  socket.emit(heardObservation);
+  socket.emit(heardObservation);
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(calls, 1);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  adapter.stop();
+});
+
+test('with nobody speaking, model calls are throttled; a heard line is answered without waiting', async () => {
+  const socket = new FakeSocket();
+  let calls = 0;
+  const gateway: CompletionGateway = {
+    complete: async () => {
+      calls += 1;
+      return { model: 'm', token_id: 'x', content: '{"kind":"move","target":{"x":1,"y":0,"z":0}}' };
+    },
+  };
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway, task });
+  await adapter.start();
+  socket.emit(observation);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  socket.emit(observation);
+  socket.emit(observation);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(calls, 1);
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(calls, 2);
+  adapter.stop();
+});

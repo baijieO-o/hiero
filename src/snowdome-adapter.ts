@@ -125,7 +125,8 @@ export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpee
     `你最近说过：\n${mine}`,
     ...(conversation ? [conversation] : []),
     `刚才听到：\n${heard}`,
-    `当前观察包：${JSON.stringify(observation)}`,
+    // heard and recent are already shown above; leave them out of the JSON to save tokens.
+    `当前观察包：${JSON.stringify({ ...observation, heard: undefined, recent: undefined })}`,
   ].join('\n');
 }
 
@@ -188,6 +189,8 @@ const STALE_SESSION_CODES = new Set(['login_required', 'unknown_actor']);
 const DEFAULT_RECONNECT_MS = 5000;
 /** Snowdome moves a visitor out of town after 45 s without a heartbeat, so beat well inside that window. */
 const DEFAULT_HEARTBEAT_MS = 15000;
+/** With nobody speaking, the model is still asked at most this often so the resident can walk or start a conversation. */
+const IDLE_DECISION_MS = 10000;
 
 /** Client for Snowdome's agent WebSocket. Intents are sent only after the server accepts the subscription. */
 export class SnowdomeAdapter {
@@ -198,6 +201,11 @@ export class SnowdomeAdapter {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private readonly pendingReceipts: ((receipt: SnowdomeReceipt) => void)[] = [];
   private readonly recentSpeech: string[] = [];
+  /** True while a model decision is in flight; new observations wait instead of stacking requests. */
+  private deciding = false;
+  /** Set when a heard line arrived during a decision, so the next observation still gets answered. */
+  private pendingHeard = false;
+  private lastDecisionAt = 0;
   /** Bumped by start() and stop() so a connect attempt still in flight can tell it has been superseded. */
   private generation = 0;
 
@@ -331,7 +339,7 @@ export class SnowdomeAdapter {
   private async handleMessage(data: string): Promise<void> {
     const observation = parseObservation(data);
     if (observation) {
-      if (this.options.autoBehavior) await this.decide(observation);
+      if (this.options.autoBehavior) await this.maybeDecide(observation);
       return;
     }
     const receipt = this.parseReceipt(data);
@@ -350,6 +358,24 @@ export class SnowdomeAdapter {
   private rememberSpeech(text: string): void {
     this.recentSpeech.push(text);
     if (this.recentSpeech.length > RECENT_SPEECH_LIMIT) this.recentSpeech.shift();
+  }
+
+  /**
+   * Throttles model calls: at most one in flight, and with nobody speaking only one per IDLE_DECISION_MS.
+   * Skipped heard lines stay in `recent`, so the next decision still sees them.
+   */
+  private async maybeDecide(observation: SnowdomeObservation): Promise<void> {
+    if (observation.heard.length > 0) this.pendingHeard = true;
+    if (this.deciding) return;
+    if (!this.pendingHeard && Date.now() - this.lastDecisionAt < IDLE_DECISION_MS) return;
+    this.pendingHeard = false;
+    this.lastDecisionAt = Date.now();
+    this.deciding = true;
+    try {
+      await this.decide(observation);
+    } finally {
+      this.deciding = false;
+    }
   }
 
   private async decide(observation: SnowdomeObservation): Promise<void> {
