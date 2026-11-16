@@ -282,6 +282,16 @@ test('a silent decision is not sent even when someone spoke', async () => {
   adapter.stop();
 });
 
+test('the model decides whether to speak even when nobody has spoken', async () => {
+  const socket = new FakeSocket();
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway: gatewayReturning('{"kind":"speak","mode":"talk","text":"大家好，我是新来的。"}'), task });
+  await adapter.start();
+  socket.emit(observation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(socket.sent.at(-1), { kind: 'speak', actorId: 'visitor-1', mode: 'talk', text: '大家好，我是新来的。' });
+  adapter.stop();
+});
+
 test('hot-plug enables and disables a Snowdome adapter, closing its socket on disable', async () => {
   const root = mkdtempSync(join(tmpdir(), 'hiero-snowdome-'));
   const mcp = new McpToolClient();
@@ -346,4 +356,11 @@ test('a resident persona replaces the default persona in the decision prompt', (
   assert.ok(custom.startsWith('你是沉稳的 Bob'));
   assert.ok(!custom.includes('你是 hiero'));
   assert.ok(buildDecisionPrompt(observation, [], '').includes('你是 hiero'));
+});
+
+test('the decision prompt carries recent conversation from both sides, oldest first', () => {
+  const prompt = buildDecisionPrompt({ kind: 'observation', tick: 1, self: { id: 'hiero', position: { x: 0, y: 0, z: 0 }, room: 0, group: 'a' }, nearby: [], heard: [], recent: [{ kind: 'heard', speakerId: 'hiore', text: '你好' }, { kind: 'said', speakerId: 'hiero', text: '嗨' }] }, [], '');
+  assert.match(prompt, /hiore：你好\n我：嗨/);
+  assert.ok(prompt.indexOf('hiore：你好') < prompt.indexOf('我：嗨'));
+  assert.doesNotMatch(buildDecisionPrompt({ kind: 'observation', tick: 1, self: { id: 'hiero', position: { x: 0, y: 0, z: 0 }, room: 0, group: 'a' }, nearby: [], heard: [] }), /最近的对话/);
 });

@@ -42,6 +42,8 @@ export interface SnowdomeObservation {
   self: { id: string; position: { x: number; y: number; z: number }; room: number; group: string };
   nearby: { id: string; name: string; position: { x: number; y: number; z: number }; distance: number }[];
   heard: { speakerId: string; mode: string; text: string }[];
+  /** Recent conversation from oldest to newest; `heard` is cleared on each take, this is not. */
+  recent?: { kind: 'said' | 'heard'; speakerId: string; text: string }[];
 }
 
 export interface SnowdomeReceipt {
@@ -107,9 +109,13 @@ const DEFAULT_PERSONA = '你是 hiero，一个来到 Snowdome 小镇结识居民
 export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpeech: readonly string[] = [], persona = ''): string {
   const heard = observation.heard.length > 0 ? observation.heard.map((line) => `${line.speakerId}：${line.text}`).join('\n') : '（没有人对你说话）';
   const mine = recentSpeech.length > 0 ? recentSpeech.map((text) => `- ${text}`).join('\n') : '（你还没有说过话）';
+  const conversation = observation.recent?.length
+    ? `最近的对话（从旧到新）：\n${observation.recent.map((line) => `${line.kind === 'said' ? '我' : line.speakerId}：${line.text}`).join('\n')}`
+    : '';
   return [
     persona.trim() || DEFAULT_PERSONA,
-    '只有在有人对你说话时才发言；没有人说话时不要主动问候或自我介绍，可以四处走走（用 move）去认识新的居民。',
+    '请按照上面的性格自行判断：是否开口、何时开口、还是保持安静或四处走走（用 move），都由你决定。',
+    '回复要承接对方上一句的内容，不要重复已经说过的话，也不要回答对方没问的问题。',
     '不要重复你自己说过的话（见下方“你最近说过”）。',
     '只输出一个 JSON 对象，格式之一：',
     '{"kind":"move","target":{"x":整数,"y":整数,"z":整数}}（每次最多移动 3 格）',
@@ -117,6 +123,7 @@ export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpee
     '{"kind":"leave","destination":"backyard"}',
     '无需行动时，输出 {"kind":"speak","mode":"whisper","text":"（沉默）"}。',
     `你最近说过：\n${mine}`,
+    ...(conversation ? [conversation] : []),
     `刚才听到：\n${heard}`,
     `当前观察包：${JSON.stringify(observation)}`,
   ].join('\n');
@@ -355,7 +362,6 @@ export class SnowdomeAdapter {
         this.options.onError?.('模型输出不是合法的 Snowdome 意图，已拒绝。');
         return;
       }
-      if (intent.kind === 'speak' && observation.heard.length === 0) return;
       // 「（沉默）」 means the model chose not to speak; it is not a line to send.
       if (intent.kind === 'speak' && intent.text.includes('（沉默）')) return;
       if (intent.kind === 'speak') this.rememberSpeech(intent.text);
