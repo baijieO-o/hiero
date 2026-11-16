@@ -93,15 +93,24 @@ export function parseModelIntent(content: string, actorId: string): SnowdomeInte
   }
 }
 
-export function buildDecisionPrompt(observation: SnowdomeObservation): string {
+/** How many of this resident's own recent lines are shown to the model, so it can continue a topic without repeating itself. */
+export const RECENT_SPEECH_LIMIT = 5;
+
+export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpeech: readonly string[] = []): string {
+  const heard = observation.heard.length > 0 ? observation.heard.map((line) => `${line.speakerId}：${line.text}`).join('\n') : '（没有人对你说话）';
+  const mine = recentSpeech.length > 0 ? recentSpeech.map((text) => `- ${text}`).join('\n') : '（你还没有说过话）';
   return [
-    '你是 Snowdome 世界中的居民。根据下面的观察包决定下一步动作。',
+    '你是 hiero，一个来到 Snowdome 小镇结识居民、交流想法的访客。说话具体、真诚，回应对方实际说的内容。',
+    '只有在有人对你说话时才发言；没有人说话时输出沉默，不要主动问候或自我介绍。',
+    '不要重复你自己说过的话（见下方“你最近说过”）。',
     '只输出一个 JSON 对象，格式之一：',
     '{"kind":"move","target":{"x":整数,"y":整数,"z":整数}}（每次最多移动 3 格）',
     '{"kind":"speak","mode":"whisper|talk|shout","text":"台词"}',
     '{"kind":"leave","destination":"backyard"}',
     '无需行动时，输出 {"kind":"speak","mode":"whisper","text":"（沉默）"}。',
-    `观察包：${JSON.stringify(observation)}`,
+    `你最近说过：\n${mine}`,
+    `刚才听到：\n${heard}`,
+    `当前观察包：${JSON.stringify(observation)}`,
   ].join('\n');
 }
 
@@ -159,6 +168,7 @@ export class SnowdomeAdapter {
   private closed = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly pendingReceipts: ((receipt: SnowdomeReceipt) => void)[] = [];
+  private readonly recentSpeech: string[] = [];
 
   public constructor(private readonly options: SnowdomeAdapterOptions) {}
 
@@ -265,16 +275,23 @@ export class SnowdomeAdapter {
     }
   }
 
+  private rememberSpeech(text: string): void {
+    this.recentSpeech.push(text);
+    if (this.recentSpeech.length > RECENT_SPEECH_LIMIT) this.recentSpeech.shift();
+  }
+
   private async decide(observation: SnowdomeObservation): Promise<void> {
     if (!this.options.gateway || this.closed) return;
+    if (observation.heard.length === 0) return;
     try {
-      const prompt = buildDecisionPrompt(observation);
+      const prompt = buildDecisionPrompt(observation, this.recentSpeech);
       const response = await this.options.gateway.complete(this.options.task, { prompt, messages: [{ role: 'user', content: prompt }] });
       const intent = parseModelIntent(response.content, this.session?.actorId ?? '');
       if (!intent) {
         this.options.onError?.('模型输出不是合法的 Snowdome 意图，已拒绝。');
         return;
       }
+      if (intent.kind === 'speak' && !intent.text.includes('（沉默）')) this.rememberSpeech(intent.text);
       await this.send(intent);
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));

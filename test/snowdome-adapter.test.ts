@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { McpToolClient } from '../src/mcp-client.js';
-import { SnowdomeAdapter, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
+import { SnowdomeAdapter, buildDecisionPrompt, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
 import type { CompletionGateway } from '../src/model-gateway.js';
 import type { TaskContract } from '../src/contracts.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -27,7 +27,7 @@ class FakeSocket implements SnowdomeSocket {
   emit(value: unknown): void { this.messageHandler?.(JSON.stringify(value)); }
 }
 
-const observation = { kind: 'observation', tick: 1, time: 0, self: { id: 'hiero', position: { x: 0, y: 0, z: 0 }, room: 0, group: 'plaza' }, nearby: [], heard: [] };
+const observation = { kind: 'observation' as const, tick: 1, time: 0, self: { id: 'hiero', position: { x: 0, y: 0, z: 0 }, room: 0, group: 'plaza' }, nearby: [], heard: [] };
 
 const fakeLogin = async (): Promise<{ token: string; actorId: string }> => ({ token: 'tok', actorId: 'visitor-1' });
 
@@ -129,12 +129,34 @@ class StaleSocket extends FakeSocket {
   }
 }
 
+const heardObservation = { ...observation, kind: 'observation' as const, heard: [{ speakerId: 'alice', mode: 'talk', text: '你从哪里来？' }] };
+
+test('decision prompt carries persona, heard lines, and the resident\'s own recent speech', () => {
+  const prompt = buildDecisionPrompt(heardObservation, ['我从外面来']);
+  assert.match(prompt, /hiero/);
+  assert.match(prompt, /alice：你从哪里来？/);
+  assert.match(prompt, /你最近说过：\n- 我从外面来/);
+  assert.match(buildDecisionPrompt(observation), /你还没有说过话/);
+});
+
+test('autoBehavior skips the model when nobody has spoken to the resident', async () => {
+  const socket = new FakeSocket();
+  let calls = 0;
+  const gateway: CompletionGateway = { complete: async () => { calls += 1; return { model: 'm', token_id: 'x', content: '{"kind":"speak","mode":"talk","text":"大家好"}' }; } };
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway, task });
+  await adapter.start();
+  socket.emit(observation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(calls, 0);
+  adapter.stop();
+});
+
 test('autoBehavior sends a valid model intent and drops an illegal one', async () => {
   const socket = new FakeSocket();
   const errors: string[] = [];
   const legal = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway: gatewayReturning('{"kind":"move","target":{"x":2,"y":0,"z":0}}'), task, onError: (m) => errors.push(m) });
   await legal.start();
-  socket.emit(observation);
+  socket.emit(heardObservation);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(socket.sent.at(-1), { kind: 'move', actorId: 'visitor-1', target: { x: 2, y: 0, z: 0 } });
   legal.stop();
@@ -143,7 +165,7 @@ test('autoBehavior sends a valid model intent and drops an illegal one', async (
   const rejecting = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => illegalSocket, login: fakeLogin, gateway: gatewayReturning('{"kind":"place","block":"stone"}'), task, onError: (m) => errors.push(m) });
   await rejecting.start();
   const before = illegalSocket.sent.length;
-  illegalSocket.emit(observation);
+  illegalSocket.emit(heardObservation);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(illegalSocket.sent.length, before);
   assert.equal(errors.length, 1);
