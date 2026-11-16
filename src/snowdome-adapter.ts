@@ -107,7 +107,7 @@ export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpee
   const mine = recentSpeech.length > 0 ? recentSpeech.map((text) => `- ${text}`).join('\n') : '（你还没有说过话）';
   return [
     '你是 hiero，一个来到 Snowdome 小镇结识居民、交流想法的访客。说话具体、真诚，回应对方实际说的内容。',
-    '只有在有人对你说话时才发言；没有人说话时输出沉默，不要主动问候或自我介绍。',
+    '只有在有人对你说话时才发言；没有人说话时不要主动问候或自我介绍，可以四处走走（用 move）去认识新的居民。',
     '不要重复你自己说过的话（见下方“你最近说过”）。',
     '只输出一个 JSON 对象，格式之一：',
     '{"kind":"move","target":{"x":整数,"y":整数,"z":整数}}（每次最多移动 3 格）',
@@ -323,7 +323,6 @@ export class SnowdomeAdapter {
 
   private async decide(observation: SnowdomeObservation): Promise<void> {
     if (!this.options.gateway || this.closed) return;
-    if (observation.heard.length === 0) return;
     try {
       const prompt = buildDecisionPrompt(observation, this.recentSpeech);
       const response = await this.options.gateway.complete(this.options.task, { prompt, messages: [{ role: 'user', content: prompt }] });
@@ -332,6 +331,7 @@ export class SnowdomeAdapter {
         this.options.onError?.('模型输出不是合法的 Snowdome 意图，已拒绝。');
         return;
       }
+      if (intent.kind === 'speak' && observation.heard.length === 0) return;
       if (intent.kind === 'speak' && !intent.text.includes('（沉默）')) this.rememberSpeech(intent.text);
       await this.send(intent);
     } catch (cause) {

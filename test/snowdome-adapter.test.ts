@@ -100,7 +100,7 @@ test('a visitor adapter beats for its token and stops beating after stop()', asy
     task,
   });
   await adapter.start();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   adapter.stop();
   const count = beats.length;
   assert.ok(count >= 2);
@@ -181,15 +181,24 @@ test('decision prompt carries persona, heard lines, and the resident\'s own rece
   assert.match(buildDecisionPrompt(observation), /你还没有说过话/);
 });
 
-test('autoBehavior skips the model when nobody has spoken to the resident', async () => {
+test('with nobody speaking, autoBehavior may walk but never opens a conversation', async () => {
   const socket = new FakeSocket();
-  let calls = 0;
-  const gateway: CompletionGateway = { complete: async () => { calls += 1; return { model: 'm', token_id: 'x', content: '{"kind":"speak","mode":"talk","text":"大家好"}' }; } };
+  const gateway = gatewayReturning('{"kind":"speak","mode":"talk","text":"大家好"}');
   const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway, task });
   await adapter.start();
   socket.emit(observation);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(calls, 0);
+  assert.equal(socket.sent.some((message) => message.kind === 'speak'), false);
+  adapter.stop();
+});
+
+test('with nobody speaking, a model move is sent so the visitor walks around', async () => {
+  const socket = new FakeSocket();
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway: gatewayReturning('{"kind":"move","target":{"x":3,"y":0,"z":0}}'), task });
+  await adapter.start();
+  socket.emit(observation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(socket.sent.at(-1), { kind: 'move', actorId: 'visitor-1', target: { x: 3, y: 0, z: 0 } });
   adapter.stop();
 });
 
