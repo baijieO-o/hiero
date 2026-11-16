@@ -102,11 +102,13 @@ export function parseModelIntent(content: string, actorId: string): SnowdomeInte
 /** How many of this resident's own recent lines are shown to the model, so it can continue a topic without repeating itself. */
 export const RECENT_SPEECH_LIMIT = 5;
 
-export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpeech: readonly string[] = []): string {
+const DEFAULT_PERSONA = '你是 hiero，一个来到 Snowdome 小镇结识居民、交流想法的访客。说话具体、真诚，回应对方实际说的内容。';
+
+export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpeech: readonly string[] = [], persona = ''): string {
   const heard = observation.heard.length > 0 ? observation.heard.map((line) => `${line.speakerId}：${line.text}`).join('\n') : '（没有人对你说话）';
   const mine = recentSpeech.length > 0 ? recentSpeech.map((text) => `- ${text}`).join('\n') : '（你还没有说过话）';
   return [
-    '你是 hiero，一个来到 Snowdome 小镇结识居民、交流想法的访客。说话具体、真诚，回应对方实际说的内容。',
+    persona.trim() || DEFAULT_PERSONA,
     '只有在有人对你说话时才发言；没有人说话时不要主动问候或自我介绍，可以四处走走（用 move）去认识新的居民。',
     '不要重复你自己说过的话（见下方“你最近说过”）。',
     '只输出一个 JSON 对象，格式之一：',
@@ -133,6 +135,8 @@ export interface SnowdomeAdapterOptions {
   name: string;
   url?: string;
   loginUrl?: string;
+  /** Persona for this resident's decision prompt; falls back to the default when empty. */
+  persona?: string;
   autoBehavior: boolean;
   connect: SnowdomeSocketFactory;
   login?: (loginUrl: string, name: string) => Promise<SnowdomeSession>;
@@ -155,7 +159,8 @@ export function wsSocketFactory(url: string): Promise<SnowdomeSocket> {
       onMessage: (handler) => ws.on('message', (raw) => handler(raw.toString())),
       onClose: (handler) => ws.on('close', handler),
     }));
-    ws.once('error', reject);
+    // Stays attached after open so a later socket error cannot crash the process; reject is a no-op once resolved.
+    ws.on('error', reject);
   });
 }
 
@@ -163,6 +168,12 @@ export function wsSocketFactory(url: string): Promise<SnowdomeSocket> {
 export function snowdomeAdapterPlug(options: SnowdomeAdapterOptions): AdapterPlug {
   const adapter = new SnowdomeAdapter(options);
   return { start: () => adapter.start(), stop: () => adapter.stop() };
+}
+
+/** Derives the heartbeat endpoint from the login endpoint, keeping any path prefix. Throws when the login URL has an unexpected shape rather than beating the wrong route. */
+export function heartbeatUrlFor(loginUrl: string): string {
+  if (!/\/api\/login$/.test(loginUrl)) throw new Error(`Snowdome 登录地址必须以 /api/login 结尾：${loginUrl}`);
+  return loginUrl.replace(/\/api\/login$/, '/api/visitor/heartbeat');
 }
 
 /** Receipts that mean the visitor session is no longer valid, e.g. after Snowdome restarts and drops its in-memory tokens. */
@@ -180,29 +191,42 @@ export class SnowdomeAdapter {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private readonly pendingReceipts: ((receipt: SnowdomeReceipt) => void)[] = [];
   private readonly recentSpeech: string[] = [];
+  /** Bumped by start() and stop() so a connect attempt still in flight can tell it has been superseded. */
+  private generation = 0;
 
   public constructor(private readonly options: SnowdomeAdapterOptions) {}
 
   public async start(): Promise<void> {
     this.closed = false;
+    this.generation += 1;
     try {
-      await this.connect();
+      await this.connect(this.generation);
     } catch (cause) {
       this.stop();
       throw cause;
     }
   }
 
-  private async connect(): Promise<void> {
+  private async connect(generation: number): Promise<void> {
+    const isStale = () => this.closed || generation !== this.generation;
     const login = this.options.login ?? loginSnowdome;
     const session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name);
+    if (isStale()) return;
     this.session = session;
     const base = this.options.url ?? SNOWDOME_DEFAULT_URL;
     const socket = await this.options.connect(`${base}?token=${encodeURIComponent(session.token)}`);
+    if (isStale()) {
+      socket.close();
+      return;
+    }
     this.socket = socket;
     socket.onMessage((data) => this.handleMessage(data));
     socket.onClose(() => this.handleClose(socket));
     const receipt = await this.request({ kind: 'subscribe', actorId: session.actorId });
+    if (isStale()) {
+      socket.close();
+      return;
+    }
     if (!receipt.accepted) {
       socket.close();
       throw new Error(`Snowdome 订阅被拒绝：${receipt.reason_code}`);
@@ -214,8 +238,7 @@ export class SnowdomeAdapter {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     const heartbeat = this.options.heartbeat ?? heartbeatSnowdome;
-    const url = this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL;
-    const heartbeatUrl = url.replace(/\/api\/login$/, '/api/visitor/heartbeat');
+    const heartbeatUrl = heartbeatUrlFor(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL);
     this.heartbeatTimer = setInterval(() => {
       const session = this.session;
       if (!session) return;
@@ -251,7 +274,7 @@ export class SnowdomeAdapter {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       if (this.closed) return;
-      this.connect().catch((cause: unknown) => {
+      this.connect(this.generation).catch((cause: unknown) => {
         this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
         this.scheduleReconnect();
       });
@@ -277,6 +300,7 @@ export class SnowdomeAdapter {
 
   public stop(): void {
     this.closed = true;
+    this.generation += 1;
     this.stopHeartbeat();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
@@ -324,7 +348,7 @@ export class SnowdomeAdapter {
   private async decide(observation: SnowdomeObservation): Promise<void> {
     if (!this.options.gateway || this.closed) return;
     try {
-      const prompt = buildDecisionPrompt(observation, this.recentSpeech);
+      const prompt = buildDecisionPrompt(observation, this.recentSpeech, this.options.persona);
       const response = await this.options.gateway.complete(this.options.task, { prompt, messages: [{ role: 'user', content: prompt }] });
       const intent = parseModelIntent(response.content, this.session?.actorId ?? '');
       if (!intent) {
@@ -332,7 +356,9 @@ export class SnowdomeAdapter {
         return;
       }
       if (intent.kind === 'speak' && observation.heard.length === 0) return;
-      if (intent.kind === 'speak' && !intent.text.includes('（沉默）')) this.rememberSpeech(intent.text);
+      // 「（沉默）」 means the model chose not to speak; it is not a line to send.
+      if (intent.kind === 'speak' && intent.text.includes('（沉默）')) return;
+      if (intent.kind === 'speak') this.rememberSpeech(intent.text);
       await this.send(intent);
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));

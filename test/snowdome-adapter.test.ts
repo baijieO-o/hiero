@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { McpToolClient } from '../src/mcp-client.js';
-import { SnowdomeAdapter, buildDecisionPrompt, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
+import { SnowdomeAdapter, buildDecisionPrompt, heartbeatUrlFor, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
 import type { CompletionGateway } from '../src/model-gateway.js';
 import type { TaskContract } from '../src/contracts.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -73,6 +73,53 @@ test('start logs in, connects with the issued token, and subscribes to the serve
   adapter.stop();
 });
 
+test('heartbeat endpoint keeps the login path prefix and rejects unexpected login URLs', () => {
+  assert.equal(heartbeatUrlFor('http://localhost:3000/api/login'), 'http://localhost:3000/api/visitor/heartbeat');
+  assert.equal(heartbeatUrlFor('https://example.com/snow/api/login'), 'https://example.com/snow/api/visitor/heartbeat');
+  assert.throws(() => heartbeatUrlFor('https://example.com/login'), /必须以 \/api\/login 结尾/);
+});
+
+test('a custom login URL drives the heartbeat endpoint', async () => {
+  const beats: string[] = [];
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: false,
+    loginUrl: 'https://example.com/snow/api/login',
+    heartbeatIntervalMs: 5,
+    connect: async () => new FakeSocket(),
+    login: fakeLogin,
+    heartbeat: async (url) => { beats.push(url); return true; },
+    task,
+  });
+  await adapter.start();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  adapter.stop();
+  assert.ok(beats.length >= 1);
+  assert.ok(beats.every((url) => url === 'https://example.com/snow/api/visitor/heartbeat'));
+});
+
+test('stop() during login leaves no socket connected and no heartbeat running', async () => {
+  let releaseLogin: (() => void) | undefined;
+  const sockets: FakeSocket[] = [];
+  const beats: string[] = [];
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: false,
+    heartbeatIntervalMs: 5,
+    connect: async () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    login: () => new Promise((resolve) => { releaseLogin = () => resolve({ token: 'tok', actorId: 'visitor-1' }); }),
+    heartbeat: async (url) => { beats.push(url); return true; },
+    task,
+  });
+  const starting = adapter.start();
+  adapter.stop();
+  releaseLogin?.();
+  await starting;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sockets.length, 0);
+  assert.equal(beats.length, 0);
+});
+
 test('start does not connect when login is rejected', async () => {
   let connected = false;
   const adapter = new SnowdomeAdapter({
@@ -87,7 +134,8 @@ test('start does not connect when login is rejected', async () => {
   await assert.rejects(adapter.start(), /name_taken/);
   assert.equal(connected, false);
 });
-
+
+
 test('a visitor adapter beats for its token and stops beating after stop()', async () => {
   const beats: string[] = [];
   const adapter = new SnowdomeAdapter({
@@ -223,6 +271,17 @@ test('autoBehavior sends a valid model intent and drops an illegal one', async (
   rejecting.stop();
 });
 
+test('a silent decision is not sent even when someone spoke', async () => {
+  const socket = new FakeSocket();
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway: gatewayReturning('{"kind":"speak","mode":"whisper","text":"（沉默）"}'), task });
+  await adapter.start();
+  const before = socket.sent.length;
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(socket.sent.length, before);
+  adapter.stop();
+});
+
 test('hot-plug enables and disables a Snowdome adapter, closing its socket on disable', async () => {
   const root = mkdtempSync(join(tmpdir(), 'hiero-snowdome-'));
   const mcp = new McpToolClient();
@@ -242,4 +301,49 @@ test('hot-plug enables and disables a Snowdome adapter, closing its socket on di
   await registry.disposeAll();
   await mcp.close();
   rmSync(root, { recursive: true, force: true });
+});
+
+test('two residents share one gateway but keep separate logins, sockets and personas', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hiero-snowdome-'));
+  const mcp = new McpToolClient();
+  const registry = new HotPlugRegistry(mcp, root);
+  const prompts: string[] = [];
+  const gateway: CompletionGateway = {
+    complete: async (_task: TaskContract, request: { prompt: string }) => {
+      prompts.push(request.prompt);
+      return { content: '{"kind":"move","x":1,"y":0,"z":0}' } as never;
+    },
+  } as unknown as CompletionGateway;
+  const sockets = new Map<string, FakeSocket>();
+  const login = async (_url: string, name: string) => ({ token: `tok-${name}`, actorId: `visitor-${name}` });
+  const heartbeat = async () => true;
+  const connect = async (url: string) => {
+    const socket = new FakeSocket();
+    sockets.set(url, socket);
+    return socket;
+  };
+  registry.defineAdapter('snowdome:alice', () => snowdomeAdapterPlug({ name: 'alice', persona: '你是爱说笑的 Alice', login, heartbeat, heartbeatIntervalMs: 1000, connect, gateway, task, autoBehavior: false }));
+  registry.defineAdapter('snowdome:bob', () => snowdomeAdapterPlug({ name: 'bob', persona: '你是沉稳的 Bob', login, heartbeat, heartbeatIntervalMs: 1000, connect, gateway, task, autoBehavior: false }));
+
+  try {
+    assert.equal((await registry.enableAdapter('snowdome:alice')).enabled, true);
+    assert.equal((await registry.enableAdapter('snowdome:bob')).enabled, true);
+    assert.equal(sockets.size, 2);
+    assert.ok([...sockets.keys()].some((url) => url.includes('tok-alice')));
+    assert.ok([...sockets.keys()].some((url) => url.includes('tok-bob')));
+
+    await registry.disable('adapter:snowdome:alice');
+    assert.equal(registry.status('adapter:snowdome:bob').enabled, true);
+    assert.equal(registry.status('adapter:snowdome:alice').enabled, false);
+  } finally {
+    await registry.disposeAll();
+    await mcp.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+test('a resident persona replaces the default persona in the decision prompt', () => {
+  const custom = buildDecisionPrompt(observation, [], '你是沉稳的 Bob');
+  assert.ok(custom.startsWith('你是沉稳的 Bob'));
+  assert.ok(!custom.includes('你是 hiero'));
+  assert.ok(buildDecisionPrompt(observation, [], '').includes('你是 hiero'));
 });

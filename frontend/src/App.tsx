@@ -1917,12 +1917,14 @@ const SKILL_CATEGORIES = ['MCP 服务器', '技能', '指令', '智能体', '挂
 type SkillCategory = (typeof SKILL_CATEGORIES)[number];
 
 type HotPlugItem = { name: string; enabled: boolean };
-type SnowdomeAdapterState = { name: string; config: { enabled: boolean; name: string; url: string; autoBehavior: boolean }; status: { enabled: boolean; error?: string } | undefined };
-type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; adapters: SnowdomeAdapterState[]; skills: HotPlugItem[]; tools: HotPlugItem[] };
+type SnowdomeResidentState = { name: string; url: string; autoBehavior: boolean; persona: string };
+type SnowdomeConfigDraft = { residents: SnowdomeResidentState[] };
+type SnowdomeAdapterState = { enabled: boolean; residents: SnowdomeResidentState[]; statuses: Record<string, { enabled: boolean; error?: string } | undefined> };
+type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; adapters: SnowdomeAdapterState; skills: HotPlugItem[]; tools: HotPlugItem[] };
 type HotPlugKind = 'mcp' | 'skill' | 'tool' | 'adapter';
 
 /** Hot-plug state for MCP servers, skills and built-in tools, sharing one backend socket per view. */
-function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null; toggle: (kind: HotPlugKind, name: string, enabled: boolean) => void; saveAdapter: (name: string, config: Partial<SnowdomeAdapterState['config']>) => void } {
+function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null; toggle: (kind: HotPlugKind, name: string, enabled: boolean) => void; saveAdapter: (config: SnowdomeConfigDraft) => void } {
   const [snapshot, setSnapshot] = useState<HotPlugSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -1948,10 +1950,10 @@ function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null;
     if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
     socket.send(JSON.stringify({ type: 'hot_plug_set', kind, name, enabled }));
   };
-  const saveAdapter = (name: string, config: Partial<SnowdomeAdapterState['config']>) => {
+  const saveAdapter = (config: SnowdomeConfigDraft) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
-    socket.send(JSON.stringify({ type: 'hot_plug_set', name, snowdome: config }));
+    socket.send(JSON.stringify({ type: 'hot_plug_set', snowdome: config }));
   };
   return { snapshot, error, toggle, saveAdapter };
 }
@@ -2050,44 +2052,55 @@ function McpCategoryView(): ReactElement {
           onToggle={hotPlug.toggle}
         />
       ) : null}
-      {hotPlug.snapshot?.adapters.map((adapter) => (
+      {hotPlug.snapshot ? (
         <SnowdomeAdapterView
-          key={adapter.name}
-          adapter={adapter}
+          adapter={hotPlug.snapshot.adapters}
           error={hotPlug.error}
           onToggle={hotPlug.toggle}
-          onSave={(next) => hotPlug.saveAdapter(adapter.name, next)}
+          onSave={hotPlug.saveAdapter}
         />
-      ))}
+      ) : null}
       <McpServersForm config={config} saveState={saveState} onSave={save} />
     </div>
   );
 }
 
-/** Snowdome adapter: start/stop plus the actor settings. Saved to the runtime config, so a toggle or edit applies at once. */
-function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: SnowdomeAdapterState; error: string | null; onSave: (config: Partial<SnowdomeAdapterState['config']>) => void; onToggle: HotPlugToggleFn }): ReactElement {
-  const [draft, setDraft] = useState(adapter.config);
-  useEffect(() => { setDraft(adapter.config); }, [adapter.config]);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(adapter.config);
+/** Snowdome adapter: a global switch plus the resident list. Each resident has its own Snowdome address and persona; all share one model. */
+function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: SnowdomeAdapterState; error: string | null; onSave: (config: SnowdomeConfigDraft) => void; onToggle: HotPlugToggleFn }): ReactElement {
+  const [residents, setResidents] = useState<SnowdomeResidentState[]>(adapter.residents);
+  useEffect(() => { setResidents(adapter.residents); }, [adapter.residents]);
+  const dirty = JSON.stringify(residents) !== JSON.stringify(adapter.residents);
+  const update = (index: number, patch: Partial<SnowdomeResidentState>) => setResidents(residents.map((resident, i) => (i === index ? { ...resident, ...patch } : resident)));
+  const add = () => setResidents([...residents, { name: `居民${residents.length + 1}`, url: 'ws://localhost:3000/agent', autoBehavior: true, persona: '' }]);
+  const remove = (index: number) => setResidents(residents.filter((_, i) => i !== index));
   return (
     <div className="hot-plug-list">
       {error ? <p role="alert">{error}</p> : null}
       <ul>
-        <li className={adapter.config.enabled ? '' : 'disabled'}>
+        <li className={adapter.enabled ? '' : 'disabled'}>
           <span>Snowdome 适配器</span>
-          <HotPlugToggle checked={adapter.config.enabled} label="adapter snowdome" onChange={(checked) => onToggle('adapter', 'snowdome', checked)} />
+          <HotPlugToggle checked={adapter.enabled} label="adapter snowdome" onChange={(checked) => onToggle('adapter', 'snowdome', checked)} />
         </li>
       </ul>
-      <p className="skills-empty">      启停立即生效。开启后以昵称登录 Snowdome 小镇（服务端分配 actorId），由模型决定移动与发言。</p>
-      {adapter.status?.error ? <p role="alert">{adapter.status.error}</p> : null}
-      <label>昵称 <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-      <label>服务端地址 <input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
-      <label><input type="checkbox" checked={draft.autoBehavior} onChange={(event) => setDraft({ ...draft, autoBehavior: event.target.checked })} /> 自动决策（由模型决定行动）</label>
-      <button type="button" disabled={!dirty} onClick={() => onSave(draft)}>保存配置</button>
+      <p className="skills-empty">启停立即生效。开启后每个居民各自以昵称登录其 Snowdome 地址，共用同一个模型，人设各自配置。</p>
+      {residents.map((resident, index) => {
+        const status = adapter.statuses[resident.name];
+        return (
+          <div key={index} className="snowdome-resident">
+            {status?.error ? <p role="alert">{status.error}</p> : null}
+            <label>昵称 <input value={resident.name} onChange={(event) => update(index, { name: event.target.value })} /></label>
+            <label>服务端地址 <input value={resident.url} onChange={(event) => update(index, { url: event.target.value })} /></label>
+            <label>人设提示词 <textarea value={resident.persona} onChange={(event) => update(index, { persona: event.target.value })} /></label>
+            <label><input type="checkbox" checked={resident.autoBehavior} onChange={(event) => update(index, { autoBehavior: event.target.checked })} /> 自动决策（由模型决定行动）</label>
+            <button type="button" onClick={() => remove(index)}>删除居民</button>
+          </div>
+        );
+      })}
+      <button type="button" onClick={add}>添加居民</button>
+      <button type="button" disabled={!dirty} onClick={() => onSave({ residents })}>保存配置</button>
     </div>
   );
 }
-
 function SkillsBuffer(): ReactElement {
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [category, setCategory] = useState<SkillCategory>('技能');
