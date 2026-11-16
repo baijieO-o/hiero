@@ -121,6 +121,7 @@ export interface SnowdomeAdapterOptions {
   autoBehavior: boolean;
   connect: SnowdomeSocketFactory;
   login?: (loginUrl: string, name: string) => Promise<SnowdomeSession>;
+  reconnectDelayMs?: number;
   gateway?: CompletionGateway;
   task: TaskContract;
   onReceipt?: (receipt: SnowdomeReceipt) => void;
@@ -147,25 +148,71 @@ export function snowdomeAdapterPlug(options: SnowdomeAdapterOptions): AdapterPlu
   return { start: () => adapter.start(), stop: () => adapter.stop() };
 }
 
+/** Receipts that mean the visitor session is no longer valid, e.g. after Snowdome restarts and drops its in-memory tokens. */
+const STALE_SESSION_CODES = new Set(['login_required', 'unknown_actor']);
+const DEFAULT_RECONNECT_MS = 5000;
+
 /** Client for Snowdome's agent WebSocket. Intents are sent only after the server accepts the subscription. */
 export class SnowdomeAdapter {
   private socket: SnowdomeSocket | undefined;
   private session: SnowdomeSession | undefined;
-  private closed = false;
+  private closed = true;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly pendingReceipts: ((receipt: SnowdomeReceipt) => void)[] = [];
 
   public constructor(private readonly options: SnowdomeAdapterOptions) {}
 
   public async start(): Promise<void> {
+    this.closed = false;
+    try {
+      await this.connect();
+    } catch (cause) {
+      this.stop();
+      throw cause;
+    }
+  }
+
+  private async connect(): Promise<void> {
     const login = this.options.login ?? loginSnowdome;
-    this.session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name);
+    const session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name);
+    this.session = session;
     const base = this.options.url ?? SNOWDOME_DEFAULT_URL;
-    const socket = await this.options.connect(`${base}?token=${encodeURIComponent(this.session.token)}`);
+    const socket = await this.options.connect(`${base}?token=${encodeURIComponent(session.token)}`);
     this.socket = socket;
     socket.onMessage((data) => this.handleMessage(data));
-    socket.onClose(() => { this.socket = undefined; });
-    const receipt = await this.request({ kind: 'subscribe', actorId: this.session.actorId });
-    if (!receipt.accepted) throw new Error(`Snowdome 订阅被拒绝：${receipt.reason_code}`);
+    socket.onClose(() => this.handleClose(socket));
+    const receipt = await this.request({ kind: 'subscribe', actorId: session.actorId });
+    if (!receipt.accepted) {
+      socket.close();
+      throw new Error(`Snowdome 订阅被拒绝：${receipt.reason_code}`);
+    }
+  }
+
+  private handleClose(socket: SnowdomeSocket): void {
+    if (socket !== this.socket) return;
+    this.socket = undefined;
+    this.resolvePendingAsDisconnected();
+    if (!this.closed) this.scheduleReconnect();
+  }
+
+  /** Re-logs in and reconnects after an unexpected drop; keeps retrying until stop() is called. */
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer || this.closed) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.closed) return;
+      this.connect().catch((cause: unknown) => {
+        this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
+        this.scheduleReconnect();
+      });
+    }, this.options.reconnectDelayMs ?? DEFAULT_RECONNECT_MS);
+  }
+
+  private resolvePendingAsDisconnected(): void {
+    const waiting = this.pendingReceipts.splice(0);
+    for (const resolve of waiting) {
+      resolve({ accepted: false, reason_code: 'disconnected', state_delta: {}, cooldown_ms: 0 });
+    }
   }
 
   /** Sends an intent; the socket is only written after parsing so malformed intents never leave the process. */
@@ -180,14 +227,19 @@ export class SnowdomeAdapter {
 
   public stop(): void {
     this.closed = true;
-    this.socket?.close();
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    const socket = this.socket;
     this.socket = undefined;
+    socket?.close();
+    this.resolvePendingAsDisconnected();
   }
 
   private request(message: Record<string, unknown>): Promise<SnowdomeReceipt> {
     return new Promise((resolve) => {
       this.pendingReceipts.push((receipt) => {
         this.options.onReceipt?.(receipt);
+        if (STALE_SESSION_CODES.has(receipt.reason_code) && message.kind !== 'subscribe') this.socket?.close();
         resolve(receipt);
       });
       this.socket?.send(JSON.stringify(message));

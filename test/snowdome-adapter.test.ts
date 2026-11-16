@@ -14,6 +14,7 @@ const task = { task_id: 't', workspace_path: '.', model_config: { preferred_mode
 class FakeSocket implements SnowdomeSocket {
   readonly sent: Record<string, unknown>[] = [];
   closed = false;
+  protected closeHandler: (() => void) | undefined;
   private messageHandler: ((data: string) => void) | undefined;
   send(data: string): void {
     const message = JSON.parse(data) as Record<string, unknown>;
@@ -22,7 +23,7 @@ class FakeSocket implements SnowdomeSocket {
   }
   close(): void { this.closed = true; }
   onMessage(handler: (data: string) => void): void { this.messageHandler = handler; }
-  onClose(): void {}
+  onClose(handler: () => void): void { this.closeHandler = handler; }
   emit(value: unknown): void { this.messageHandler?.(JSON.stringify(value)); }
 }
 
@@ -86,6 +87,47 @@ test('start does not connect when login is rejected', async () => {
   await assert.rejects(adapter.start(), /name_taken/);
   assert.equal(connected, false);
 });
+
+test('a stale-session receipt triggers re-login and reconnect with the new token', async () => {
+  const sockets: StaleSocket[] = [];
+  const tokens: string[] = [];
+  let logins = 0;
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: false,
+    reconnectDelayMs: 1,
+    connect: async (url) => { tokens.push(url.split('token=')[1] ?? ''); const socket = new StaleSocket(sockets.length === 0); sockets.push(socket); return socket; },
+    login: async () => { logins += 1; return { token: `tok${logins}`, actorId: `visitor-${logins}` }; },
+    task,
+    onError: () => {},
+  });
+  await adapter.start();
+  const receipt = await adapter.send({ kind: 'move', actorId: 'visitor-1', target: { x: 1, y: 0, z: 0 } });
+  assert.equal(receipt.reason_code, 'login_required');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(logins, 2);
+  assert.deepEqual(tokens, ['tok1', 'tok2']);
+  assert.equal(adapter.actorId, 'visitor-2');
+  assert.deepEqual(sockets[1]?.sent[0], { kind: 'subscribe', actorId: 'visitor-2' });
+  adapter.stop();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(logins, 2);
+});
+
+class StaleSocket extends FakeSocket {
+  constructor(private readonly staleOnMove: boolean) { super(); }
+  override close(): void { if (!this.closed) { this.closed = true; this.closeHandler?.(); } }
+  override send(data: string): void {
+    const message = JSON.parse(data) as Record<string, unknown>;
+    this.sent.push(message);
+    if (this.staleOnMove && message.kind === 'move') {
+      this.emit({ accepted: false, reason_code: 'login_required', state_delta: {}, cooldown_ms: 0 });
+      this.close();
+      return;
+    }
+    this.emit({ accepted: true, reason_code: 'ok', state_delta: {}, cooldown_ms: 0 });
+  }
+}
 
 test('autoBehavior sends a valid model intent and drops an illegal one', async () => {
   const socket = new FakeSocket();
