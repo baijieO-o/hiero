@@ -4,6 +4,26 @@ import type { TaskContract } from './contracts.js';
 import type { AdapterPlug } from './hot-plug.js';
 
 export const SNOWDOME_DEFAULT_URL = 'ws://localhost:3000/agent';
+export const SNOWDOME_DEFAULT_LOGIN_URL = 'http://localhost:3000/api/login';
+
+/** Visitor session issued by Snowdome's login endpoint; the server assigns the actorId, not the client. */
+export interface SnowdomeSession {
+  token: string;
+  actorId: string;
+}
+
+export async function loginSnowdome(loginUrl: string, name: string, fetchImpl: typeof fetch = fetch): Promise<SnowdomeSession> {
+  const response = await fetchImpl(loginUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  const body = await response.json() as { accepted?: boolean; token?: string; actorId?: string; reason_code?: string };
+  if (!response.ok || !body.accepted || !body.token || !body.actorId) {
+    throw new Error(`Snowdome 登录失败：${body.reason_code ?? response.status}`);
+  }
+  return { token: body.token, actorId: body.actorId };
+}
 
 export type SnowdomeIntent =
   | { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }
@@ -95,10 +115,12 @@ export function parseObservation(raw: string): SnowdomeObservation | null {
 }
 
 export interface SnowdomeAdapterOptions {
-  actorId: string;
+  name: string;
   url?: string;
+  loginUrl?: string;
   autoBehavior: boolean;
   connect: SnowdomeSocketFactory;
+  login?: (loginUrl: string, name: string) => Promise<SnowdomeSession>;
   gateway?: CompletionGateway;
   task: TaskContract;
   onReceipt?: (receipt: SnowdomeReceipt) => void;
@@ -128,23 +150,32 @@ export function snowdomeAdapterPlug(options: SnowdomeAdapterOptions): AdapterPlu
 /** Client for Snowdome's agent WebSocket. Intents are sent only after the server accepts the subscription. */
 export class SnowdomeAdapter {
   private socket: SnowdomeSocket | undefined;
+  private session: SnowdomeSession | undefined;
   private closed = false;
   private readonly pendingReceipts: ((receipt: SnowdomeReceipt) => void)[] = [];
 
   public constructor(private readonly options: SnowdomeAdapterOptions) {}
 
   public async start(): Promise<void> {
-    const socket = await this.options.connect(this.options.url ?? SNOWDOME_DEFAULT_URL);
+    const login = this.options.login ?? loginSnowdome;
+    this.session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name);
+    const base = this.options.url ?? SNOWDOME_DEFAULT_URL;
+    const socket = await this.options.connect(`${base}?token=${encodeURIComponent(this.session.token)}`);
     this.socket = socket;
     socket.onMessage((data) => this.handleMessage(data));
     socket.onClose(() => { this.socket = undefined; });
-    await this.request({ kind: 'subscribe', actorId: this.options.actorId });
+    const receipt = await this.request({ kind: 'subscribe', actorId: this.session.actorId });
+    if (!receipt.accepted) throw new Error(`Snowdome 订阅被拒绝：${receipt.reason_code}`);
   }
 
   /** Sends an intent; the socket is only written after parsing so malformed intents never leave the process. */
   public async send(intent: SnowdomeIntent): Promise<SnowdomeReceipt> {
-    if (!this.socket) throw new Error('Snowdome adapter is not connected.');
-    return this.request(intent);
+    if (!this.socket || !this.session) throw new Error('Snowdome adapter is not connected.');
+    return this.request({ ...intent, actorId: this.session.actorId });
+  }
+
+  public get actorId(): string | undefined {
+    return this.session?.actorId;
   }
 
   public stop(): void {
@@ -187,7 +218,7 @@ export class SnowdomeAdapter {
     try {
       const prompt = buildDecisionPrompt(observation);
       const response = await this.options.gateway.complete(this.options.task, { prompt, messages: [{ role: 'user', content: prompt }] });
-      const intent = parseModelIntent(response.content, this.options.actorId);
+      const intent = parseModelIntent(response.content, this.session?.actorId ?? '');
       if (!intent) {
         this.options.onError?.('模型输出不是合法的 Snowdome 意图，已拒绝。');
         return;

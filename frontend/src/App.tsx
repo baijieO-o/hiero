@@ -1917,7 +1917,7 @@ const SKILL_CATEGORIES = ['MCP 服务器', '技能', '指令', '智能体', '挂
 type SkillCategory = (typeof SKILL_CATEGORIES)[number];
 
 type HotPlugItem = { name: string; enabled: boolean };
-type SnowdomeAdapterState = { name: string; config: { enabled: boolean; actorId: string; url: string; autoBehavior: boolean }; status: { enabled: boolean; error?: string } | undefined };
+type SnowdomeAdapterState = { name: string; config: { enabled: boolean; name: string; url: string; autoBehavior: boolean }; status: { enabled: boolean; error?: string } | undefined };
 type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; adapters: SnowdomeAdapterState[]; skills: HotPlugItem[]; tools: HotPlugItem[] };
 type HotPlugKind = 'mcp' | 'skill' | 'tool' | 'adapter';
 
@@ -2078,9 +2078,9 @@ function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: Sn
           <HotPlugToggle checked={adapter.config.enabled} label="adapter snowdome" onChange={(checked) => onToggle('adapter', 'snowdome', checked)} />
         </li>
       </ul>
-      <p className="skills-empty">启停立即生效。开启后以 actorId 订阅 Snowdome 世界，由模型决定移动与发言。</p>
+      <p className="skills-empty">      启停立即生效。开启后以昵称登录 Snowdome 小镇（服务端分配 actorId），由模型决定移动与发言。</p>
       {adapter.status?.error ? <p role="alert">{adapter.status.error}</p> : null}
-      <label>actorId <input value={draft.actorId} onChange={(event) => setDraft({ ...draft, actorId: event.target.value })} /></label>
+      <label>昵称 <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
       <label>服务端地址 <input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
       <label><input type="checkbox" checked={draft.autoBehavior} onChange={(event) => setDraft({ ...draft, autoBehavior: event.target.checked })} /> 自动决策（由模型决定行动）</label>
       <button type="button" disabled={!dirty} onClick={() => onSave(draft)}>保存配置</button>

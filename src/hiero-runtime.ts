@@ -1084,7 +1084,7 @@ export class HieroRuntime {
 
   /**
    * Applies the saved Snowdome config: defines the adapter from the current settings and enables or disables it.
-   * Redefining on every apply means a changed actorId or URL takes effect after a toggle.
+   * Redefining on every apply means a changed name or URL takes effect after a toggle.
    */
   private async applySnowdome(): Promise<void> {
     const config = readSnowdomeConfig();
@@ -1092,7 +1092,7 @@ export class HieroRuntime {
     await this.hotPlug.disable(id);
     if (!config.enabled) return;
     this.hotPlug.defineAdapter(SNOWDOME_NAME, () => snowdomeAdapterPlug({
-      actorId: config.actorId,
+      name: config.name,
       url: config.url,
       autoBehavior: config.autoBehavior,
       connect: wsSocketFactory,

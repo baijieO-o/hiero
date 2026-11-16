@@ -6,7 +6,7 @@ import { SNOWDOME_DEFAULT_URL } from './snowdome-adapter.js';
 
 const SnowdomeConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  actorId: z.string().min(1).default('hiero'),
+  name: z.string().trim().min(1).max(16).default('hiero'),
   url: z.string().min(1).default(SNOWDOME_DEFAULT_URL),
   autoBehavior: z.boolean().default(true),
 });
