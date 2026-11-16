@@ -25,6 +25,12 @@ export async function loginSnowdome(loginUrl: string, name: string, fetchImpl: t
   return { token: body.token, actorId: body.actorId };
 }
 
+/** Keeps a visitor online; resolves false when Snowdome no longer recognises the token (HTTP 401). */
+export async function heartbeatSnowdome(heartbeatUrl: string, token: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  const response = await fetchImpl(`${heartbeatUrl}?token=${encodeURIComponent(token)}`, { method: 'POST' });
+  return response.ok;
+}
+
 export type SnowdomeIntent =
   | { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }
   | { kind: 'speak'; actorId: string; mode: 'whisper' | 'talk' | 'shout'; text: string }
@@ -130,6 +136,8 @@ export interface SnowdomeAdapterOptions {
   autoBehavior: boolean;
   connect: SnowdomeSocketFactory;
   login?: (loginUrl: string, name: string) => Promise<SnowdomeSession>;
+  heartbeat?: (heartbeatUrl: string, token: string) => Promise<boolean>;
+  heartbeatIntervalMs?: number;
   reconnectDelayMs?: number;
   gateway?: CompletionGateway;
   task: TaskContract;
@@ -160,6 +168,8 @@ export function snowdomeAdapterPlug(options: SnowdomeAdapterOptions): AdapterPlu
 /** Receipts that mean the visitor session is no longer valid, e.g. after Snowdome restarts and drops its in-memory tokens. */
 const STALE_SESSION_CODES = new Set(['login_required', 'unknown_actor']);
 const DEFAULT_RECONNECT_MS = 5000;
+/** Snowdome moves a visitor out of town after 45 s without a heartbeat, so beat well inside that window. */
+const DEFAULT_HEARTBEAT_MS = 15000;
 
 /** Client for Snowdome's agent WebSocket. Intents are sent only after the server accepts the subscription. */
 export class SnowdomeAdapter {
@@ -167,6 +177,7 @@ export class SnowdomeAdapter {
   private session: SnowdomeSession | undefined;
   private closed = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private readonly pendingReceipts: ((receipt: SnowdomeReceipt) => void)[] = [];
   private readonly recentSpeech: string[] = [];
 
@@ -196,11 +207,40 @@ export class SnowdomeAdapter {
       socket.close();
       throw new Error(`Snowdome 订阅被拒绝：${receipt.reason_code}`);
     }
+    this.startHeartbeat();
+  }
+
+  /** Beats for the current token; a 401 means the session expired, so dropping the socket triggers a re-login. */
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    const heartbeat = this.options.heartbeat ?? heartbeatSnowdome;
+    const url = this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL;
+    const heartbeatUrl = url.replace(/\/api\/login$/, '/api/visitor/heartbeat');
+    this.heartbeatTimer = setInterval(() => {
+      const session = this.session;
+      if (!session) return;
+      heartbeat(heartbeatUrl, session.token).then((alive) => {
+        if (alive || this.session !== session) return;
+        this.options.onError?.('Snowdome 心跳失效，重新登录');
+        const socket = this.socket;
+        this.socket = undefined;
+        this.stopHeartbeat();
+        socket?.close();
+        this.resolvePendingAsDisconnected();
+        this.scheduleReconnect();
+      }).catch(() => undefined);
+    }, this.options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
   }
 
   private handleClose(socket: SnowdomeSocket): void {
     if (socket !== this.socket) return;
     this.socket = undefined;
+    this.stopHeartbeat();
     this.resolvePendingAsDisconnected();
     if (!this.closed) this.scheduleReconnect();
   }
@@ -237,6 +277,7 @@ export class SnowdomeAdapter {
 
   public stop(): void {
     this.closed = true;
+    this.stopHeartbeat();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     const socket = this.socket;

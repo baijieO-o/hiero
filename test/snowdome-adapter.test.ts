@@ -87,6 +87,48 @@ test('start does not connect when login is rejected', async () => {
   await assert.rejects(adapter.start(), /name_taken/);
   assert.equal(connected, false);
 });
+
+test('a visitor adapter beats for its token and stops beating after stop()', async () => {
+  const beats: string[] = [];
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: false,
+    heartbeatIntervalMs: 5,
+    connect: async () => new FakeSocket(),
+    login: fakeLogin,
+    heartbeat: async (url, token) => { beats.push(`${url}|${token}`); return true; },
+    task,
+  });
+  await adapter.start();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  adapter.stop();
+  const count = beats.length;
+  assert.ok(count >= 2);
+  assert.equal(beats[0], 'http://localhost:3000/api/visitor/heartbeat|tok');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(beats.length, count);
+});
+
+test('a rejected heartbeat (401) drops the session and re-logs in', async () => {
+  let logins = 0;
+  const sockets: FakeSocket[] = [];
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: false,
+    heartbeatIntervalMs: 5,
+    reconnectDelayMs: 1,
+    connect: async () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    login: async () => { logins += 1; return { token: `tok${logins}`, actorId: `visitor-${logins}` }; },
+    heartbeat: async () => false,
+    task,
+    onError: () => {},
+  });
+  await adapter.start();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  adapter.stop();
+  assert.ok(logins >= 2);
+  assert.equal(sockets[0]?.closed, true);
+});
 
 test('a stale-session receipt triggers re-login and reconnect with the new token', async () => {
   const sockets: StaleSocket[] = [];
