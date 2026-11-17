@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { McpToolClient } from '../src/mcp-client.js';
-import { SnowdomeAdapter, buildDecisionPrompt, heartbeatUrlFor, loginSnowdome, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
+import { SnowdomeAdapter, buildDecisionPrompt, fetchSnowdomeHistory, historyUrlFor, heartbeatUrlFor, loginSnowdome, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
 import type { CompletionGateway } from '../src/model-gateway.js';
 import type { TaskContract } from '../src/contracts.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -431,4 +431,71 @@ test('with nobody speaking, model calls are throttled; a heard line is answered 
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(calls, 2);
   adapter.stop();
+});
+test('onDayStart fires once per new game day, from day_index', async () => {
+  const socket = new FakeSocket();
+  const days: number[] = [];
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: false, connect: async () => socket, login: fakeLogin, task, onDayStart: (day) => { days.push(day); } });
+  await adapter.start();
+  socket.emit({ ...observation, day_index: 3, phase: 'day' });
+  socket.emit({ ...observation, day_index: 3, phase: 'dusk' });
+  socket.emit({ ...observation, day_index: 4, day_start: 4, phase: 'dawn' });
+  socket.emit({ ...observation, day_index: 4, phase: 'day' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(days, [3, 4]);
+  adapter.stop();
+});
+
+test('onObservation intents are validated and sent; illegal ones are dropped', async () => {
+  const socket = new FakeSocket();
+  const errors: string[] = [];
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: true,
+    connect: async () => socket,
+    login: fakeLogin,
+    task,
+    onError: (m) => errors.push(m),
+    onObservation: () => [{ kind: 'speak', actorId: '', mode: 'talk', text: '早上好' }],
+  });
+  await adapter.start();
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(socket.sent.at(-1), { kind: 'speak', actorId: 'visitor-1', mode: 'talk', text: '早上好' });
+  assert.equal(errors.length, 0);
+  adapter.stop();
+});
+
+test('an illegal third-party intent is rejected and reported', async () => {
+  const socket = new FakeSocket();
+  const errors: string[] = [];
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: true,
+    connect: async () => socket,
+    login: fakeLogin,
+    task,
+    onError: (m) => errors.push(m),
+    onObservation: () => [{ kind: 'place', block: 'stone' } as unknown as { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }],
+  });
+  await adapter.start();
+  const before = socket.sent.length;
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(socket.sent.length, before);
+  assert.equal(errors.length, 1);
+  adapter.stop();
+});
+
+test('history endpoint is derived from the login URL and clamps since and limit', async () => {
+  assert.equal(historyUrlFor('http://localhost:3000/api/login'), 'http://localhost:3000/api/agent/history');
+  assert.throws(() => historyUrlFor('http://localhost:3000/login'));
+  const calls: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ events: [{ seq: 7, type: 'speak' }] }), { status: 200 });
+  }) as typeof fetch;
+  const events = await fetchSnowdomeHistory('http://localhost:3000/api/agent/history', 'tok', { since: -5, limit: 5000 }, fakeFetch);
+  assert.deepEqual(events, [{ seq: 7, type: 'speak' }]);
+  assert.equal(calls[0], 'http://localhost:3000/api/agent/history?token=tok&since=0&limit=1000');
 });

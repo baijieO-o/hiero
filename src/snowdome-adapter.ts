@@ -57,6 +57,12 @@ export interface SnowdomeObservation {
   heard: { speakerId: string; mode: string; text: string }[];
   /** Recent conversation from oldest to newest; `heard` is cleared on each take, this is not. */
   recent?: { kind: 'said' | 'heard'; speakerId: string; text: string }[];
+  /** Game day index from 0; read this rather than relying on `day_start`, which is absent on the first observation. */
+  day_index?: number;
+  day_fraction?: number;
+  phase?: 'night' | 'dawn' | 'day' | 'dusk';
+  /** Present once per game day per subscriber, after the first observation of that day. */
+  day_start?: number;
 }
 
 export interface SnowdomeReceipt {
@@ -64,6 +70,34 @@ export interface SnowdomeReceipt {
   reason_code: string;
   state_delta: Record<string, unknown>;
   cooldown_ms: number;
+}
+
+export interface SnowdomeHistoryEvent {
+  seq?: number;
+  type?: string;
+  [key: string]: unknown;
+}
+
+/** Read-only raw history from Snowdome's in-memory window; summarising it is the third party's job. */
+export async function fetchSnowdomeHistory(
+  historyUrl: string,
+  token: string,
+  options: { since?: number; limit?: number } = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<SnowdomeHistoryEvent[]> {
+  const limit = Math.min(1000, Math.max(1, Math.floor(options.limit ?? 200)));
+  const since = Math.max(0, Math.floor(options.since ?? 0));
+  const url = `${historyUrl}?token=${encodeURIComponent(token)}&since=${since}&limit=${limit}`;
+  const response = await fetchImpl(url);
+  if (!response.ok) throw new Error(`Snowdome 历史查询失败：${response.status}`);
+  const body = await response.json() as { events?: SnowdomeHistoryEvent[] };
+  return Array.isArray(body.events) ? body.events : [];
+}
+
+/** Derives the history endpoint from the login endpoint, the same way as the heartbeat. */
+export function historyUrlFor(loginUrl: string): string {
+  if (!/\/api\/login$/.test(loginUrl)) throw new Error(`Snowdome 登录地址必须以 /api/login 结尾：${loginUrl}`);
+  return loginUrl.replace(/\/api\/login$/, '/api/agent/history');
 }
 
 /** Minimal socket surface the adapter needs; tests inject a fake one. */
@@ -168,6 +202,13 @@ export interface SnowdomeAdapterOptions {
   task: TaskContract;
   onReceipt?: (receipt: SnowdomeReceipt) => void;
   onError?: (message: string) => void;
+  /** Called once per game day the first time this subscriber sees it; the third party plans here. */
+  onDayStart?: (dayIndex: number) => void | Promise<void>;
+  /**
+   * Third-party decision hook. When set it replaces the built-in model decision; returned intents
+   * go through the same validation as model output. Throttling and the in-flight guard still apply.
+   */
+  onObservation?: (observation: SnowdomeObservation) => SnowdomeIntent[] | Promise<SnowdomeIntent[]>;
 }
 
 /** Opens a real `ws` connection and resolves once it is open. */
@@ -219,6 +260,7 @@ export class SnowdomeAdapter {
   /** Set when a heard line arrived during a decision, so the next observation still gets answered. */
   private pendingHeard = false;
   private lastDecisionAt = 0;
+  private lastDay: number | undefined;
   /** Bumped by start() and stop() so a connect attempt still in flight can tell it has been superseded. */
   private generation = 0;
 
@@ -357,6 +399,7 @@ export class SnowdomeAdapter {
   private async handleMessage(data: string): Promise<void> {
     const observation = parseObservation(data);
     if (observation) {
+      this.noticeDay(observation);
       if (this.options.autoBehavior) await this.maybeDecide(observation);
       return;
     }
@@ -396,8 +439,24 @@ export class SnowdomeAdapter {
     }
   }
 
+  /** Fires onDayStart when a new game day first appears; the day_index field is the source of truth, day_start is a hint. */
+  private noticeDay(observation: SnowdomeObservation): void {
+    const day = observation.day_index ?? observation.day_start;
+    if (typeof day !== 'number' || day === this.lastDay) return;
+    this.lastDay = day;
+    if (!this.options.onDayStart) return;
+    Promise.resolve(this.options.onDayStart(day)).catch((cause: unknown) => {
+      this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
+    });
+  }
+
   private async decide(observation: SnowdomeObservation): Promise<void> {
-    if (!this.options.gateway || this.closed) return;
+    if (this.closed) return;
+    if (this.options.onObservation) {
+      await this.decideWithThirdParty(observation);
+      return;
+    }
+    if (!this.options.gateway) return;
     try {
       const prompt = buildDecisionPrompt(observation, this.recentSpeech, this.options.persona);
       const response = await this.options.gateway.complete(this.options.task, { prompt, messages: [{ role: 'user', content: prompt }] });
@@ -410,6 +469,25 @@ export class SnowdomeAdapter {
       if (intent.kind === 'speak' && intent.text.includes('（沉默）')) return;
       if (intent.kind === 'speak') this.rememberSpeech(intent.text);
       await this.send(intent);
+    } catch (cause) {
+      this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  /** Sends each returned intent after validation; a failing hook only leaves this resident idle for the tick. */
+  private async decideWithThirdParty(observation: SnowdomeObservation): Promise<void> {
+    try {
+      const intents = await this.options.onObservation?.(observation) ?? [];
+      for (const intent of intents) {
+        if (this.closed || !this.socket) return;
+        const valid = parseSnowdomeIntent(intent, this.session?.actorId ?? '');
+        if (!valid) {
+          this.options.onError?.('第三方返回的意图不合法，已拒绝。');
+          continue;
+        }
+        if (valid.kind === 'speak') this.rememberSpeech(valid.text);
+        await this.send(valid);
+      }
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
     }
