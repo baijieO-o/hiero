@@ -1,6 +1,4 @@
 import { WebSocket } from 'ws';
-import type { CompletionGateway } from './model-gateway.js';
-import type { TaskContract } from './contracts.js';
 import type { AdapterPlug } from './hot-plug.js';
 
 export const SNOWDOME_DEFAULT_URL = 'ws://localhost:3000/agent';
@@ -132,46 +130,6 @@ export function parseSnowdomeIntent(raw: unknown, actorId: string): SnowdomeInte
   return null;
 }
 
-/** Extracts the first JSON object from a model reply and validates it as an intent. */
-export function parseModelIntent(content: string, actorId: string): SnowdomeIntent | null {
-  const start = content.indexOf('{');
-  const end = content.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    return parseSnowdomeIntent(JSON.parse(content.slice(start, end + 1)), actorId);
-  } catch {
-    return null;
-  }
-}
-
-/** How many of this resident's own recent lines are shown to the model, so it can continue a topic without repeating itself. */
-export const RECENT_SPEECH_LIMIT = 5;
-
-const DEFAULT_PERSONA = '你是 hiero，一个来到 Snowdome 小镇结识居民、交流想法的访客。说话具体、真诚，回应对方实际说的内容。';
-
-export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpeech: readonly string[] = [], persona = ''): string {
-  const heard = observation.heard.length > 0 ? observation.heard.map((line) => `${line.speakerId}：${line.text}`).join('\n') : '（没有人对你说话）';
-  const mine = recentSpeech.length > 0 ? recentSpeech.map((text) => `- ${text}`).join('\n') : '（你还没有说过话）';
-  const conversation = observation.recent?.length
-    ? `最近的对话（从旧到新）：\n${observation.recent.map((line) => `${line.kind === 'said' ? '我' : line.speakerId}：${line.text}`).join('\n')}`
-    : '';
-  return [
-    persona.trim() || DEFAULT_PERSONA,
-    '请按照上面的性格自行判断：是否开口、何时开口、还是保持安静或四处走走（用 move），都由你决定。',
-    '回复要承接对方上一句的内容，不要重复已经说过的话，也不要回答对方没问的问题。',
-    '不要重复你自己说过的话（见下方“你最近说过”）。',
-    '只输出一个 JSON 对象，格式之一：',
-    '{"kind":"move","target":{"x":整数,"y":整数,"z":整数}}（每次最多移动 3 格）',
-    '{"kind":"speak","mode":"whisper|talk|shout","text":"台词"}',
-    '无需行动时，输出 {"kind":"speak","mode":"whisper","text":"（沉默）"}。',
-    `你最近说过：\n${mine}`,
-    ...(conversation ? [conversation] : []),
-    `刚才听到：\n${heard}`,
-    // heard and recent are already shown above; leave them out of the JSON to save tokens.
-    `当前观察包：${JSON.stringify({ ...observation, heard: undefined, recent: undefined })}`,
-  ].join('\n');
-}
-
 export function parseObservation(raw: string): SnowdomeObservation | null {
   try {
     const value = JSON.parse(raw) as Partial<SnowdomeObservation>;
@@ -185,25 +143,20 @@ export interface SnowdomeAdapterOptions {
   name: string;
   url?: string;
   loginUrl?: string;
-  /** Persona for this resident's decision prompt; falls back to the default when empty. */
-  persona?: string;
-  autoBehavior: boolean;
   connect: SnowdomeSocketFactory;
   login?: (loginUrl: string, name: string) => Promise<SnowdomeSession>;
   heartbeat?: (heartbeatUrl: string, token: string) => Promise<boolean>;
   heartbeatIntervalMs?: number;
   reconnectDelayMs?: number;
-  gateway?: CompletionGateway;
-  task: TaskContract;
   onReceipt?: (receipt: SnowdomeReceipt) => void;
   onError?: (message: string) => void;
   /** Called once per game day the first time this subscriber sees it; the third party plans here. */
   onDayStart?: (dayIndex: number) => void | Promise<void>;
   /**
-   * Third-party decision hook. When set it replaces the built-in model decision. It runs off the observation
-   * path, so a slow plan never blocks observation handling; its intents are validated, then queued and paced.
+   * The third-party driver. It runs off the observation path, so a slow plan never blocks observation handling;
+   * its intents are validated, then queued and paced.
    */
-  onObservation?: (observation: SnowdomeObservation) => SnowdomeDecision | Promise<SnowdomeDecision>;
+  onObservation: (observation: SnowdomeObservation) => SnowdomeDecision | Promise<SnowdomeDecision>;
   /** Short message the third party wants to share with the owner; the runtime shows it in the chat window. */
   onNotice?: (text: string) => void;
 }
@@ -212,6 +165,8 @@ export interface SnowdomeAdapterOptions {
 export interface SnowdomeDecision {
   intents: SnowdomeIntent[];
   notice?: string;
+  /** Optional rewrite of this resident's persona after an important event; applied by the runtime under the persona guardrails. */
+  personaUpdate?: string;
 }
 
 /** Opens a real `ws` connection and resolves once it is open. */
@@ -247,7 +202,7 @@ const DEFAULT_RECONNECT_MS = 5000;
 const NOTICE_MIN_GAP_MS = 60_000;
 /** Snowdome moves a visitor out of town after 45 s without a heartbeat, so beat well inside that window. */
 const DEFAULT_HEARTBEAT_MS = 15000;
-/** With nobody speaking, the model is still asked at most this often so the resident can walk or start a conversation. */
+/** With nobody speaking, the driver is still asked at most this often so the resident can walk or start a conversation. */
 const IDLE_DECISION_MS = 10000;
 /** Snowdome accepts at most 5 intents per 10 s per resident, and at most 1 per second. */
 const BURST_LIMIT = 5;
@@ -262,10 +217,9 @@ export class SnowdomeAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private readonly pendingReceipts: ((receipt: SnowdomeReceipt) => void)[] = [];
-  private readonly recentSpeech: string[] = [];
-  /** True while a model decision is in flight; new observations wait instead of stacking requests. */
+  /** True while the driver's plan is in flight; new observations wait instead of stacking requests. */
   private deciding = false;
-  /** Set when a heard line arrived during a decision, so the next observation still gets answered. */
+  /** Set when a heard line arrived during a plan, so the next observation still gets answered. */
   private pendingHeard = false;
   private lastDecisionAt = 0;
   private lastDay: number | undefined;
@@ -424,7 +378,7 @@ export class SnowdomeAdapter {
     const observation = parseObservation(data);
     if (observation) {
       this.noticeDay(observation);
-      if (this.options.autoBehavior) await this.maybeDecide(observation);
+      this.planFor(observation);
       return;
     }
     const receipt = this.parseReceipt(data);
@@ -440,33 +394,15 @@ export class SnowdomeAdapter {
     }
   }
 
-  private rememberSpeech(text: string): void {
-    this.recentSpeech.push(text);
-    if (this.recentSpeech.length > RECENT_SPEECH_LIMIT) this.recentSpeech.shift();
-  }
-
   /**
-   * Throttles model calls: at most one in flight, and with nobody speaking only one per IDLE_DECISION_MS.
-   * Skipped heard lines stay in `recent`, so the next decision still sees them.
+   * Hands the observation to the driver without awaiting it, so a slow plan never holds up observation handling.
+   * Throttled: one plan in flight, and with nobody speaking only one per IDLE_DECISION_MS.
+   * Skipped heard lines stay in `recent`, so the next plan still sees them.
    */
-  private async maybeDecide(observation: SnowdomeObservation): Promise<void> {
+  private planFor(observation: SnowdomeObservation): void {
     if (observation.heard.length > 0) this.pendingHeard = true;
-    if (this.options.onObservation) {
-      // Not awaited: a slow third-party plan must not hold up observation handling.
-      this.latestObservation = observation;
-      void this.runThirdParty();
-      return;
-    }
-    if (this.deciding) return;
-    if (!this.pendingHeard && Date.now() - this.lastDecisionAt < IDLE_DECISION_MS) return;
-    this.pendingHeard = false;
-    this.lastDecisionAt = Date.now();
-    this.deciding = true;
-    try {
-      await this.decide(observation);
-    } finally {
-      this.deciding = false;
-    }
+    this.latestObservation = observation;
+    void this.runDriver();
   }
 
   /** Fires onDayStart when a new game day first appears; the day_index field is the source of truth, day_start is a hint. */
@@ -480,32 +416,12 @@ export class SnowdomeAdapter {
     });
   }
 
-  private async decide(observation: SnowdomeObservation): Promise<void> {
-    if (this.closed) return;
-    if (!this.options.gateway) return;
-    try {
-      const prompt = buildDecisionPrompt(observation, this.recentSpeech, this.options.persona);
-      const response = await this.options.gateway.complete(this.options.task, { prompt, messages: [{ role: 'user', content: prompt }] });
-      const intent = parseModelIntent(response.content, this.session?.actorId ?? '');
-      if (!intent) {
-        this.options.onError?.('模型输出不是合法的 Snowdome 意图，已拒绝。');
-        return;
-      }
-      // 「（沉默）」 means the model chose not to speak; it is not a line to send.
-      if (intent.kind === 'speak' && intent.text.includes('（沉默）')) return;
-      if (intent.kind === 'speak') this.rememberSpeech(intent.text);
-      await this.send(intent);
-    } catch (cause) {
-      this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
   /**
-   * Runs the third-party hook on the latest observation. One run at a time, with the same idle throttle as the
-   * built-in model. A failing hook only leaves this resident idle for the tick.
+   * Runs the driver on the latest observation. One run at a time, with an idle throttle. A failing driver only
+   * leaves this resident idle for the tick.
    */
-  private async runThirdParty(): Promise<void> {
-    if (this.deciding || this.closed || !this.latestObservation || !this.options.onObservation) return;
+  private async runDriver(): Promise<void> {
+    if (this.deciding || this.closed || !this.latestObservation) return;
     if (!this.pendingHeard && Date.now() - this.lastDecisionAt < IDLE_DECISION_MS) return;
     const observation = this.latestObservation;
     this.latestObservation = undefined;
@@ -528,11 +444,10 @@ export class SnowdomeAdapter {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
     } finally {
       this.deciding = false;
-      if (this.pendingHeard) void this.runThirdParty();
+      if (this.pendingHeard) void this.runDriver();
     }
   }
 
-  /** Replaces any unsent batch: the newest observation supersedes intents planned for an older one. */
   /** Safety valve for proactive notices: at least a minute apart, and never the same text twice in a row. */
   private noticeAllowed(text: string, now = Date.now()): boolean {
     const last = this.lastNotice;
@@ -541,6 +456,7 @@ export class SnowdomeAdapter {
     return true;
   }
 
+  /** Replaces any unsent batch: the newest observation supersedes intents planned for an older one. */
   private enqueue(intents: SnowdomeIntent[]): void {
     this.outbox = intents;
     void this.drain();
@@ -569,7 +485,6 @@ export class SnowdomeAdapter {
         if (!intent) break;
         this.sentAt.push(Date.now());
         if (this.sentAt.length > BURST_LIMIT) this.sentAt.shift();
-        if (intent.kind === 'speak') this.rememberSpeech(intent.text);
         await this.send(intent);
       }
     } catch (cause) {

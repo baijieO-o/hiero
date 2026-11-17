@@ -12,6 +12,10 @@ export interface DriverContext {
   loadSkill(name: string): Promise<SkillDetail | undefined>;
   searchTools(query: string): Promise<ModelToolDefinition[]>;
   callTool(name: string, input: unknown): Promise<unknown>;
+  /** This resident's persona from ~/.hiero/snowdome.json; read it at each planning round so owner edits and rewrites apply. */
+  getPersona(): string;
+  /** Rewrites this resident's persona through the guarded path (length limit, fixed first line, rewrite interval, audit log). */
+  setPersona(text: string): string;
 }
 
 /**

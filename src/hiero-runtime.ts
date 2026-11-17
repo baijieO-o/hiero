@@ -14,7 +14,7 @@ import { CapabilityRouter } from './capability-router.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
 import { McpToolClient } from './mcp-client.js';
 import { HotPlugRegistry, type PlugStatus } from './hot-plug.js';
-import { SNOWDOME_NAME, readSnowdomeConfig, saveSnowdomeConfig, snowdomeResidentId, type SnowdomeConfig, type SnowdomeResidentConfig } from './snowdome-config.js';
+import { SNOWDOME_NAME, getResidentPersona, readSnowdomeConfig, rewriteResidentPersona, saveSnowdomeConfig, snowdomeResidentId, type SnowdomeConfig, type SnowdomeResidentConfig } from './snowdome-config.js';
 import { snowdomeAdapterPlug, wsSocketFactory } from './snowdome-adapter.js';
 import { loadDriver, type DriverContext, type SnowdomeDriver } from './snowdome-driver.js';
 import type { AdapterPlug } from './hot-plug.js';
@@ -1109,47 +1109,54 @@ export class HieroRuntime {
     if (!config.enabled) return;
     for (const resident of config.residents) {
       const id = snowdomeResidentId(resident.name);
-      const driver = await this.loadSnowdomeDriver(resident);
-      this.hotPlug.defineAdapter(id, () => this.snowdomeAdapterFor(resident, driver));
+      this.hotPlug.defineAdapter(id, () => this.snowdomeAdapterFor(resident));
       await this.hotPlug.enableAdapter(id);
     }
   }
 
   /**
-   * Builds one resident's adapter. A non-builtin driver is loaded from ~/.hiero/drivers; if it cannot load,
-   * the resident keeps the built-in decision and the error is logged rather than silently dropped.
+   * Builds one resident's adapter. The driver loads in start(), so a load failure rejects start(); the hot-plug
+   * registry records it as this resident's error and the resident stays offline. There is no built-in fallback.
    */
-  private async loadSnowdomeDriver(resident: SnowdomeResidentConfig): Promise<SnowdomeDriver | undefined> {
-    if (resident.driver === 'builtin') return undefined;
-    try {
-      return await loadDriver(resident.driver, this.createDriverContext());
-    } catch (cause) {
-      console.warn(`Snowdome(${resident.name}): 驱动加载失败，已退回内置决策：${cause instanceof Error ? cause.message : String(cause)}`);
-      return undefined;
-    }
+  private snowdomeAdapterFor(resident: SnowdomeResidentConfig): AdapterPlug {
+    let inner: AdapterPlug | undefined;
+    return {
+      start: async () => {
+        const driver = await loadDriver(resident.driver, this.createDriverContext(resident.name));
+        inner = this.snowdomeAdapterPlugFor(resident, driver);
+        await inner.start();
+      },
+      stop: async () => inner?.stop(),
+    };
   }
 
-  private snowdomeAdapterFor(resident: SnowdomeResidentConfig, driver: SnowdomeDriver | undefined): AdapterPlug {
+  private snowdomeAdapterPlugFor(resident: SnowdomeResidentConfig, driver: SnowdomeDriver): AdapterPlug {
     return snowdomeAdapterPlug({
       name: resident.name,
       url: resident.url,
-      autoBehavior: resident.autoBehavior,
-      persona: resident.persona,
       connect: wsSocketFactory,
-      gateway: this.gateway,
-      task: this.snowdomeTask(),
       onError: (message) => console.warn(`Snowdome(${resident.name}): ${message}`),
       onNotice: (text) => this.runtime.broadcast({ type: 'AGENT_NOTICE', payload: { source: resident.name, text, at: new Date().toISOString() } }),
-      ...(driver ? {
-        ...(driver.onDayStart ? { onDayStart: driver.onDayStart.bind(driver) } : {}),
-        onObservation: driver.onObservation.bind(driver),
-      } : {}),
+      ...(driver.onDayStart ? { onDayStart: driver.onDayStart.bind(driver) } : {}),
+      onObservation: async (observation) => {
+        const decision = await driver.onObservation(observation);
+        if (decision.personaUpdate !== undefined) {
+          try {
+            rewriteResidentPersona(resident.name, decision.personaUpdate);
+          } catch (cause) {
+            console.warn(`Snowdome(${resident.name}): 人设改写被拒绝：${cause instanceof Error ? cause.message : String(cause)}`);
+          }
+        }
+        return { intents: decision.intents, ...(decision.notice ? { notice: decision.notice } : {}) };
+      },
     });
   }
 
   /** Capabilities handed to a driver. Each one is gated by the same hot-plug switches the chat path uses. */
-  private createDriverContext(): DriverContext {
+  private createDriverContext(residentName: string): DriverContext {
     return {
+      getPersona: () => getResidentPersona(residentName),
+      setPersona: (text) => rewriteResidentPersona(residentName, text),
       ask: async (prompt) => {
         const response = await this.gateway.complete(this.snowdomeTask(), { prompt, messages: [{ role: 'user', content: prompt }] });
         return response.content;
@@ -1166,7 +1173,7 @@ export class HieroRuntime {
     };
   }
 
-  /** Model contract for Snowdome decisions: the same routing as chat, scoped to a short single-shot request. */
+  /** Model contract for the driver's `ask` capability: the same routing as chat, scoped to a short single-shot request. */
   private snowdomeTask(): TaskContract {
     return {
       task_id: randomUUID(),

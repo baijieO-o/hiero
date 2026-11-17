@@ -1932,7 +1932,7 @@ const SKILL_CATEGORIES = ['MCP 服务器', '技能', '指令', '智能体', '挂
 type SkillCategory = (typeof SKILL_CATEGORIES)[number];
 
 type HotPlugItem = { name: string; enabled: boolean };
-type SnowdomeResidentState = { name: string; url: string; autoBehavior: boolean; persona: string };
+type SnowdomeResidentState = { name: string; url: string; persona: string; driver: string };
 type SnowdomeConfigDraft = { residents: SnowdomeResidentState[] };
 type SnowdomeAdapterState = { enabled: boolean; residents: SnowdomeResidentState[]; statuses: Record<string, { enabled: boolean; error?: string } | undefined> };
 type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; adapters: SnowdomeAdapterState; skills: HotPlugItem[]; tools: HotPlugItem[] };
@@ -2086,7 +2086,7 @@ function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: Sn
   useEffect(() => { setResidents(adapter.residents); }, [adapter.residents]);
   const dirty = JSON.stringify(residents) !== JSON.stringify(adapter.residents);
   const update = (index: number, patch: Partial<SnowdomeResidentState>) => setResidents(residents.map((resident, i) => (i === index ? { ...resident, ...patch } : resident)));
-  const add = () => setResidents([...residents, { name: `居民${residents.length + 1}`, url: 'ws://localhost:3000/agent', autoBehavior: true, persona: '' }]);
+  const add = () => setResidents([...residents, { name: `居民${residents.length + 1}`, url: 'ws://localhost:3000/agent', persona: '', driver: 'snowdome-planner-driver.js' }]);
   const remove = (index: number) => setResidents(residents.filter((_, i) => i !== index));
   return (
     <div className="hot-plug-list">
@@ -2097,7 +2097,7 @@ function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: Sn
           <HotPlugToggle checked={adapter.enabled} label="adapter snowdome" onChange={(checked) => onToggle('adapter', 'snowdome', checked)} />
         </li>
       </ul>
-      <p className="skills-empty">启停立即生效。开启后每个居民各自以昵称登录其 Snowdome 地址，共用同一个模型，人设各自配置。</p>
+      <p className="skills-empty">启停立即生效。开启后每个居民各自以昵称登录其 Snowdome 地址，由 ~/.hiero/drivers 中的第三方驱动决策，人设各自配置。</p>
       {residents.map((resident, index) => {
         const status = adapter.statuses[resident.name];
         return (
@@ -2106,7 +2106,6 @@ function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: Sn
             <label>昵称 <input value={resident.name} onChange={(event) => update(index, { name: event.target.value })} /></label>
             <label>服务端地址 <input value={resident.url} onChange={(event) => update(index, { url: event.target.value })} /></label>
             <label>人设提示词 <textarea value={resident.persona} onChange={(event) => update(index, { persona: event.target.value })} /></label>
-            <label><input type="checkbox" checked={resident.autoBehavior} onChange={(event) => update(index, { autoBehavior: event.target.checked })} /> 自动决策（由模型决定行动）</label>
             <button type="button" onClick={() => remove(index)}>删除居民</button>
           </div>
         );
