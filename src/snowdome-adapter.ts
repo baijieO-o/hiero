@@ -261,6 +261,8 @@ export class SnowdomeAdapter {
   private pendingHeard = false;
   private lastDecisionAt = 0;
   private lastDay: number | undefined;
+  /** Earliest time an intent may be sent again after a rate_limited receipt. */
+  private cooldownUntil = 0;
   /** Bumped by start() and stop() so a connect attempt still in flight can tell it has been superseded. */
   private generation = 0;
 
@@ -389,6 +391,7 @@ export class SnowdomeAdapter {
     return new Promise((resolve) => {
       this.pendingReceipts.push((receipt) => {
         this.options.onReceipt?.(receipt);
+        if (receipt.reason_code === 'rate_limited') this.cooldownUntil = Date.now() + Math.max(receipt.cooldown_ms, 0);
         if (STALE_SESSION_CODES.has(receipt.reason_code) && message.kind !== 'subscribe') this.socket?.close();
         resolve(receipt);
       });
@@ -485,6 +488,8 @@ export class SnowdomeAdapter {
           this.options.onError?.('第三方返回的意图不合法，已拒绝。');
           continue;
         }
+        // Server enforces 1/s and 5/10s; skip while cooling down instead of queueing rejected intents.
+        if (Date.now() < this.cooldownUntil) return;
         if (valid.kind === 'speak') this.rememberSpeech(valid.text);
         await this.send(valid);
       }

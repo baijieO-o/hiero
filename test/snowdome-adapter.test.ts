@@ -499,3 +499,31 @@ test('history endpoint is derived from the login URL and clamps since and limit'
   assert.deepEqual(events, [{ seq: 7, type: 'speak' }]);
   assert.equal(calls[0], 'http://localhost:3000/api/agent/history?token=tok&since=0&limit=1000');
 });
+
+test('a rate_limited receipt pauses third-party intents for cooldown_ms', async () => {
+  class LimitedSocket extends FakeSocket {
+    override send(data: string): void {
+      const message = JSON.parse(data) as Record<string, unknown>;
+      this.sent.push(message);
+      const reason = message.kind === 'subscribe' || message.kind === 'login' ? 'ok' : 'rate_limited';
+      this.emit({ accepted: reason === 'ok', reason_code: reason, state_delta: {}, cooldown_ms: 5000 } as never);
+    }
+  }
+  const socket = new LimitedSocket();
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: true,
+    connect: async () => socket,
+    login: fakeLogin,
+    task,
+    onObservation: () => [{ kind: 'speak', actorId: '', mode: 'talk', text: '第一句' }, { kind: 'speak', actorId: '', mode: 'talk', text: '第二句' }],
+  });
+  await adapter.start();
+  const before = socket.sent.length;
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(socket.sent.length - before, 1);
+  adapter.stop();
+});
