@@ -1,4 +1,4 @@
-import { strict as assert } from 'node:assert';
+﻿import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { McpToolClient } from '../src/mcp-client.js';
@@ -457,7 +457,7 @@ test('onObservation intents are validated and sent; illegal ones are dropped', a
     login: fakeLogin,
     task,
     onError: (m) => errors.push(m),
-    onObservation: () => [{ kind: 'speak', actorId: '', mode: 'talk', text: '早上好' }],
+    onObservation: () => ({ intents: [{ kind: 'speak', actorId: '', mode: 'talk', text: '早上好' }] }),
   });
   await adapter.start();
   socket.emit(heardObservation);
@@ -477,7 +477,7 @@ test('an illegal third-party intent is rejected and reported', async () => {
     login: fakeLogin,
     task,
     onError: (m) => errors.push(m),
-    onObservation: () => [{ kind: 'place', block: 'stone' } as unknown as { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }],
+    onObservation: () => ({ intents: [{ kind: 'place', block: 'stone' } as unknown as { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }] }),
   });
   await adapter.start();
   const before = socket.sent.length;
@@ -517,7 +517,7 @@ test('a rate_limited receipt pauses third-party intents for cooldown_ms', async 
     connect: async () => socket,
     login: fakeLogin,
     task,
-    onObservation: () => [{ kind: 'speak', actorId: '', mode: 'talk', text: '第一句' }, { kind: 'speak', actorId: '', mode: 'talk', text: '第二句' }],
+    onObservation: () => ({ intents: [{ kind: 'speak', actorId: '', mode: 'talk', text: '第一句' }, { kind: 'speak', actorId: '', mode: 'talk', text: '第二句' }] }),
   });
   await adapter.start();
   const before = socket.sent.length;
@@ -526,5 +526,30 @@ test('a rate_limited receipt pauses third-party intents for cooldown_ms', async 
   socket.emit(heardObservation);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(socket.sent.length - before, 1);
+  adapter.stop();
+});
+
+test('a driver notice is forwarded to onNotice only when non-empty', async () => {
+  const socket = new FakeSocket();
+  const notices: string[] = [];
+  let calls = 0;
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    autoBehavior: true,
+    connect: async () => socket,
+    login: fakeLogin,
+    task,
+    onObservation: () => {
+      calls += 1;
+      return calls === 1 ? { intents: [], notice: '遇到了新朋友' } : { intents: [], notice: '' };
+    },
+    onNotice: (notice) => notices.push(notice),
+  });
+  await adapter.start();
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  socket.emit(heardObservation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(notices, ['遇到了新朋友']);
   adapter.stop();
 });

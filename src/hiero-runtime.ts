@@ -1139,6 +1139,7 @@ export class HieroRuntime {
       gateway: this.gateway,
       task: this.snowdomeTask(),
       onError: (message) => console.warn(`Snowdome(${resident.name}): ${message}`),
+      onNotice: (text) => this.runtime.broadcast({ type: 'AGENT_NOTICE', payload: { source: resident.name, text, at: new Date().toISOString() } }),
       ...(driver ? {
         ...(driver.onDayStart ? { onDayStart: driver.onDayStart.bind(driver) } : {}),
         onObservation: driver.onObservation.bind(driver),

@@ -34,6 +34,7 @@ export type RuntimeEvent =
   | { type: 'REWIND_RESULT'; payload: { restored: string[]; skipped: string[] } }
   | { type: 'EXTENSION_READY'; payload: { request_id: string; plugin_path: string; mcp_config_path: string } }
   | { type: 'ERROR'; payload: ErrorRecord }
+  | { type: 'AGENT_NOTICE'; payload: { source: string; text: string; at: string } }
   | { type: 'CHAT_DELTA'; payload: { request_id: string; text: string } }
   | { type: 'CHAT_RESET'; payload: { request_id: string } }
   | { type: 'CHAT_TOOL'; payload: { request_id: string; name: string; arguments: string; result: string } }

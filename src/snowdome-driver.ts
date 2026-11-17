@@ -1,7 +1,7 @@
 ﻿import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { SnowdomeIntent, SnowdomeObservation } from './snowdome-adapter.js';
+import type { SnowdomeDecision, SnowdomeObservation } from './snowdome-adapter.js';
 import type { ModelToolDefinition } from './model-gateway.js';
 import type { SkillDetail } from './capability-router.js';
 
@@ -14,10 +14,13 @@ export interface DriverContext {
   callTool(name: string, input: unknown): Promise<unknown>;
 }
 
-/** A third-party driver: it plans off the observation path and returns intents; the adapter validates and paces them. */
+/**
+ * A third-party driver: it plans off the observation path and returns intents (plus an optional `notice` for the owner).
+ * The adapter validates and paces the intents, and forwards the notice to the chat window.
+ */
 export interface SnowdomeDriver {
   onDayStart?(dayIndex: number): void | Promise<void>;
-  onObservation(observation: SnowdomeObservation): SnowdomeIntent[] | Promise<SnowdomeIntent[]>;
+  onObservation(observation: SnowdomeObservation): SnowdomeDecision | Promise<SnowdomeDecision>;
 }
 
 export const DRIVERS_DIR = join(homedir(), '.hiero', 'drivers');

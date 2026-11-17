@@ -457,6 +457,17 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         set({ browserAgentPaused: message.payload?.paused === true });
         return;
       }
+      if (message.type === 'AGENT_NOTICE') {
+        // Proactive notes from a resident have no request; they go into the conversation the owner is looking at.
+        const text = typeof message.payload?.text === 'string' ? message.payload.text : '';
+        const source = typeof message.payload?.source === 'string' ? message.payload.source : '居民';
+        if (!text) return;
+        const target = get().activeId ?? get().conversations[0]?.id;
+        if (!target) return;
+        const notice: ChatMessage = { role: 'assistant', content: `【${source}·Snowdome】${text}`, completedAt: Date.now() };
+        updateConversation(target, (conv) => ({ ...conv, messages: [...conv.messages, notice], updatedAt: Date.now() }));
+        return;
+      }
       const requestId = typeof message.payload?.request_id === 'string' ? message.payload.request_id : '';
       if (!activeRequest || activeRequest.requestId !== requestId) return;
       const conversationId = activeRequest.conversationId;

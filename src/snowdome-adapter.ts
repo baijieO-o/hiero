@@ -203,7 +203,15 @@ export interface SnowdomeAdapterOptions {
    * Third-party decision hook. When set it replaces the built-in model decision. It runs off the observation
    * path, so a slow plan never blocks observation handling; its intents are validated, then queued and paced.
    */
-  onObservation?: (observation: SnowdomeObservation) => SnowdomeIntent[] | Promise<SnowdomeIntent[]>;
+  onObservation?: (observation: SnowdomeObservation) => SnowdomeDecision | Promise<SnowdomeDecision>;
+  /** Short message the third party wants to share with the owner; the runtime shows it in the chat window. */
+  onNotice?: (text: string) => void;
+}
+
+/** What a third-party driver returns for one observation: intents to pace out, and optionally a note for the owner. */
+export interface SnowdomeDecision {
+  intents: SnowdomeIntent[];
+  notice?: string;
 }
 
 /** Opens a real `ws` connection and resolves once it is open. */
@@ -503,15 +511,17 @@ export class SnowdomeAdapter {
     this.lastDecisionAt = Date.now();
     this.deciding = true;
     try {
-      const intents = await this.options.onObservation(observation);
+      const decision = await this.options.onObservation(observation);
       if (this.closed) return;
       const valid: SnowdomeIntent[] = [];
-      for (const intent of intents) {
+      for (const intent of decision.intents) {
         const checked = parseSnowdomeIntent(intent, this.session?.actorId ?? '');
         if (checked) valid.push(checked);
         else this.options.onError?.('第三方返回的意图不合法，已拒绝。');
       }
       this.enqueue(valid);
+      const notice = decision.notice?.trim();
+      if (notice) this.options.onNotice?.(notice);
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
     } finally {
