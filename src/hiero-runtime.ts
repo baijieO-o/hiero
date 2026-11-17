@@ -1081,7 +1081,7 @@ export class HieroRuntime {
   private snowdomeSnapshot(): { enabled: boolean; residents: SnowdomeResidentConfig[]; statuses: Record<string, PlugStatus | undefined> } {
     const config = readSnowdomeConfig();
     const statuses: Record<string, PlugStatus | undefined> = {};
-    for (const resident of config.residents) statuses[resident.name] = this.hotPlug.status(snowdomeResidentId(resident.name));
+    for (const resident of config.residents) statuses[resident.name] = this.hotPlug.status(`adapter:${snowdomeResidentId(resident.name)}`);
     return { enabled: config.enabled, residents: config.residents, statuses };
   }
   /** Connects enabled MCP servers from the saved config. Runs in the background so a slow server never blocks startup. */

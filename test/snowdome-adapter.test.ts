@@ -135,6 +135,29 @@ test('start does not connect when login is rejected', async () => {
   assert.equal(connected, false);
 });
 
+test('a returning resident whose entrance is occupied keeps retrying until login succeeds', async () => {
+  let logins = 0;
+  const adapter = new SnowdomeAdapter({
+    name: 'hiore',
+    autoBehavior: false,
+    reconnectDelayMs: 1,
+    connect: async () => new FakeSocket(),
+    login: async () => {
+      logins += 1;
+      if (logins < 3) throw new Error('Snowdome 登录失败：entrance_occupied');
+      return { token: 'tok', actorId: 'agent-hiore' };
+    },
+    gateway: gatewayReturning(''),
+    task,
+    onError: () => {},
+  });
+  await assert.rejects(adapter.start(), /entrance_occupied/);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(logins, 3);
+  assert.equal(adapter.actorId, 'agent-hiore');
+  adapter.stop();
+});
+
 
 test('a visitor adapter beats for its token and stops beating after stop()', async () => {
   const beats: string[] = [];

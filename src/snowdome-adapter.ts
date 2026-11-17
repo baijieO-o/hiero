@@ -20,6 +20,11 @@ export function agentIdFor(name: string): string {
   return AGENT_ID_PATTERN.test(id) ? id : 'hiero';
 }
 
+/** The town entrance is briefly occupied when a returning resident logs in; retrying later succeeds. */
+function isRetryableLoginError(cause: unknown): boolean {
+  return cause instanceof Error && cause.message.endsWith('entrance_occupied');
+}
+
 export async function loginSnowdome(loginUrl: string, name: string, fetchImpl: typeof fetch = fetch): Promise<SnowdomeSession> {
   const response = await fetchImpl(loginUrl, {
     method: 'POST',
@@ -225,6 +230,11 @@ export class SnowdomeAdapter {
     try {
       await this.connect(this.generation);
     } catch (cause) {
+      // 入口暂时被占用是可恢复的，保持重连而不是放弃这个居民。
+      if (isRetryableLoginError(cause)) {
+        this.scheduleReconnect();
+        throw cause;
+      }
       this.stop();
       throw cause;
     }
