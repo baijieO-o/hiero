@@ -244,6 +244,7 @@ export function heartbeatUrlFor(loginUrl: string): string {
 /** Receipts that mean the visitor session is no longer valid, e.g. after Snowdome restarts and drops its in-memory tokens. */
 const STALE_SESSION_CODES = new Set(['login_required', 'unknown_actor']);
 const DEFAULT_RECONNECT_MS = 5000;
+const NOTICE_MIN_GAP_MS = 60_000;
 /** Snowdome moves a visitor out of town after 45 s without a heartbeat, so beat well inside that window. */
 const DEFAULT_HEARTBEAT_MS = 15000;
 /** With nobody speaking, the model is still asked at most this often so the resident can walk or start a conversation. */
@@ -279,6 +280,7 @@ export class SnowdomeAdapter {
   private wake: (() => void) | undefined;
   /** Earliest time an intent may be sent again after a rate_limited receipt. */
   private cooldownUntil = 0;
+  private lastNotice: { text: string; at: number } | undefined;
   /** Bumped by start() and stop() so a connect attempt still in flight can tell it has been superseded. */
   private generation = 0;
 
@@ -521,7 +523,7 @@ export class SnowdomeAdapter {
       }
       this.enqueue(valid);
       const notice = decision.notice?.trim();
-      if (notice) this.options.onNotice?.(notice);
+      if (notice && this.noticeAllowed(notice)) this.options.onNotice?.(notice);
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -531,6 +533,14 @@ export class SnowdomeAdapter {
   }
 
   /** Replaces any unsent batch: the newest observation supersedes intents planned for an older one. */
+  /** Safety valve for proactive notices: at least a minute apart, and never the same text twice in a row. */
+  private noticeAllowed(text: string, now = Date.now()): boolean {
+    const last = this.lastNotice;
+    if (last && (last.text === text || now - last.at < NOTICE_MIN_GAP_MS)) return false;
+    this.lastNotice = { text, at: now };
+    return true;
+  }
+
   private enqueue(intents: SnowdomeIntent[]): void {
     this.outbox = intents;
     void this.drain();

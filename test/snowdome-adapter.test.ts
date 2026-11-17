@@ -553,3 +553,38 @@ test('a driver notice is forwarded to onNotice only when non-empty', async () =>
   assert.deepEqual(notices, ['遇到了新朋友']);
   adapter.stop();
 });
+
+test('proactive notices are spaced at least a minute apart and never repeat back-to-back', async () => {
+  const socket = new FakeSocket();
+  const notices: string[] = [];
+  const texts = ['第一条', '第一条', '第二条'];
+  let calls = 0;
+  const realNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    const adapter = new SnowdomeAdapter({
+      name: 'hiero',
+      autoBehavior: true,
+      connect: async () => socket,
+      login: fakeLogin,
+      task,
+      onObservation: () => ({ intents: [], notice: texts[calls++] ?? '' }),
+      onNotice: (notice) => notices.push(notice),
+    });
+    await adapter.start();
+    const feed = async () => {
+      socket.emit(heardObservation);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+    await feed();
+    now += 10_000;
+    await feed();
+    now += 120_000;
+    await feed();
+    assert.deepEqual(notices, ['第一条', '第二条']);
+    adapter.stop();
+  } finally {
+    Date.now = realNow;
+  }
+});
