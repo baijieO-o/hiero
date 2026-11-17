@@ -16,7 +16,8 @@ export async function loginSnowdome(loginUrl: string, name: string, fetchImpl: t
   const response = await fetchImpl(loginUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name }),
+    // kind 'agent' gives this resident its own plot and no heartbeat timeout; it leaves when /agent disconnects.
+    body: JSON.stringify({ name, kind: 'agent' }),
   });
   const body = await response.json() as { accepted?: boolean; token?: string; actorId?: string; reason_code?: string };
   if (!response.ok || !body.accepted || !body.token || !body.actorId) {
@@ -245,6 +246,12 @@ export class SnowdomeAdapter {
     if (!receipt.accepted) {
       socket.close();
       throw new Error(`Snowdome 订阅被拒绝：${receipt.reason_code}`);
+    }
+    // agent 居民出生在自留地（后院），需主动返回小镇才能与其他居民互动。
+    await this.request({ kind: 'enter', actorId: session.actorId, from: 'backyard' });
+    if (isStale()) {
+      socket.close();
+      return;
     }
     this.startHeartbeat();
   }
