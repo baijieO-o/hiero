@@ -12,11 +12,19 @@ export interface SnowdomeSession {
   actorId: string;
 }
 
+/** Stable id the server maps to one agent resident, so its buildings and backyard survive restarts and town moves. */
+const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function agentIdFor(name: string): string {
+  const id = name.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
+  return AGENT_ID_PATTERN.test(id) ? id : 'hiero';
+}
+
 export async function loginSnowdome(loginUrl: string, name: string, fetchImpl: typeof fetch = fetch): Promise<SnowdomeSession> {
   const response = await fetchImpl(loginUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, kind: 'agent', agentId: agentIdFor(name) }),
   });
   const body = await response.json() as { accepted?: boolean; token?: string; actorId?: string; reason_code?: string };
   if (!response.ok || !body.accepted || !body.token || !body.actorId) {

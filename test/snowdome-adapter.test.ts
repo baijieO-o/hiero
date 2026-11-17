@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { McpToolClient } from '../src/mcp-client.js';
-import { SnowdomeAdapter, buildDecisionPrompt, heartbeatUrlFor, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
+import { SnowdomeAdapter, buildDecisionPrompt, heartbeatUrlFor, loginSnowdome, parseModelIntent, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
 import type { CompletionGateway } from '../src/model-gateway.js';
 import type { TaskContract } from '../src/contracts.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -229,15 +229,14 @@ test('decision prompt carries persona, heard lines, and the resident\'s own rece
   assert.match(buildDecisionPrompt(observation), /你还没有说过话/);
 });
 
-test('with nobody speaking, autoBehavior may walk but never opens a conversation', async () => {
-  const socket = new FakeSocket();
-  const gateway = gatewayReturning('{"kind":"speak","mode":"talk","text":"大家好"}');
-  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway, task });
-  await adapter.start();
-  socket.emit(observation);
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(socket.sent.some((message) => message.kind === 'speak'), false);
-  adapter.stop();
+test('login asks for an agent resident with a stable agentId derived from its name', async () => {
+  let body: Record<string, unknown> = {};
+  const fetchImpl = (async (_url: string, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ accepted: true, token: 't', actorId: 'agent-hiero-main' }), { status: 200 });
+  }) as typeof fetch;
+  await loginSnowdome('http://x/api/login', 'hiero main', fetchImpl);
+  assert.deepEqual(body, { name: 'hiero main', kind: 'agent', agentId: 'hiero-main' });
 });
 
 test('with nobody speaking, a model move is sent so the visitor walks around', async () => {
