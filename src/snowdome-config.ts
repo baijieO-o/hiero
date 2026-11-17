@@ -10,6 +10,8 @@ const ResidentSchema = z.object({
   autoBehavior: z.boolean().default(true),
   /** Per-resident persona appended to the shared decision prompt; empty means the default persona. */
   persona: z.string().max(500).default(''),
+  /** `builtin` uses the model decision; any other value is a file name inside ~/.hiero/drivers. */
+  driver: z.string().min(1).default('builtin'),
 });
 
 const SnowdomeConfigSchema = z.object({

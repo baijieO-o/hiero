@@ -16,6 +16,8 @@ import { McpToolClient } from './mcp-client.js';
 import { HotPlugRegistry, type PlugStatus } from './hot-plug.js';
 import { SNOWDOME_NAME, readSnowdomeConfig, saveSnowdomeConfig, snowdomeResidentId, type SnowdomeConfig, type SnowdomeResidentConfig } from './snowdome-config.js';
 import { snowdomeAdapterPlug, wsSocketFactory } from './snowdome-adapter.js';
+import { loadDriver, type DriverContext, type SnowdomeDriver } from './snowdome-driver.js';
+import type { AdapterPlug } from './hot-plug.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { RuntimeWebSocketServer, type RuntimeEvent } from './runtime-server.js';
 import type { ModelMessage, ModelResponse, ModelToolCall, ModelToolDefinition } from './model-gateway.js';
@@ -1107,18 +1109,60 @@ export class HieroRuntime {
     if (!config.enabled) return;
     for (const resident of config.residents) {
       const id = snowdomeResidentId(resident.name);
-      this.hotPlug.defineAdapter(id, () => snowdomeAdapterPlug({
-        name: resident.name,
-        url: resident.url,
-        autoBehavior: resident.autoBehavior,
-        persona: resident.persona,
-        connect: wsSocketFactory,
-        gateway: this.gateway,
-        task: this.snowdomeTask(),
-        onError: (message) => console.warn(`Snowdome(${resident.name}): ${message}`),
-      }));
+      const driver = await this.loadSnowdomeDriver(resident);
+      this.hotPlug.defineAdapter(id, () => this.snowdomeAdapterFor(resident, driver));
       await this.hotPlug.enableAdapter(id);
     }
+  }
+
+  /**
+   * Builds one resident's adapter. A non-builtin driver is loaded from ~/.hiero/drivers; if it cannot load,
+   * the resident keeps the built-in decision and the error is logged rather than silently dropped.
+   */
+  private async loadSnowdomeDriver(resident: SnowdomeResidentConfig): Promise<SnowdomeDriver | undefined> {
+    if (resident.driver === 'builtin') return undefined;
+    try {
+      return await loadDriver(resident.driver, this.createDriverContext());
+    } catch (cause) {
+      console.warn(`Snowdome(${resident.name}): 驱动加载失败，已退回内置决策：${cause instanceof Error ? cause.message : String(cause)}`);
+      return undefined;
+    }
+  }
+
+  private snowdomeAdapterFor(resident: SnowdomeResidentConfig, driver: SnowdomeDriver | undefined): AdapterPlug {
+    return snowdomeAdapterPlug({
+      name: resident.name,
+      url: resident.url,
+      autoBehavior: resident.autoBehavior,
+      persona: resident.persona,
+      connect: wsSocketFactory,
+      gateway: this.gateway,
+      task: this.snowdomeTask(),
+      onError: (message) => console.warn(`Snowdome(${resident.name}): ${message}`),
+      ...(driver ? {
+        ...(driver.onDayStart ? { onDayStart: driver.onDayStart.bind(driver) } : {}),
+        onObservation: driver.onObservation.bind(driver),
+      } : {}),
+    });
+  }
+
+  /** Capabilities handed to a driver. Each one is gated by the same hot-plug switches the chat path uses. */
+  private createDriverContext(): DriverContext {
+    return {
+      ask: async (prompt) => {
+        const response = await this.gateway.complete(this.snowdomeTask(), { prompt, messages: [{ role: 'user', content: prompt }] });
+        return response.content;
+      },
+      loadSkill: async (name) => this.hotPlug.isSkillEnabled(name) ? this.capabilityRouter.loadSkill(name) : undefined,
+      searchTools: async (query) => {
+        const tools = await this.capabilityRouter.searchTools(query);
+        return tools.filter((tool) => this.hotPlug.isToolEnabled(tool.function.name));
+      },
+      callTool: async (name, input) => {
+        if (!this.hotPlug.isToolEnabled(name)) throw new Error(`工具已被热插拔关闭：${name}`);
+        return this.mcpClient.callTool(name, input);
+      },
+    };
   }
 
   /** Model contract for Snowdome decisions: the same routing as chat, scoped to a short single-shot request. */

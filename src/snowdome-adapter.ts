@@ -46,8 +46,7 @@ export async function heartbeatSnowdome(heartbeatUrl: string, token: string, fet
 
 export type SnowdomeIntent =
   | { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }
-  | { kind: 'speak'; actorId: string; mode: 'whisper' | 'talk' | 'shout'; text: string }
-  | { kind: 'leave'; actorId: string; destination: string };
+  | { kind: 'speak'; actorId: string; mode: 'whisper' | 'talk' | 'shout'; text: string };
 
 export interface SnowdomeObservation {
   kind: 'observation';
@@ -130,9 +129,6 @@ export function parseSnowdomeIntent(raw: unknown, actorId: string): SnowdomeInte
     && typeof candidate.text === 'string' && candidate.text.trim().length > 0 && candidate.text.length <= MAX_TEXT_LENGTH) {
     return { kind: 'speak', actorId, mode: candidate.mode as 'whisper' | 'talk' | 'shout', text: candidate.text };
   }
-  if (candidate.kind === 'leave' && typeof candidate.destination === 'string' && candidate.destination.length > 0) {
-    return { kind: 'leave', actorId, destination: candidate.destination };
-  }
   return null;
 }
 
@@ -167,7 +163,6 @@ export function buildDecisionPrompt(observation: SnowdomeObservation, recentSpee
     '只输出一个 JSON 对象，格式之一：',
     '{"kind":"move","target":{"x":整数,"y":整数,"z":整数}}（每次最多移动 3 格）',
     '{"kind":"speak","mode":"whisper|talk|shout","text":"台词"}',
-    '{"kind":"leave","destination":"backyard"}',
     '无需行动时，输出 {"kind":"speak","mode":"whisper","text":"（沉默）"}。',
     `你最近说过：\n${mine}`,
     ...(conversation ? [conversation] : []),
@@ -205,8 +200,8 @@ export interface SnowdomeAdapterOptions {
   /** Called once per game day the first time this subscriber sees it; the third party plans here. */
   onDayStart?: (dayIndex: number) => void | Promise<void>;
   /**
-   * Third-party decision hook. When set it replaces the built-in model decision; returned intents
-   * go through the same validation as model output. Throttling and the in-flight guard still apply.
+   * Third-party decision hook. When set it replaces the built-in model decision. It runs off the observation
+   * path, so a slow plan never blocks observation handling; its intents are validated, then queued and paced.
    */
   onObservation?: (observation: SnowdomeObservation) => SnowdomeIntent[] | Promise<SnowdomeIntent[]>;
 }
@@ -245,6 +240,10 @@ const DEFAULT_RECONNECT_MS = 5000;
 const DEFAULT_HEARTBEAT_MS = 15000;
 /** With nobody speaking, the model is still asked at most this often so the resident can walk or start a conversation. */
 const IDLE_DECISION_MS = 10000;
+/** Snowdome accepts at most 5 intents per 10 s per resident, and at most 1 per second. */
+const BURST_LIMIT = 5;
+const BURST_WINDOW_MS = 10000;
+const MIN_INTERVAL_MS = 1000;
 
 /** Client for Snowdome's agent WebSocket. Intents are sent only after the server accepts the subscription. */
 export class SnowdomeAdapter {
@@ -261,6 +260,15 @@ export class SnowdomeAdapter {
   private pendingHeard = false;
   private lastDecisionAt = 0;
   private lastDay: number | undefined;
+  /** Latest observation not yet handed to the third-party hook; newer ones overwrite older ones. */
+  private latestObservation: SnowdomeObservation | undefined;
+  /** Validated intents waiting to be paced out; a newer batch replaces an unsent older one. */
+  private outbox: SnowdomeIntent[] = [];
+  private draining = false;
+  /** Timestamps of the last few sends, used to honour the server's rate limits. */
+  private readonly sentAt: number[] = [];
+  /** Ends a pacing wait early when the adapter stops. */
+  private wake: (() => void) | undefined;
   /** Earliest time an intent may be sent again after a rate_limited receipt. */
   private cooldownUntil = 0;
   /** Bumped by start() and stop() so a connect attempt still in flight can tell it has been superseded. */
@@ -381,6 +389,9 @@ export class SnowdomeAdapter {
     this.stopHeartbeat();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    this.outbox = [];
+    this.latestObservation = undefined;
+    this.wake?.();
     const socket = this.socket;
     this.socket = undefined;
     socket?.close();
@@ -430,6 +441,12 @@ export class SnowdomeAdapter {
    */
   private async maybeDecide(observation: SnowdomeObservation): Promise<void> {
     if (observation.heard.length > 0) this.pendingHeard = true;
+    if (this.options.onObservation) {
+      // Not awaited: a slow third-party plan must not hold up observation handling.
+      this.latestObservation = observation;
+      void this.runThirdParty();
+      return;
+    }
     if (this.deciding) return;
     if (!this.pendingHeard && Date.now() - this.lastDecisionAt < IDLE_DECISION_MS) return;
     this.pendingHeard = false;
@@ -455,10 +472,6 @@ export class SnowdomeAdapter {
 
   private async decide(observation: SnowdomeObservation): Promise<void> {
     if (this.closed) return;
-    if (this.options.onObservation) {
-      await this.decideWithThirdParty(observation);
-      return;
-    }
     if (!this.options.gateway) return;
     try {
       const prompt = buildDecisionPrompt(observation, this.recentSpeech, this.options.persona);
@@ -477,24 +490,79 @@ export class SnowdomeAdapter {
     }
   }
 
-  /** Sends each returned intent after validation; a failing hook only leaves this resident idle for the tick. */
-  private async decideWithThirdParty(observation: SnowdomeObservation): Promise<void> {
+  /**
+   * Runs the third-party hook on the latest observation. One run at a time, with the same idle throttle as the
+   * built-in model. A failing hook only leaves this resident idle for the tick.
+   */
+  private async runThirdParty(): Promise<void> {
+    if (this.deciding || this.closed || !this.latestObservation || !this.options.onObservation) return;
+    if (!this.pendingHeard && Date.now() - this.lastDecisionAt < IDLE_DECISION_MS) return;
+    const observation = this.latestObservation;
+    this.latestObservation = undefined;
+    this.pendingHeard = false;
+    this.lastDecisionAt = Date.now();
+    this.deciding = true;
     try {
-      const intents = await this.options.onObservation?.(observation) ?? [];
+      const intents = await this.options.onObservation(observation);
+      if (this.closed) return;
+      const valid: SnowdomeIntent[] = [];
       for (const intent of intents) {
-        if (this.closed || !this.socket) return;
-        const valid = parseSnowdomeIntent(intent, this.session?.actorId ?? '');
-        if (!valid) {
-          this.options.onError?.('第三方返回的意图不合法，已拒绝。');
+        const checked = parseSnowdomeIntent(intent, this.session?.actorId ?? '');
+        if (checked) valid.push(checked);
+        else this.options.onError?.('第三方返回的意图不合法，已拒绝。');
+      }
+      this.enqueue(valid);
+    } catch (cause) {
+      this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      this.deciding = false;
+      if (this.pendingHeard) void this.runThirdParty();
+    }
+  }
+
+  /** Replaces any unsent batch: the newest observation supersedes intents planned for an older one. */
+  private enqueue(intents: SnowdomeIntent[]): void {
+    this.outbox = intents;
+    void this.drain();
+  }
+
+  /** Sends queued intents at the server's pace, and holds off while cooling down after rate_limited. */
+  private async drain(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      while (this.outbox.length > 0 && !this.closed && this.socket) {
+        const wait = this.waitMs();
+        if (wait > 0) {
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              clearTimeout(timer);
+              this.wake = undefined;
+              resolve();
+            };
+            const timer = setTimeout(done, wait);
+            this.wake = done;
+          });
           continue;
         }
-        // Server enforces 1/s and 5/10s; skip while cooling down instead of queueing rejected intents.
-        if (Date.now() < this.cooldownUntil) return;
-        if (valid.kind === 'speak') this.rememberSpeech(valid.text);
-        await this.send(valid);
+        const intent = this.outbox.shift();
+        if (!intent) break;
+        this.sentAt.push(Date.now());
+        if (this.sentAt.length > BURST_LIMIT) this.sentAt.shift();
+        if (intent.kind === 'speak') this.rememberSpeech(intent.text);
+        await this.send(intent);
       }
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      this.draining = false;
     }
+  }
+
+  /** Milliseconds until the next send is allowed under the 1/s rule, the 5/10 s rule and any rate_limited cooldown. */
+  private waitMs(): number {
+    const last = this.sentAt.at(-1) ?? 0;
+    const burst = this.sentAt.length >= BURST_LIMIT ? (this.sentAt[0] ?? 0) + BURST_WINDOW_MS : 0;
+    return Math.max(0, this.cooldownUntil, last + MIN_INTERVAL_MS, burst) - Date.now();
   }
 }

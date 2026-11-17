@@ -45,7 +45,8 @@ test('parseSnowdomeIntent accepts only the adapter protocol intents', () => {
 });
 
 test('parseModelIntent extracts JSON from prose and rejects non-intents', () => {
-  assert.deepEqual(parseModelIntent('好的：{"kind":"leave","destination":"backyard"}', 'hiero'), { kind: 'leave', actorId: 'hiero', destination: 'backyard' });
+  assert.deepEqual(parseModelIntent('好的：{"kind":"speak","mode":"talk","text":"你好"}', 'hiero'), { kind: 'speak', actorId: 'hiero', mode: 'talk', text: '你好' });
+  assert.equal(parseModelIntent('{"kind":"leave","destination":"backyard"}', 'hiero'), null);
   assert.equal(parseModelIntent('我想去公园', 'hiero'), null);
   assert.equal(parseModelIntent('{"kind":"pickup"}', 'hiero'), null);
 });
