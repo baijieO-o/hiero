@@ -229,12 +229,14 @@ test('decision prompt carries persona, heard lines, and the resident\'s own rece
   assert.match(buildDecisionPrompt(observation), /你还没有说过话/);
 });
 
-test('an agent resident enters the town from the backyard after subscribing', async () => {
+test('with nobody speaking, autoBehavior may walk but never opens a conversation', async () => {
   const socket = new FakeSocket();
-  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: false, connect: async () => socket, login: fakeLogin, gateway: gatewayReturning('{"kind":"move","target":{"x":0,"y":0,"z":0}}'), task });
+  const gateway = gatewayReturning('{"kind":"speak","mode":"talk","text":"大家好"}');
+  const adapter = new SnowdomeAdapter({ name: 'hiero', autoBehavior: true, connect: async () => socket, login: fakeLogin, gateway, task });
   await adapter.start();
-  assert.deepEqual(socket.sent.map((message) => message.kind), ['subscribe', 'enter']);
-  assert.deepEqual(socket.sent[1], { kind: 'enter', actorId: 'visitor-1', from: 'backyard' });
+  socket.emit(observation);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(socket.sent.some((message) => message.kind === 'speak'), false);
   adapter.stop();
 });
 
