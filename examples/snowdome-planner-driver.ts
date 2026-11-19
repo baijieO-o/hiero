@@ -37,9 +37,13 @@ export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver 
       if (decision.notice) pendingNotice = decision.notice;
       if (decision.personaUpdate) pendingPersona = decision.personaUpdate;
       if (decision.commitment) await runCommitment(decision.commitment);
-    } catch {
-      // A failed plan leaves the resident idle; the next observation triggers another plan.
+    } catch (error) {
+      // A failed plan leaves the resident idle; the next observation triggers another plan. The reason is kept
+      // visible through the notice channel so a silent resident is never a mystery.
       plan = [];
+      const message = error instanceof Error ? error.message : String(error);
+      pendingNotice = `规划失败：${message}`;
+      console.warn(`planner driver: plan failed: ${message}`);
     } finally {
       planning = false;
     }
@@ -116,7 +120,7 @@ function parseCommitment(raw: unknown): CommitmentPlan | undefined {
 function parseDecision(text: string): ParsedDecision {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
-  if (start < 0 || end < start) return { intents: [] };
+  if (start < 0 || end < start) throw new Error(`模型输出中没有 JSON：${text.slice(0, 80)}`);
   try {
     const raw = JSON.parse(text.slice(start, end + 1)) as { intents?: unknown; notice?: unknown; personaUpdate?: unknown; commitment?: unknown; mood?: unknown };
     const intents = Array.isArray(raw.intents) ? (raw.intents as SnowdomeIntent[]) : [];
@@ -131,7 +135,7 @@ function parseDecision(text: string): ParsedDecision {
       ...(commitment ? { commitment } : {}),
       ...(mood ? { mood } : {}),
     };
-  } catch {
-    return { intents: [] };
+  } catch (error) {
+    throw new Error(`模型输出 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`);
   }
 }

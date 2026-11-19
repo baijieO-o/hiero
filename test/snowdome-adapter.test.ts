@@ -257,16 +257,39 @@ test('a speaker re-triggers a plan at most once per gap, and own echoes never tr
     onObservation: () => { calls += 1; return { intents: [] }; },
   });
   await adapter.start();
-  const echo = { ...observation, heard: [{ speakerId: 'hiero', mode: 'talk', text: '你好' }] };
+  const echo = { ...observation, heard: [{ speakerId: 'visitor-1', mode: 'talk', text: '你好' }] };
   socket.emit(echo);
   await wait(5);
   const baseline = calls;
   socket.emit(echo);
   await wait(5);
   assert.equal(calls, baseline);
-  socket.emit(heardObservation);
+  const residentHeard = { ...observation, heard: [{ speakerId: 'agent-alice', mode: 'talk', text: '你从哪里来？' }] };
+  const beforeResident = calls;
+  socket.emit(residentHeard);
   await wait(5);
-  socket.emit(heardObservation);
+  socket.emit(residentHeard);
+  await wait(5);
+  assert.equal(calls, beforeResident + 1);
+  adapter.stop();
+});
+
+test('a visitor who keeps talking always gets a plan, even inside the resident gap', async () => {
+  const socket = new FakeSocket();
+  let calls = 0;
+  const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
+    name: 'hiero',
+    connect: async () => socket,
+    login: fakeLogin,
+    onObservation: () => { calls += 1; return { intents: [] }; },
+  });
+  await adapter.start();
+  const visitorHeard = { ...observation, heard: [{ speakerId: 'visitor-81340826', mode: 'talk', text: '你好你好' }] };
+  socket.emit(visitorHeard);
+  await wait(5);
+  const baseline = calls;
+  socket.emit(visitorHeard);
   await wait(5);
   assert.equal(calls, baseline + 1);
   adapter.stop();

@@ -511,14 +511,19 @@ export class SnowdomeAdapter {
   /**
    * Hands the observation to the driver without awaiting it, so a slow plan never holds up observation handling.
    * Throttled: one plan in flight, and with nobody speaking only one per IDLE_DECISION_MS.
-   * A speaker re-triggers a plan at most once per HEARD_REPLY_GAP_MS; the line still reaches `recent`, so the
-   * next plan sees it. Own lines never count, so a resident does not answer its own echo.
+   * Residents re-trigger a plan at most once per HEARD_REPLY_GAP_MS, which stops greeting loops between residents.
+   * Visitors always trigger one, so a person who speaks to a resident gets an answer. The line still reaches
+   * `recent` either way. Own lines never count, so a resident does not answer its own echo.
    */
   private planFor(observation: SnowdomeObservation): void {
     const now = Date.now();
     const ownId = this.session?.actorId;
     for (const line of observation.heard) {
       if (line.speakerId === ownId) continue;
+      if (!line.speakerId.startsWith('agent')) {
+        this.pendingHeard = true;
+        continue;
+      }
       const last = this.lastHeardReplyAt.get(line.speakerId);
       if (last !== undefined && now - last < HEARD_REPLY_GAP_MS) continue;
       this.lastHeardReplyAt.set(line.speakerId, now);
