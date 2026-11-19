@@ -51,7 +51,9 @@ export async function heartbeatSnowdome(heartbeatUrl: string, token: string, fet
 
 export type SnowdomeIntent =
   | { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }
-  | { kind: 'speak'; actorId: string; mode: 'whisper' | 'talk' | 'shout'; text: string };
+  | { kind: 'speak'; actorId: string; mode: 'whisper' | 'talk' | 'shout'; text: string }
+  | { kind: 'emote'; actorId: string; emoji: string }
+  | { kind: 'mood'; actorId: string; valence: number; arousal: number };
 
 export interface SnowdomeObservation {
   kind: 'observation';
@@ -134,7 +136,23 @@ export function parseSnowdomeIntent(raw: unknown, actorId: string): SnowdomeInte
     && typeof candidate.text === 'string' && candidate.text.trim().length > 0 && candidate.text.length <= MAX_TEXT_LENGTH) {
     return { kind: 'speak', actorId, mode: candidate.mode as 'whisper' | 'talk' | 'shout', text: candidate.text };
   }
+  if (candidate.kind === 'emote' && typeof candidate.emoji === 'string' && isSingleEmoji(candidate.emoji)) {
+    return { kind: 'emote', actorId, emoji: candidate.emoji };
+  }
+  if (candidate.kind === 'mood' && isUnitNumber(candidate.valence) && isUnitNumber(candidate.arousal)) {
+    return { kind: 'mood', actorId, valence: candidate.valence, arousal: candidate.arousal };
+  }
   return null;
+}
+
+function isUnitNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= -1 && value <= 1;
+}
+
+/** A single extended grapheme (emoji with modifiers or ZWJ sequences counts as one). */
+function isSingleEmoji(value: string): boolean {
+  const segments = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)];
+  return segments.length === 1 && /\p{Extended_Pictographic}|\p{Regional_Indicator}|\p{Emoji_Presentation}/u.test(value);
 }
 
 export function parseObservation(raw: string): SnowdomeObservation | null {
@@ -217,6 +235,8 @@ const IDLE_DECISION_MS = 10000;
 const BURST_LIMIT = 5;
 const BURST_WINDOW_MS = 10000;
 const MIN_INTERVAL_MS = 1000;
+/** Mood is re-sent only when valence or arousal moves this far from the last accepted mood. */
+const MOOD_THRESHOLD = 0.3;
 
 /** Client for Snowdome's agent WebSocket. Intents are sent only after the server accepts the subscription. */
 export class SnowdomeAdapter {
@@ -244,6 +264,8 @@ export class SnowdomeAdapter {
   /** Earliest time an intent may be sent again after a rate_limited receipt. */
   private cooldownUntil = 0;
   private lastNotice: { text: string; at: number } | undefined;
+  /** Last mood Snowdome accepted; the threshold is measured against it. */
+  private lastMood: { valence: number; arousal: number } | undefined;
   /** Bumped by start() and stop() so a connect attempt still in flight can tell it has been superseded. */
   private generation = 0;
 
@@ -478,6 +500,14 @@ export class SnowdomeAdapter {
     }
   }
 
+  /** Mood is sent only when valence or arousal moved past MOOD_THRESHOLD since the last accepted mood. */
+  private moodChanged(intent: SnowdomeIntent): boolean {
+    if (intent.kind !== 'mood') return true;
+    const last = this.lastMood;
+    if (!last) return true;
+    return Math.abs(intent.valence - last.valence) >= MOOD_THRESHOLD || Math.abs(intent.arousal - last.arousal) >= MOOD_THRESHOLD;
+  }
+
   /** Safety valve for proactive notices: at least a minute apart, and never the same text twice in a row. */
   private noticeAllowed(text: string, now = Date.now()): boolean {
     const last = this.lastNotice;
@@ -513,9 +543,12 @@ export class SnowdomeAdapter {
         }
         const intent = this.outbox.shift();
         if (!intent) break;
+        if (!this.moodChanged(intent)) continue;
         this.sentAt.push(Date.now());
         if (this.sentAt.length > BURST_LIMIT) this.sentAt.shift();
-        await this.send(intent);
+        const receipt = await this.send(intent);
+        // The mood baseline moves only when Snowdome accepted it, so a refused mood is retried on the next change.
+        if (intent.kind === 'mood' && receipt.accepted) this.lastMood = { valence: intent.valence, arousal: intent.arousal };
       }
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));

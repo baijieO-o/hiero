@@ -456,3 +456,45 @@ test('a driver that fails to load leaves the resident offline with an error, not
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('parseSnowdomeIntent accepts one emoji for emote and rejects anything else', () => {
+  assert.deepEqual(parseSnowdomeIntent({ kind: 'emote', emoji: '😀' }, 'hiero'), { kind: 'emote', actorId: 'hiero', emoji: '😀' });
+  assert.deepEqual(parseSnowdomeIntent({ kind: 'emote', emoji: '👍🏽' }, 'hiero'), { kind: 'emote', actorId: 'hiero', emoji: '👍🏽' });
+  assert.equal(parseSnowdomeIntent({ kind: 'emote', emoji: 'ab' }, 'hiero'), null);
+  assert.equal(parseSnowdomeIntent({ kind: 'emote', emoji: '😀😀' }, 'hiero'), null);
+  assert.equal(parseSnowdomeIntent({ kind: 'emote', emoji: '' }, 'hiero'), null);
+});
+
+test('parseSnowdomeIntent keeps mood inside [-1, 1]', () => {
+  assert.deepEqual(parseSnowdomeIntent({ kind: 'mood', valence: -1, arousal: 0.5 }, 'hiero'), { kind: 'mood', actorId: 'hiero', valence: -1, arousal: 0.5 });
+  assert.equal(parseSnowdomeIntent({ kind: 'mood', valence: 1.01, arousal: 0 }, 'hiero'), null);
+  assert.equal(parseSnowdomeIntent({ kind: 'mood', valence: 0, arousal: Number.NaN }, 'hiero'), null);
+  assert.equal(parseSnowdomeIntent({ kind: 'mood', valence: 0 }, 'hiero'), null);
+});
+
+test('mood is sent only after it moves past the 0.3 threshold from the last accepted mood', async () => {
+  const socket = new FakeSocket();
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    url: 'ws://localhost:3000/agent',
+    loginUrl: 'http://localhost:3000/api/login',
+    connect: async () => socket,
+    login: fakeLogin,
+    onObservation: (observation) => ({ intents: observation.tick === 1
+      ? [{ kind: 'mood', actorId: 'visitor-1', valence: 0.5, arousal: 0 }]
+      : [{ kind: 'mood', actorId: 'visitor-1', valence: 0.6, arousal: 0.1 }, { kind: 'mood', actorId: 'visitor-1', valence: 0.9, arousal: 0 }] }),
+    onError: () => {},
+  });
+  try {
+    await adapter.start();
+    socket.emit(observation);
+    await wait(50);
+    socket.emit({ ...observation, tick: 2, heard: [{ speakerId: 'visitor-1', mode: 'say', text: 'hi' }] });
+    await wait(1200);
+    const moods = socket.sent.filter((message) => message.kind === 'mood');
+    // tick 1 sends 0.5; tick 2's 0.6 is within 0.3 and is dropped; 0.9 is 0.4 away and is sent.
+    assert.deepEqual(moods.map((message) => message.valence), [0.5, 0.9]);
+  } finally {
+    adapter.stop();
+  }
+});

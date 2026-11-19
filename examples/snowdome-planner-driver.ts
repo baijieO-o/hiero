@@ -20,7 +20,8 @@ export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver 
       const prompt = [
         ctx.getPersona(),
         '你在 Snowdome 小镇里。根据下面的观察，给出接下来要做的 0 到 3 个动作。',
-        '只输出 JSON：{"intents":[{"kind":"move","target":{"x":0,"y":0,"z":0}}|{"kind":"speak","mode":"talk|whisper|shout","text":"..."}],"notice":"可选，值得告诉主人的一句话","personaUpdate":"可选，仅在被冒犯、被说服、被揭穿等重要事件后填写的新人设","commitment":"可选，一个承诺动作对象"}',
+        '只输出 JSON：{"intents":[{"kind":"move","target":{"x":0,"y":0,"z":0}}|{"kind":"speak","mode":"talk|whisper|shout","text":"..."}|{"kind":"emote","emoji":"单个emoji"}],"mood":"可选，{\\"valence\\":-1到1,\\"arousal\\":-1到1}，你当前的心情","notice":"可选，值得告诉主人的一句话","personaUpdate":"可选，仅在被冒犯、被说服、被揭穿等重要事件后填写的新人设","commitment":"可选，一个承诺动作对象"}',
+        'emote 的 emoji 必须是单个 emoji；每次决策都可以附带一个表情。mood 只在心情明显变化时填写，数值在 [-1, 1] 内。',
         'commitment 的形式：{"action":"propose","counterparty":"对方名字","content":"不超过200字"} 或 {"action":"accept","commitmentId":"id"} 或 {"action":"report","commitmentId":"id","outcome":"fulfilled|breached"}。',
         'move 每次最多移动 3 格。只允许 move 与 speak，不要输出其他动作。',
         'commitment 只在你和对方明确约定、或对方履行/违约后填写；没有就省略。accept 与 report 只对对方发给你的承诺有效。',
@@ -29,7 +30,9 @@ export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver 
       ].join('\n');
       const text = await ctx.ask(prompt);
       const decision = parseDecision(text);
+      // emote and mood join the plan so they are paced with moves and speech, sharing the same action budget.
       plan = decision.intents;
+      if (decision.mood) plan = [...plan, { kind: 'mood', ...decision.mood } as SnowdomeIntent];
       if (decision.notice) pendingNotice = decision.notice;
       if (decision.personaUpdate) pendingPersona = decision.personaUpdate;
       if (decision.commitment) await runCommitment(decision.commitment);
@@ -84,6 +87,14 @@ type CommitmentPlan =
 
 interface ParsedDecision extends SnowdomeDecision {
   commitment?: CommitmentPlan;
+  mood?: { valence: number; arousal: number };
+}
+
+function parseMood(raw: unknown): { valence: number; arousal: number } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const m = raw as Record<string, unknown>;
+  const inRange = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= -1 && v <= 1;
+  return inRange(m.valence) && inRange(m.arousal) ? { valence: m.valence, arousal: m.arousal } : undefined;
 }
 
 function parseCommitment(raw: unknown): CommitmentPlan | undefined {
@@ -106,16 +117,18 @@ function parseDecision(text: string): ParsedDecision {
   const end = text.lastIndexOf('}');
   if (start < 0 || end < start) return { intents: [] };
   try {
-    const raw = JSON.parse(text.slice(start, end + 1)) as { intents?: unknown; notice?: unknown; personaUpdate?: unknown; commitment?: unknown };
+    const raw = JSON.parse(text.slice(start, end + 1)) as { intents?: unknown; notice?: unknown; personaUpdate?: unknown; commitment?: unknown; mood?: unknown };
     const intents = Array.isArray(raw.intents) ? (raw.intents as SnowdomeIntent[]) : [];
     const notice = typeof raw.notice === 'string' ? raw.notice : undefined;
     const personaUpdate = typeof raw.personaUpdate === 'string' && raw.personaUpdate.trim() ? raw.personaUpdate : undefined;
     const commitment = parseCommitment(raw.commitment);
+    const mood = parseMood(raw.mood);
     return {
       intents,
       ...(notice ? { notice } : {}),
       ...(personaUpdate ? { personaUpdate } : {}),
       ...(commitment ? { commitment } : {}),
+      ...(mood ? { mood } : {}),
     };
   } catch {
     return { intents: [] };
