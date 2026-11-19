@@ -1141,6 +1141,7 @@ export class HieroRuntime {
     return snowdomeAdapterPlug({
       name: resident.name,
       url: resident.url,
+      baselineEmote: resident.baselineEmote,
       connect: wsSocketFactory,
       onError: (message) => console.warn(`Snowdome(${resident.name}): ${message}`),
       onNotice: (text) => this.runtime.broadcast({ type: 'AGENT_NOTICE', payload: { source: resident.name, text, at: new Date().toISOString() } }),

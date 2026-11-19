@@ -30,11 +30,11 @@ function isRetryableLoginError(cause: unknown): boolean {
   return cause instanceof Error && cause.message.endsWith('entrance_occupied');
 }
 
-export async function loginSnowdome(loginUrl: string, name: string, fetchImpl: typeof fetch = fetch): Promise<SnowdomeSession> {
+export async function loginSnowdome(loginUrl: string, name: string, baselineEmote: string, fetchImpl: typeof fetch = fetch): Promise<SnowdomeSession> {
   const response = await fetchImpl(loginUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name, kind: 'agent', agentId: agentIdFor(name) }),
+    body: JSON.stringify({ name, kind: 'agent', agentId: agentIdFor(name), baselineEmote }),
   });
   const body = await response.json() as { accepted?: boolean; token?: string; actorId?: string; reason_code?: string };
   if (!response.ok || !body.accepted || !body.token || !body.actorId) {
@@ -202,7 +202,9 @@ export interface SnowdomeAdapterOptions {
   url?: string;
   loginUrl?: string;
   connect: SnowdomeSocketFactory;
-  login?: (loginUrl: string, name: string) => Promise<SnowdomeSession>;
+  /** Required by Snowdome for third-party agents: the resident's permanent face, sent at login. */
+  baselineEmote: string;
+  login?: (loginUrl: string, name: string, baselineEmote: string) => Promise<SnowdomeSession>;
   /** HTTP client for commitment calls; tests inject a fake one. */
   fetch?: typeof fetch;
   heartbeat?: (heartbeatUrl: string, token: string) => Promise<boolean>;
@@ -331,7 +333,7 @@ export class SnowdomeAdapter {
   private async connect(generation: number): Promise<void> {
     const isStale = () => this.closed || generation !== this.generation;
     const login = this.options.login ?? loginSnowdome;
-    const session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name);
+    const session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name, this.options.baselineEmote);
     if (isStale()) return;
     this.session = session;
     this.recentCursor = 0;

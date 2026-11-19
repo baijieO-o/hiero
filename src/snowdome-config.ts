@@ -9,6 +9,8 @@ const ResidentSchema = z.object({
   url: z.string().min(1).default(SNOWDOME_DEFAULT_URL),
   /** Per-resident persona, the single source the driver reads and rewrites. */
   persona: z.string().max(500).default(''),
+  /** Permanent face sent at login; Snowdome requires one for third-party agents, so it has no default. */
+  baselineEmote: z.string().min(1),
   /** File name of the third-party driver inside ~/.hiero/drivers. */
   driver: z.string().min(1).default('snowdome-planner-driver.js'),
 });
