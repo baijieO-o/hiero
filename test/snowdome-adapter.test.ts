@@ -1,9 +1,10 @@
 ﻿import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
+import { readSnowdomeConfig } from '../src/snowdome-config.js';
 import { McpToolClient } from '../src/mcp-client.js';
 import { SnowdomeAdapter, fetchSnowdomeHistory, fetchSnowdomeRecent, historyUrlFor, heartbeatUrlFor, isSingleEmoji, loginSnowdome, parseSnowdomeIntent, recentUrlFor, snowdomeAdapterPlug, type SnowdomeObservation, type SnowdomeSocket } from '../src/snowdome-adapter.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -685,5 +686,16 @@ test('recent utterances are attached only once and the cursor resets when the ga
     assert.equal(seen[2]?.recent, undefined);
   } finally {
     adapter.stop();
+  }
+});
+
+test('readSnowdomeConfig accepts a UTF-8 BOM so a BOM-prefixed snowdome.json does not break hot-plug', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'snowdome-bom-'));
+  try {
+    const path = join(dir, 'snowdome.json');
+    writeFileSync(path, '\uFEFF' + JSON.stringify({ enabled: true, residents: [] }), 'utf8');
+    assert.equal(readSnowdomeConfig(path).enabled, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

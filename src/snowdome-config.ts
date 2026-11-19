@@ -39,7 +39,7 @@ export function snowdomeConfigPath(home = homedir()): string {
  */
 export function readSnowdomeConfig(path = snowdomeConfigPath()): SnowdomeConfig {
   if (!existsSync(path)) return SnowdomeConfigSchema.parse({});
-  const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  const raw = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) as Record<string, unknown>;
   if (!Array.isArray(raw.residents) && ('name' in raw || 'url' in raw)) {
     const { enabled, ...resident } = raw;
     return SnowdomeConfigSchema.parse({ enabled: enabled ?? false, residents: [resident] });
