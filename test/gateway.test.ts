@@ -72,6 +72,36 @@ test('ModelGateway waits for the shortest cooldown instead of failing a single-t
   assert.equal(calls, 2);
 });
 
+test('ModelGateway waits out a cooldown set by a concurrent request instead of reporting no model', async () => {
+  let now = 0;
+  const waits: number[] = [];
+  let calls = 0;
+  const transport: ModelTransport = {
+    complete: async (request, token) => {
+      calls += 1;
+      if (calls === 1) throw { status: 429 };
+      return { model: request.model ?? 'unknown', token_id: token, content: 'ok' };
+    },
+  };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const gateway = new ModelGateway(transport, ['only'], () => now, 60_000, async (ms) => {
+    waits.push(ms);
+    await gate;
+    now += ms;
+  });
+  // First request is 429'd and parks in its cooldown wait, so the token stays cooled.
+  const first = gateway.complete(task, { prompt: 'first' });
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  // Second request starts while the token is cooling and has no failure of its own yet.
+  const second = gateway.complete(task, { prompt: 'second' });
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  release();
+  assert.equal((await first).content, 'ok');
+  assert.equal((await second).content, 'ok');
+  assert.ok(waits.length >= 1);
+});
+
 test('ModelGateway retries through repeated 429s on a single-token pool before giving up', async () => {
   let now = 0;
   let calls = 0;

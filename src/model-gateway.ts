@@ -96,7 +96,7 @@ export class ModelGateway {
     const maxAttempts = this.tokens.length * models.length * (1 + MAX_COOLDOWN_WAITS);
     while (attempted < maxAttempts) {
       let tokenState = this.nextAvailableToken();
-      if (!tokenState && lastRetryable && cooldownWaits < MAX_COOLDOWN_WAITS) {
+      if (!tokenState && cooldownWaits < MAX_COOLDOWN_WAITS) {
         const waitMs = this.shortestCooldownWait();
         if (waitMs === undefined) break;
         cooldownWaits += 1;

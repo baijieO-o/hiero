@@ -1197,7 +1197,7 @@ export class HieroRuntime {
     return {
       task_id: randomUUID(),
       workspace_path: process.cwd(),
-      model_config: { preferred_model: process.env.HIERO_LLM_MODEL ?? 'auto', fallback_chain: [] },
+      model_config: { preferred_model: this.modelForKind('chat') ?? process.env.HIERO_LLM_MODEL ?? 'auto', fallback_chain: [] },
       permission_mode: 'strict',
       context_mode: 'ephemeral',
       acceptance_criteria: ['返回一个 Snowdome 行动意图 JSON'],
