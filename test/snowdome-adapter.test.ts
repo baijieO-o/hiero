@@ -530,6 +530,12 @@ test('parseSnowdomeIntent accepts one emoji for emote and rejects anything else'
   assert.equal(parseSnowdomeIntent({ kind: 'emote', emoji: '' }, 'hiero'), null);
 });
 
+test('parseSnowdomeIntent keeps emote kind as live, baseline, or absent, and rejects other values', () => {
+  assert.deepEqual(parseSnowdomeIntent({ kind: 'emote', emoji: '😀', emoteKind: 'baseline' }, 'hiero'), { kind: 'emote', actorId: 'hiero', emoji: '😀', emoteKind: 'baseline' });
+  assert.deepEqual(parseSnowdomeIntent({ kind: 'emote', emoji: '😀', emoteKind: 'live' }, 'hiero'), { kind: 'emote', actorId: 'hiero', emoji: '😀', emoteKind: 'live' });
+  assert.equal(parseSnowdomeIntent({ kind: 'emote', emoji: '😀', emoteKind: 'forever' }, 'hiero'), null);
+});
+
 test('parseSnowdomeIntent keeps mood inside [-1, 1]', () => {
   assert.deepEqual(parseSnowdomeIntent({ kind: 'mood', valence: -1, arousal: 0.5 }, 'hiero'), { kind: 'mood', actorId: 'hiero', valence: -1, arousal: 0.5 });
   assert.equal(parseSnowdomeIntent({ kind: 'mood', valence: 1.01, arousal: 0 }, 'hiero'), null);

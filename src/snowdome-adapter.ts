@@ -52,7 +52,7 @@ export async function heartbeatSnowdome(heartbeatUrl: string, token: string, fet
 export type SnowdomeIntent =
   | { kind: 'move'; actorId: string; target: { x: number; y: number; z: number } }
   | { kind: 'speak'; actorId: string; mode: 'whisper' | 'talk' | 'shout'; text: string }
-  | { kind: 'emote'; actorId: string; emoji: string }
+  | { kind: 'emote'; actorId: string; emoji: string; emoteKind?: 'live' | 'baseline' }
   | { kind: 'mood'; actorId: string; valence: number; arousal: number };
 
 export interface SnowdomeObservation {
@@ -166,7 +166,11 @@ export function parseSnowdomeIntent(raw: unknown, actorId: string): SnowdomeInte
     return { kind: 'speak', actorId, mode: candidate.mode as 'whisper' | 'talk' | 'shout', text: candidate.text };
   }
   if (candidate.kind === 'emote' && typeof candidate.emoji === 'string' && isSingleEmoji(candidate.emoji)) {
-    return { kind: 'emote', actorId, emoji: candidate.emoji };
+    // live is the server default; baseline stays until replaced. Anything else is rejected rather than guessed.
+    if (candidate.emoteKind === undefined || candidate.emoteKind === 'live' || candidate.emoteKind === 'baseline') {
+      return { kind: 'emote', actorId, emoji: candidate.emoji, ...(candidate.emoteKind ? { emoteKind: candidate.emoteKind } : {}) };
+    }
+    return null;
   }
   if (candidate.kind === 'mood' && isUnitNumber(candidate.valence) && isUnitNumber(candidate.arousal)) {
     return { kind: 'mood', actorId, valence: candidate.valence, arousal: candidate.arousal };
