@@ -8,6 +8,13 @@ const PLAN_INTERVAL_MS = 30_000;
 // never blocks observation handling.
 export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver {
   let plan: SnowdomeIntent[] = [];
+
+  // Chosen before each login: the first emoji written in the persona. Without one the login is refused, so no default is invented.
+  function chooseBaselineEmote(): string {
+    const match = ctx.getPersona().match(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}|\p{Emoji_Modifier})*/u);
+    if (!match) throw new Error('人设中没有 emoji，无法选择常态表情');
+    return match[0];
+  }
   let pendingNotice: string | undefined;
   let pendingPersona: string | undefined;
   let planning = false;
@@ -64,6 +71,7 @@ export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver 
   }
 
   return {
+    chooseBaselineEmote,
     onObservation(observation: SnowdomeObservation): SnowdomeDecision {
       const now = Date.now();
       // A visitor's line is always answered, so it skips the interval that paces idle planning.

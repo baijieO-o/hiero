@@ -183,7 +183,7 @@ function isUnitNumber(value: unknown): value is number {
 }
 
 /** A single extended grapheme (emoji with modifiers or ZWJ sequences counts as one). */
-function isSingleEmoji(value: string): boolean {
+export function isSingleEmoji(value: string): boolean {
   const segments = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)];
   return segments.length === 1 && /\p{Extended_Pictographic}|\p{Regional_Indicator}|\p{Emoji_Presentation}/u.test(value);
 }
@@ -202,8 +202,8 @@ export interface SnowdomeAdapterOptions {
   url?: string;
   loginUrl?: string;
   connect: SnowdomeSocketFactory;
-  /** Required by Snowdome for third-party agents: the resident's permanent face, sent at login. */
-  baselineEmote: string;
+  /** Required by Snowdome for third-party agents: chosen before every login as the resident's permanent face. */
+  chooseBaselineEmote: () => string | Promise<string>;
   login?: (loginUrl: string, name: string, baselineEmote: string) => Promise<SnowdomeSession>;
   /** HTTP client for commitment calls; tests inject a fake one. */
   fetch?: typeof fetch;
@@ -333,7 +333,10 @@ export class SnowdomeAdapter {
   private async connect(generation: number): Promise<void> {
     const isStale = () => this.closed || generation !== this.generation;
     const login = this.options.login ?? loginSnowdome;
-    const session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name, this.options.baselineEmote);
+    const baselineEmote = await this.options.chooseBaselineEmote();
+    if (isStale()) return;
+    if (!isSingleEmoji(baselineEmote)) throw new Error(`baselineEmote 必须是单个 emoji：${JSON.stringify(baselineEmote)}`);
+    const session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name, baselineEmote);
     if (isStale()) return;
     this.session = session;
     this.recentCursor = 0;

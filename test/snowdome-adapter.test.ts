@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { McpToolClient } from '../src/mcp-client.js';
-import { SnowdomeAdapter, fetchSnowdomeHistory, fetchSnowdomeRecent, historyUrlFor, heartbeatUrlFor, loginSnowdome, parseSnowdomeIntent, recentUrlFor, snowdomeAdapterPlug, type SnowdomeObservation, type SnowdomeSocket } from '../src/snowdome-adapter.js';
+import { SnowdomeAdapter, fetchSnowdomeHistory, fetchSnowdomeRecent, historyUrlFor, heartbeatUrlFor, isSingleEmoji, loginSnowdome, parseSnowdomeIntent, recentUrlFor, snowdomeAdapterPlug, type SnowdomeObservation, type SnowdomeSocket } from '../src/snowdome-adapter.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,7 +46,7 @@ test('start logs in, connects with the issued token, and subscribes to the serve
   const socket = new FakeSocket();
   const urls: string[] = [];
   const logins: string[] = [];
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     url: 'ws://localhost:3000/agent',
@@ -74,7 +74,7 @@ test('stop() during login leaves no socket connected and no heartbeat running', 
   let releaseLogin: (() => void) | undefined;
   const sockets: FakeSocket[] = [];
   const beats: string[] = [];
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     heartbeatIntervalMs: 5,
@@ -94,7 +94,7 @@ test('stop() during login leaves no socket connected and no heartbeat running', 
 
 test('start does not connect when login is rejected', async () => {
   let connected = false;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => { connected = true; return new FakeSocket(); },
@@ -108,7 +108,7 @@ test('start does not connect when login is rejected', async () => {
 
 test('a returning resident whose entrance is occupied keeps retrying until login succeeds', async () => {
   let logins = 0;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiore',
     reconnectDelayMs: 1,
@@ -130,7 +130,7 @@ test('a returning resident whose entrance is occupied keeps retrying until login
 
 test('a visitor adapter beats for its token and stops beating after stop()', async () => {
   const beats: string[] = [];
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     heartbeatIntervalMs: 5,
@@ -152,7 +152,7 @@ test('a visitor adapter beats for its token and stops beating after stop()', asy
 test('a rejected heartbeat (401) drops the session and re-logs in', async () => {
   let logins = 0;
   const sockets: FakeSocket[] = [];
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     heartbeatIntervalMs: 5,
@@ -189,7 +189,7 @@ test('a stale-session receipt triggers re-login and reconnect with the new token
   const sockets: StaleSocket[] = [];
   const tokens: string[] = [];
   let logins = 0;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     reconnectDelayMs: 1,
@@ -221,11 +221,38 @@ test('login asks for an agent resident with a stable agentId derived from its na
   assert.deepEqual(body, { name: 'hiero main', kind: 'agent', agentId: 'hiero-main', baselineEmote: '🙂' });
 });
 
+test('a login uses the emoji chosen just before it, and a non-emoji choice never reaches Snowdome', async () => {
+  const sent: string[] = [];
+  const login = async (_url: string, _name: string, baselineEmote: string) => {
+    sent.push(baselineEmote);
+    return { token: 't', actorId: 'agent-hiero' };
+  };
+  const socket = new FakeSocket();
+  const adapter = new SnowdomeAdapter({ name: 'hiero', chooseBaselineEmote: () => '🙂', login, connect: async () => socket, onObservation: () => ({ intents: [] }) });
+  await adapter.start();
+  assert.deepEqual(sent, ['🙂']);
+  adapter.stop();
+  const rejected: string[] = [];
+  const badLogin = async (_url: string, _name: string, baselineEmote: string) => {
+    rejected.push(baselineEmote);
+    return { token: 't', actorId: 'agent-hiero' };
+  };
+  const bad = new SnowdomeAdapter({ name: 'hiero', chooseBaselineEmote: () => 'not-emoji', login: badLogin, connect: async () => new FakeSocket(), onObservation: () => ({ intents: [] }) });
+  await assert.rejects(() => bad.start(), /单个 emoji/);
+  bad.stop();
+  assert.deepEqual(rejected, []);
+  assert.equal(isSingleEmoji('😀'), true);
+  assert.equal(isSingleEmoji('👍🏽'), true);
+  assert.equal(isSingleEmoji('hi'), false);
+  assert.equal(isSingleEmoji('😀😀'), false);
+  assert.equal(isSingleEmoji(''), false);
+});
+
 test('observations arriving while a decision is in flight do not stack driver calls', async () => {
   const socket = new FakeSocket();
   let calls = 0;
   let release: () => void = () => {};
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
@@ -249,7 +276,7 @@ test('observations arriving while a decision is in flight do not stack driver ca
 test('a speaker re-triggers a plan at most once per gap, and own echoes never trigger one', async () => {
   const socket = new FakeSocket();
   let calls = 0;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
@@ -277,7 +304,7 @@ test('a speaker re-triggers a plan at most once per gap, and own echoes never tr
 test('a visitor who keeps talking always gets a plan, even inside the resident gap', async () => {
   const socket = new FakeSocket();
   let calls = 0;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
@@ -298,7 +325,7 @@ test('a visitor who keeps talking always gets a plan, even inside the resident g
 test('onDayStart fires once per new game day, from day_index', async () => {
   const socket = new FakeSocket();
   const days: number[] = [];
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂', fetch: fakeRecentFetch, name: 'hiero', connect: async () => socket, login: fakeLogin, onObservation: () => ({ intents: [] }), onDayStart: (day) => { days.push(day); } });
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂', fetch: fakeRecentFetch, name: 'hiero', connect: async () => socket, login: fakeLogin, onObservation: () => ({ intents: [] }), onDayStart: (day) => { days.push(day); } });
   await adapter.start();
   socket.emit({ ...observation, day_index: 3, phase: 'day' });
   socket.emit({ ...observation, day_index: 3, phase: 'dusk' });
@@ -312,7 +339,7 @@ test('onDayStart fires once per new game day, from day_index', async () => {
 test('onObservation intents are validated and sent; illegal ones are dropped', async () => {
   const socket = new FakeSocket();
   const errors: string[] = [];
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
@@ -331,7 +358,7 @@ test('onObservation intents are validated and sent; illegal ones are dropped', a
 test('an illegal driver intent is rejected and reported', async () => {
   const socket = new FakeSocket();
   const errors: string[] = [];
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
@@ -358,7 +385,7 @@ test('a rate_limited receipt pauses driver intents for cooldown_ms', async () =>
     }
   }
   const socket = new LimitedSocket();
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
@@ -379,7 +406,7 @@ test('a driver notice is forwarded to onNotice only when non-empty', async () =>
   const socket = new FakeSocket();
   const notices: string[] = [];
   let calls = 0;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
@@ -408,7 +435,7 @@ test('proactive notices are spaced at least a minute apart and never repeat back
   let now = 1_000_000;
   Date.now = () => now;
   try {
-    const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+    const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
       name: 'hiero',
       connect: async () => socket,
@@ -451,7 +478,7 @@ test('hot-plug enables and disables a Snowdome adapter, closing its socket on di
   const mcp = new McpToolClient();
   const registry = new HotPlugRegistry(mcp, root);
   const socket = new FakeSocket();
-  registry.defineAdapter('snowdome', () => snowdomeAdapterPlug({ baselineEmote: '🙂', name: 'hiero', connect: async () => socket, login: fakeLogin, onObservation: () => ({ intents: [] }) }));
+  registry.defineAdapter('snowdome', () => snowdomeAdapterPlug({ chooseBaselineEmote: () => '🙂', name: 'hiero', connect: async () => socket, login: fakeLogin, onObservation: () => ({ intents: [] }) }));
 
   try {
     const enabled = await registry.enableAdapter('snowdome');
@@ -480,8 +507,8 @@ test('two residents keep separate logins and sockets when enabled together', asy
     sockets.set(url, socket);
     return socket;
   };
-  registry.defineAdapter('snowdome:alice', () => snowdomeAdapterPlug({ baselineEmote: '🙂', name: 'alice', login, heartbeat: async () => true, heartbeatIntervalMs: 1000, connect, onObservation: () => ({ intents: [] }) }));
-  registry.defineAdapter('snowdome:bob', () => snowdomeAdapterPlug({ baselineEmote: '🙂', name: 'bob', login, heartbeat: async () => true, heartbeatIntervalMs: 1000, connect, onObservation: () => ({ intents: [] }) }));
+  registry.defineAdapter('snowdome:alice', () => snowdomeAdapterPlug({ chooseBaselineEmote: () => '🙂', name: 'alice', login, heartbeat: async () => true, heartbeatIntervalMs: 1000, connect, onObservation: () => ({ intents: [] }) }));
+  registry.defineAdapter('snowdome:bob', () => snowdomeAdapterPlug({ chooseBaselineEmote: () => '🙂', name: 'bob', login, heartbeat: async () => true, heartbeatIntervalMs: 1000, connect, onObservation: () => ({ intents: [] }) }));
 
   try {
     assert.equal((await registry.enableAdapter('snowdome:alice')).enabled, true);
@@ -505,7 +532,7 @@ test('a driver that fails to load leaves the resident offline with an error, not
   const mcp = new McpToolClient();
   const registry = new HotPlugRegistry(mcp, root);
   let connected = false;
-  registry.defineAdapter('snowdome:ghost', () => snowdomeAdapterPlug({ baselineEmote: '🙂',
+  registry.defineAdapter('snowdome:ghost', () => snowdomeAdapterPlug({ chooseBaselineEmote: () => '🙂',
     name: 'ghost',
     connect: async () => { connected = true; return new FakeSocket(); },
     login: async () => { throw new Error('driver failed to load'); },
@@ -545,7 +572,7 @@ test('parseSnowdomeIntent keeps mood inside [-1, 1]', () => {
 
 test('mood is sent only after it moves past the 0.3 threshold from the last accepted mood', async () => {
   const socket = new FakeSocket();
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     fetch: fakeRecentFetch,
     name: 'hiero',
     url: 'ws://localhost:3000/agent',
@@ -592,7 +619,7 @@ test('recent lines read while no plan runs are delivered with the next plan', as
     const utterances = serverLastSeq > since ? [{ seq: serverLastSeq, kind: 'heard', speakerId: 'visitor-2', text: '你好' }] : [];
     return new Response(JSON.stringify({ actorId: 'hiero', utterances, last_seq: serverLastSeq }), { status: 200 });
   }) as typeof fetch;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     name: 'hiero',
     url: 'ws://localhost:3000/agent',
     loginUrl: 'http://localhost:3000/api/login',
@@ -632,7 +659,7 @@ test('recent utterances are attached only once and the cursor resets when the ga
     const utterances = serverLastSeq > since ? [{ seq: serverLastSeq, kind: 'heard', speakerId: 'v1', text: 'hi' }] : [];
     return new Response(JSON.stringify({ actorId: 'hiero', utterances, last_seq: serverLastSeq }), { status: 200 });
   }) as typeof fetch;
-  const adapter = new SnowdomeAdapter({ baselineEmote: '🙂',
+  const adapter = new SnowdomeAdapter({ chooseBaselineEmote: () => '🙂',
     name: 'hiero',
     url: 'ws://localhost:3000/agent',
     loginUrl: 'http://localhost:3000/api/login',

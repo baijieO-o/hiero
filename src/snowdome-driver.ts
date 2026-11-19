@@ -32,6 +32,8 @@ export interface DriverContext {
  * The adapter validates and paces the intents, and forwards the notice to the chat window.
  */
 export interface SnowdomeDriver {
+  /** Picks the permanent face sent at every login; must return exactly one emoji. */
+  chooseBaselineEmote?(): string | Promise<string>;
   onDayStart?(dayIndex: number): void | Promise<void>;
   onObservation(observation: SnowdomeObservation): SnowdomeDecision | Promise<SnowdomeDecision>;
 }
