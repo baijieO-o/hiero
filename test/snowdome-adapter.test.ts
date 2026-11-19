@@ -554,6 +554,44 @@ test('recent endpoint is derived from the login URL and reads incrementally by s
   assert.equal(calls[0], 'http://localhost:3000/api/agent/recent?token=tok&since=7');
 });
 
+test('recent lines read while no plan runs are delivered with the next plan', async () => {
+  const socket = new FakeSocket();
+  const seen: SnowdomeObservation[] = [];
+  let serverLastSeq = 0;
+  const fakeFetch = (async (url: string) => {
+    const since = Number(new URL(String(url)).searchParams.get('since'));
+    const utterances = serverLastSeq > since ? [{ seq: serverLastSeq, kind: 'heard', speakerId: 'visitor-2', text: '你好' }] : [];
+    return new Response(JSON.stringify({ actorId: 'hiero', utterances, last_seq: serverLastSeq }), { status: 200 });
+  }) as typeof fetch;
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    url: 'ws://localhost:3000/agent',
+    loginUrl: 'http://localhost:3000/api/login',
+    connect: async () => socket,
+    login: fakeLogin,
+    fetch: fakeFetch,
+    heartbeat: async () => true,
+    onObservation: (observation) => { seen.push(observation); return { intents: [] }; },
+    onError: () => {},
+  });
+  try {
+    await adapter.start();
+    socket.emit(observation);
+    await wait(50);
+    // A line arrives on an observation whose plan is not run, so the line must wait for the next plan.
+    serverLastSeq = 1;
+    socket.emit({ ...observation, tick: 2 });
+    await wait(50);
+    // A later heard line makes a plan due, and the buffered line is delivered with it.
+    socket.emit({ ...observation, tick: 3, heard: [{ speakerId: 'visitor-2', mode: 'talk', text: '你好' }] });
+    await wait(50);
+    const delivered = seen.flatMap((item) => item.recent ?? []).map((line) => line.seq);
+    assert.deepEqual(delivered, [1]);
+  } finally {
+    await adapter.stop();
+  }
+});
+
 test('recent utterances are attached only once and the cursor resets when the gateway restarts', async () => {
   const socket = new FakeSocket();
   const sinceSeen: string[] = [];

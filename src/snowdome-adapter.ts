@@ -287,6 +287,8 @@ export class SnowdomeAdapter {
   private lastDay: number | undefined;
   /** Sequence number of the last conversation line read from the incremental recent endpoint. */
   private recentCursor = 0;
+  /** Lines read from recent but not yet handed to a plan; delivered with the next plan so none are dropped. */
+  private pendingRecent: SnowdomeUtterance[] = [];
   /** Latest observation not yet handed to the third-party hook; newer ones overwrite older ones. */
   private latestObservation: SnowdomeObservation | undefined;
   /** Validated intents waiting to be paced out; a newer batch replaces an unsent older one. */
@@ -500,7 +502,7 @@ export class SnowdomeAdapter {
       // The gateway restarts its sequence from 0; a cursor ahead of the server means it must be reset.
       if (this.closed) return;
       this.recentCursor = last_seq < this.recentCursor ? last_seq : Math.max(this.recentCursor, last_seq);
-      if (utterances.length > 0) observation.recent = utterances;
+      if (utterances.length > 0) this.pendingRecent.push(...utterances);
     } catch (cause) {
       this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
     }
@@ -546,6 +548,10 @@ export class SnowdomeAdapter {
     if (!this.pendingHeard && Date.now() - this.lastDecisionAt < IDLE_DECISION_MS) return;
     const observation = this.latestObservation;
     this.latestObservation = undefined;
+    if (this.pendingRecent.length > 0) {
+      observation.recent = this.pendingRecent;
+      this.pendingRecent = [];
+    }
     this.pendingHeard = false;
     this.lastDecisionAt = Date.now();
     this.deciding = true;
