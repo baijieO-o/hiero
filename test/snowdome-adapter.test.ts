@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { McpToolClient } from '../src/mcp-client.js';
-import { SnowdomeAdapter, fetchSnowdomeHistory, historyUrlFor, heartbeatUrlFor, loginSnowdome, parseSnowdomeIntent, snowdomeAdapterPlug, type SnowdomeSocket } from '../src/snowdome-adapter.js';
+import { SnowdomeAdapter, fetchSnowdomeHistory, fetchSnowdomeRecent, historyUrlFor, heartbeatUrlFor, loginSnowdome, parseSnowdomeIntent, recentUrlFor, snowdomeAdapterPlug, type SnowdomeObservation, type SnowdomeSocket } from '../src/snowdome-adapter.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +26,9 @@ class FakeSocket implements SnowdomeSocket {
 const observation = { kind: 'observation' as const, tick: 1, time: 0, self: { id: 'hiero', position: { x: 0, y: 0, z: 0 }, room: 0, group: 'plaza' }, nearby: [], heard: [] };
 const heardObservation = { ...observation, heard: [{ speakerId: 'alice', mode: 'talk', text: '你从哪里来？' }] };
 
+// Keeps `recent` reads off the network; the recent endpoint has its own tests.
+const fakeRecentFetch = (async () => new Response(JSON.stringify({ actorId: 'visitor-1', utterances: [], last_seq: 0 }), { status: 200 })) as typeof fetch;
+
 const fakeLogin = async (): Promise<{ token: string; actorId: string }> => ({ token: 'tok', actorId: 'visitor-1' });
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -44,6 +47,7 @@ test('start logs in, connects with the issued token, and subscribes to the serve
   const urls: string[] = [];
   const logins: string[] = [];
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     url: 'ws://localhost:3000/agent',
     loginUrl: 'http://localhost:3000/api/login',
@@ -71,6 +75,7 @@ test('stop() during login leaves no socket connected and no heartbeat running', 
   const sockets: FakeSocket[] = [];
   const beats: string[] = [];
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     heartbeatIntervalMs: 5,
     connect: async () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
@@ -90,6 +95,7 @@ test('stop() during login leaves no socket connected and no heartbeat running', 
 test('start does not connect when login is rejected', async () => {
   let connected = false;
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => { connected = true; return new FakeSocket(); },
     login: async () => { throw new Error('Snowdome 登录失败：name_taken'); },
@@ -103,6 +109,7 @@ test('start does not connect when login is rejected', async () => {
 test('a returning resident whose entrance is occupied keeps retrying until login succeeds', async () => {
   let logins = 0;
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiore',
     reconnectDelayMs: 1,
     connect: async () => new FakeSocket(),
@@ -124,6 +131,7 @@ test('a returning resident whose entrance is occupied keeps retrying until login
 test('a visitor adapter beats for its token and stops beating after stop()', async () => {
   const beats: string[] = [];
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     heartbeatIntervalMs: 5,
     connect: async () => new FakeSocket(),
@@ -145,6 +153,7 @@ test('a rejected heartbeat (401) drops the session and re-logs in', async () => 
   let logins = 0;
   const sockets: FakeSocket[] = [];
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     heartbeatIntervalMs: 5,
     reconnectDelayMs: 1,
@@ -181,6 +190,7 @@ test('a stale-session receipt triggers re-login and reconnect with the new token
   const tokens: string[] = [];
   let logins = 0;
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     reconnectDelayMs: 1,
     connect: async (url) => { tokens.push(url.split('token=')[1] ?? ''); const socket = new StaleSocket(sockets.length === 0); sockets.push(socket); return socket; },
@@ -216,6 +226,7 @@ test('observations arriving while a decision is in flight do not stack driver ca
   let calls = 0;
   let release: () => void = () => {};
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
     login: fakeLogin,
@@ -235,10 +246,36 @@ test('observations arriving while a decision is in flight do not stack driver ca
   adapter.stop();
 });
 
+test('a speaker re-triggers a plan at most once per gap, and own echoes never trigger one', async () => {
+  const socket = new FakeSocket();
+  let calls = 0;
+  const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
+    name: 'hiero',
+    connect: async () => socket,
+    login: fakeLogin,
+    onObservation: () => { calls += 1; return { intents: [] }; },
+  });
+  await adapter.start();
+  const echo = { ...observation, heard: [{ speakerId: 'hiero', mode: 'talk', text: '你好' }] };
+  socket.emit(echo);
+  await wait(5);
+  const baseline = calls;
+  socket.emit(echo);
+  await wait(5);
+  assert.equal(calls, baseline);
+  socket.emit(heardObservation);
+  await wait(5);
+  socket.emit(heardObservation);
+  await wait(5);
+  assert.equal(calls, baseline + 1);
+  adapter.stop();
+});
+
 test('onDayStart fires once per new game day, from day_index', async () => {
   const socket = new FakeSocket();
   const days: number[] = [];
-  const adapter = new SnowdomeAdapter({ name: 'hiero', connect: async () => socket, login: fakeLogin, onObservation: () => ({ intents: [] }), onDayStart: (day) => { days.push(day); } });
+  const adapter = new SnowdomeAdapter({ fetch: fakeRecentFetch, name: 'hiero', connect: async () => socket, login: fakeLogin, onObservation: () => ({ intents: [] }), onDayStart: (day) => { days.push(day); } });
   await adapter.start();
   socket.emit({ ...observation, day_index: 3, phase: 'day' });
   socket.emit({ ...observation, day_index: 3, phase: 'dusk' });
@@ -253,6 +290,7 @@ test('onObservation intents are validated and sent; illegal ones are dropped', a
   const socket = new FakeSocket();
   const errors: string[] = [];
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
     login: fakeLogin,
@@ -271,6 +309,7 @@ test('an illegal driver intent is rejected and reported', async () => {
   const socket = new FakeSocket();
   const errors: string[] = [];
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
     login: fakeLogin,
@@ -297,6 +336,7 @@ test('a rate_limited receipt pauses driver intents for cooldown_ms', async () =>
   }
   const socket = new LimitedSocket();
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
     login: fakeLogin,
@@ -317,6 +357,7 @@ test('a driver notice is forwarded to onNotice only when non-empty', async () =>
   const notices: string[] = [];
   let calls = 0;
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     connect: async () => socket,
     login: fakeLogin,
@@ -345,6 +386,7 @@ test('proactive notices are spaced at least a minute apart and never repeat back
   Date.now = () => now;
   try {
     const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
       name: 'hiero',
       connect: async () => socket,
       login: fakeLogin,
@@ -475,6 +517,7 @@ test('parseSnowdomeIntent keeps mood inside [-1, 1]', () => {
 test('mood is sent only after it moves past the 0.3 threshold from the last accepted mood', async () => {
   const socket = new FakeSocket();
   const adapter = new SnowdomeAdapter({
+    fetch: fakeRecentFetch,
     name: 'hiero',
     url: 'ws://localhost:3000/agent',
     loginUrl: 'http://localhost:3000/api/login',
@@ -489,11 +532,63 @@ test('mood is sent only after it moves past the 0.3 threshold from the last acce
     await adapter.start();
     socket.emit(observation);
     await wait(50);
-    socket.emit({ ...observation, tick: 2, heard: [{ speakerId: 'visitor-1', mode: 'say', text: 'hi' }] });
+    socket.emit({ ...observation, tick: 2, heard: [{ speakerId: 'alice', mode: 'say', text: 'hi' }] });
     await wait(1200);
     const moods = socket.sent.filter((message) => message.kind === 'mood');
     // tick 1 sends 0.5; tick 2's 0.6 is within 0.3 and is dropped; 0.9 is 0.4 away and is sent.
     assert.deepEqual(moods.map((message) => message.valence), [0.5, 0.9]);
+  } finally {
+    adapter.stop();
+  }
+});
+test('recent endpoint is derived from the login URL and reads incrementally by since', async () => {
+  assert.equal(recentUrlFor('http://localhost:3000/api/login'), 'http://localhost:3000/api/agent/recent');
+  assert.throws(() => recentUrlFor('http://localhost:3000/login'));
+  const calls: string[] = [];
+  const fakeFetch = (async (url: string) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ actorId: 'hiero', utterances: [{ seq: 8, kind: 'heard', speakerId: 'v1', text: 'hi' }], last_seq: 8 }), { status: 200 });
+  }) as typeof fetch;
+  const result = await fetchSnowdomeRecent('http://localhost:3000/api/agent/recent', 'tok', 7, fakeFetch);
+  assert.deepEqual(result, { utterances: [{ seq: 8, kind: 'heard', speakerId: 'v1', text: 'hi' }], last_seq: 8 });
+  assert.equal(calls[0], 'http://localhost:3000/api/agent/recent?token=tok&since=7');
+});
+
+test('recent utterances are attached only once and the cursor resets when the gateway restarts', async () => {
+  const socket = new FakeSocket();
+  const sinceSeen: string[] = [];
+  const seen: SnowdomeObservation[] = [];
+  let serverLastSeq = 5;
+  const fakeFetch = (async (url: string) => {
+    const since = Number(new URL(String(url)).searchParams.get('since'));
+    sinceSeen.push(String(since));
+    const utterances = serverLastSeq > since ? [{ seq: serverLastSeq, kind: 'heard', speakerId: 'v1', text: 'hi' }] : [];
+    return new Response(JSON.stringify({ actorId: 'hiero', utterances, last_seq: serverLastSeq }), { status: 200 });
+  }) as typeof fetch;
+  const adapter = new SnowdomeAdapter({
+    name: 'hiero',
+    url: 'ws://localhost:3000/agent',
+    loginUrl: 'http://localhost:3000/api/login',
+    connect: async () => socket,
+    login: fakeLogin,
+    fetch: fakeFetch,
+    heartbeat: async () => true,
+    onObservation: (observation) => { seen.push(observation); return { intents: [] }; },
+    onError: () => {},
+  });
+  try {
+    await adapter.start();
+    socket.emit(observation);
+    await wait(50);
+    socket.emit({ ...observation, tick: 2 });
+    await wait(50);
+    serverLastSeq = 2; // gateway restarted and its sequence began again
+    socket.emit({ ...observation, tick: 3 });
+    await wait(50);
+    assert.deepEqual(sinceSeen, ['0', '5', '5']);
+    assert.equal(seen[0]?.recent?.length, 1);
+    assert.equal(seen[1]?.recent, undefined);
+    assert.equal(seen[2]?.recent, undefined);
   } finally {
     adapter.stop();
   }

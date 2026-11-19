@@ -61,8 +61,8 @@ export interface SnowdomeObservation {
   self: { id: string; position: { x: number; y: number; z: number }; room: number; group: string };
   nearby: { id: string; name: string; position: { x: number; y: number; z: number }; distance: number }[];
   heard: { speakerId: string; mode: string; text: string }[];
-  /** Recent conversation from oldest to newest; `heard` is cleared on each take, this is not. */
-  recent?: { kind: 'said' | 'heard'; speakerId: string; text: string }[];
+  /** Conversation added since the last plan (oldest first), read from the incremental recent endpoint. */
+  recent?: SnowdomeUtterance[];
   /** Game day index from 0; read this rather than relying on `day_start`, which is absent on the first observation. */
   day_index?: number;
   day_fraction?: number;
@@ -82,6 +82,35 @@ export interface SnowdomeHistoryEvent {
   seq?: number;
   type?: string;
   [key: string]: unknown;
+}
+
+export interface SnowdomeUtterance {
+  kind: 'said' | 'heard';
+  speakerId: string;
+  text: string;
+  seq?: number;
+}
+
+/** Incremental conversation read: only utterances with a sequence number above `since`. */
+export async function fetchSnowdomeRecent(
+  recentUrl: string,
+  token: string,
+  since: number,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ utterances: SnowdomeUtterance[]; last_seq: number }> {
+  const response = await fetchImpl(`${recentUrl}?token=${encodeURIComponent(token)}&since=${Math.max(0, Math.floor(since))}`);
+  if (!response.ok) throw new Error(`Snowdome 对话增量查询失败：${response.status}`);
+  const body = await response.json() as { utterances?: SnowdomeUtterance[]; last_seq?: number };
+  return {
+    utterances: Array.isArray(body.utterances) ? body.utterances : [],
+    last_seq: typeof body.last_seq === 'number' ? body.last_seq : 0,
+  };
+}
+
+/** Derives the incremental conversation endpoint from the login endpoint, the same way as the history endpoint. */
+export function recentUrlFor(loginUrl: string): string {
+  if (!/\/api\/login$/.test(loginUrl)) throw new Error(`Snowdome 登录地址必须以 /api/login 结尾：${loginUrl}`);
+  return loginUrl.replace(/\/api\/login$/, '/api/agent/recent');
 }
 
 /** Read-only raw history from Snowdome's in-memory window; summarising it is the third party's job. */
@@ -231,6 +260,8 @@ const NOTICE_MIN_GAP_MS = 60_000;
 const DEFAULT_HEARTBEAT_MS = 15000;
 /** With nobody speaking, the driver is still asked at most this often so the resident can walk or start a conversation. */
 const IDLE_DECISION_MS = 10000;
+/** A speaker's line re-triggers a plan at most this often, so two residents cannot answer each other forever. */
+const HEARD_REPLY_GAP_MS = 60_000;
 /** Snowdome accepts at most 5 intents per 10 s per resident, and at most 1 per second. */
 const BURST_LIMIT = 5;
 const BURST_WINDOW_MS = 10000;
@@ -250,8 +281,12 @@ export class SnowdomeAdapter {
   private deciding = false;
   /** Set when a heard line arrived during a plan, so the next observation still gets answered. */
   private pendingHeard = false;
+  /** Last time each speaker's line was allowed to trigger a plan. */
+  private readonly lastHeardReplyAt = new Map<string, number>();
   private lastDecisionAt = 0;
   private lastDay: number | undefined;
+  /** Sequence number of the last conversation line read from the incremental recent endpoint. */
+  private recentCursor = 0;
   /** Latest observation not yet handed to the third-party hook; newer ones overwrite older ones. */
   private latestObservation: SnowdomeObservation | undefined;
   /** Validated intents waiting to be paced out; a newer batch replaces an unsent older one. */
@@ -293,6 +328,7 @@ export class SnowdomeAdapter {
     const session = await login(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL, this.options.name);
     if (isStale()) return;
     this.session = session;
+    this.recentCursor = 0;
     const base = this.options.url ?? SNOWDOME_DEFAULT_URL;
     const socket = await this.options.connect(`${base}?token=${encodeURIComponent(session.token)}`);
     if (isStale()) {
@@ -430,6 +466,7 @@ export class SnowdomeAdapter {
     const observation = parseObservation(data);
     if (observation) {
       this.noticeDay(observation);
+      await this.attachRecent(observation);
       this.planFor(observation);
       return;
     }
@@ -447,12 +484,44 @@ export class SnowdomeAdapter {
   }
 
   /**
+   * Fills `recent` with the utterances added since the last read. A read failure leaves `recent` empty and keeps
+   * the cursor, so the same lines are retried on the next observation rather than lost.
+   */
+  private async attachRecent(observation: SnowdomeObservation): Promise<void> {
+    const session = this.session;
+    if (!session || this.closed) return;
+    try {
+      const { utterances, last_seq } = await fetchSnowdomeRecent(
+        recentUrlFor(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL),
+        session.token,
+        this.recentCursor,
+        this.options.fetch ?? fetch,
+      );
+      // The gateway restarts its sequence from 0; a cursor ahead of the server means it must be reset.
+      if (this.closed) return;
+      this.recentCursor = last_seq < this.recentCursor ? last_seq : Math.max(this.recentCursor, last_seq);
+      if (utterances.length > 0) observation.recent = utterances;
+    } catch (cause) {
+      this.options.onError?.(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  /**
    * Hands the observation to the driver without awaiting it, so a slow plan never holds up observation handling.
    * Throttled: one plan in flight, and with nobody speaking only one per IDLE_DECISION_MS.
-   * Skipped heard lines stay in `recent`, so the next plan still sees them.
+   * A speaker re-triggers a plan at most once per HEARD_REPLY_GAP_MS; the line still reaches `recent`, so the
+   * next plan sees it. Own lines never count, so a resident does not answer its own echo.
    */
   private planFor(observation: SnowdomeObservation): void {
-    if (observation.heard.length > 0) this.pendingHeard = true;
+    const now = Date.now();
+    const ownId = this.session?.actorId;
+    for (const line of observation.heard) {
+      if (line.speakerId === ownId) continue;
+      const last = this.lastHeardReplyAt.get(line.speakerId);
+      if (last !== undefined && now - last < HEARD_REPLY_GAP_MS) continue;
+      this.lastHeardReplyAt.set(line.speakerId, now);
+      this.pendingHeard = true;
+    }
     this.latestObservation = observation;
     void this.runDriver();
   }

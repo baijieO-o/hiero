@@ -24,6 +24,7 @@ export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver 
         'emote 的 emoji 必须是单个 emoji；每次决策都可以附带一个表情。mood 只在心情明显变化时填写，数值在 [-1, 1] 内。',
         'commitment 的形式：{"action":"propose","counterparty":"对方名字","content":"不超过200字"} 或 {"action":"accept","commitmentId":"id"} 或 {"action":"report","commitmentId":"id","outcome":"fulfilled|breached"}。',
         'move 每次最多移动 3 格。只允许 move 与 speak，不要输出其他动作。',
+        '对话要收尾：对同一个人的寒暄最多回应一次，不要反问、不要追问“最近怎么样”之类的问题；若对方的话没有新内容，就不要 speak，只可以做表情或移动。',
         'commitment 只在你和对方明确约定、或对方履行/违约后填写；没有就省略。accept 与 report 只对对方发给你的承诺有效。',
         'notice 只在遇到重要的人或事时填写，否则省略。personaUpdate 只在重要事件改变了你的看法时填写；第一行的名字与定位会被保留，只改后面的描述，且不超过 500 字。',
         JSON.stringify(observation),
