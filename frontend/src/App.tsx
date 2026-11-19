@@ -2057,7 +2057,7 @@ function McpCategoryView(): ReactElement {
     socket.send(JSON.stringify({ type: 'mcp_config_save', payload: { servers } }));
   };
   return (
-    <div className="skills-editor">
+    <div className="skills-editor skills-scroll">
       {hotPlug.error ? <p role="alert">{hotPlug.error}</p> : null}
       {hotPlug.snapshot && hotPlug.snapshot.servers.length > 0 ? (
         <HotPlugList
@@ -2089,7 +2089,8 @@ function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: Sn
   const add = () => setResidents([...residents, { name: `居民${residents.length + 1}`, url: 'ws://localhost:3000/agent', persona: '', driver: 'snowdome-planner-driver.js' }]);
   const remove = (index: number) => setResidents(residents.filter((_, i) => i !== index));
   return (
-    <div className="hot-plug-list">
+    <details className="hot-plug-list snowdome-section" open>
+      <summary>Snowdome 适配器（{adapter.enabled ? '已开启' : '已停用'}，{residents.length} 个居民）</summary>
       {error ? <p role="alert">{error}</p> : null}
       <ul>
         <li className={adapter.enabled ? '' : 'disabled'}>
@@ -2112,7 +2113,7 @@ function SnowdomeAdapterView({ adapter, error, onSave, onToggle }: { adapter: Sn
       })}
       <button type="button" onClick={add}>添加居民</button>
       <button type="button" disabled={!dirty} onClick={() => onSave({ residents })}>保存配置</button>
-    </div>
+    </details>
   );
 }
 function SkillsBuffer(): ReactElement {
