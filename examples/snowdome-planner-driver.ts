@@ -9,11 +9,14 @@ const PLAN_INTERVAL_MS = 30_000;
 export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver {
   let plan: SnowdomeIntent[] = [];
 
-  // Chosen before each login: the first emoji written in the persona. Without one the login is refused, so no default is invented.
-  function chooseBaselineEmote(): string {
-    const match = ctx.getPersona().match(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}|\p{Emoji_Modifier})*/u);
-    if (!match) throw new Error('人设中没有 emoji，无法选择常态表情');
-    return match[0];
+  // Chosen by the resident before each login, from its persona and current situation. The model must answer with one emoji; anything else is rejected by the adapter.
+  async function chooseBaselineEmote(): Promise<string> {
+    const text = await ctx.ask([
+      ctx.getPersona(),
+      '你即将进入 Snowdome 小镇。请根据你的人设和当前的处境，选一个最能代表你此刻心情或性格的常态表情。',
+      '只输出一个 emoji，不要任何其他文字。',
+    ].join('\n'));
+    return text.trim();
   }
   let pendingNotice: string | undefined;
   let pendingPersona: string | undefined;
