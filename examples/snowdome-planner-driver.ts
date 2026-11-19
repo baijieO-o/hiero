@@ -66,7 +66,9 @@ export default function createPlannerDriver(ctx: DriverContext): SnowdomeDriver 
   return {
     onObservation(observation: SnowdomeObservation): SnowdomeDecision {
       const now = Date.now();
-      if (!planning && now - lastPlanAt >= PLAN_INTERVAL_MS) {
+      // A visitor's line is always answered, so it skips the interval that paces idle planning.
+      const hasVisitorLine = observation.heard.some((line) => !line.speakerId.startsWith('agent'));
+      if (!planning && (hasVisitorLine || now - lastPlanAt >= PLAN_INTERVAL_MS)) {
         lastPlanAt = now;
         void replan(observation);
       }
