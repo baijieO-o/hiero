@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { HotPlugRegistry } from '../src/hot-plug.js';
 import { readSnowdomeConfig } from '../src/snowdome-config.js';
 import { McpToolClient } from '../src/mcp-client.js';
-import { SnowdomeAdapter, fetchSnowdomeHistory, fetchSnowdomeRecent, historyUrlFor, heartbeatUrlFor, isSingleEmoji, loginSnowdome, parseSnowdomeIntent, recentUrlFor, snowdomeAdapterPlug, type SnowdomeObservation, type SnowdomeSocket } from '../src/snowdome-adapter.js';
+import { SnowdomeAdapter, agentIdFor, fetchSnowdomeHistory, fetchSnowdomeRecent, historyUrlFor, heartbeatUrlFor, isSingleEmoji, loginSnowdome, parseSnowdomeIntent, recentUrlFor, snowdomeAdapterPlug, type SnowdomeObservation, type SnowdomeSocket } from '../src/snowdome-adapter.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +33,14 @@ const fakeRecentFetch = (async () => new Response(JSON.stringify({ actorId: 'vis
 const fakeLogin = async (): Promise<{ token: string; actorId: string }> => ({ token: 'tok', actorId: 'visitor-1' });
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('agentIdFor keeps every Chinese resident name distinct and server-valid', () => {
+  const names = ['墨崚劫', '林不语', '孟朴', '白又临', '闻卓', '梦红衣', '张於阙', '吴道清'];
+  const ids = names.map(agentIdFor);
+  assert.equal(new Set(ids).size, names.length);
+  for (const id of ids) assert.match(id, /^[A-Za-z0-9_-]{1,64}$/);
+  assert.equal(agentIdFor('hiero'), 'hiero');
+});
 
 test('parseSnowdomeIntent accepts only the adapter protocol intents', () => {
   assert.deepEqual(parseSnowdomeIntent({ kind: 'move', target: { x: 1, y: 0, z: 2 } }, 'hiero'), { kind: 'move', actorId: 'hiero', target: { x: 1, y: 0, z: 2 } });

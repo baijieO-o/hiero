@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { WebSocket } from 'ws';
 import type { AdapterPlug } from './hot-plug.js';
 import { fetchReputation, postCommitment, snowdomeBaseUrl, type SnowdomeCommitmentReceipt, type SnowdomeCommitmentOutcome, type SnowdomeReputationResponse } from './snowdome-commitments.js';
@@ -20,9 +21,16 @@ export interface SnowdomeSession {
 /** Stable id the server maps to one agent resident, so its buildings and backyard survive restarts and town moves. */
 const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
+/**
+ * ASCII names keep their historical slug. Non-ASCII names (e.g. Chinese) would collapse to the same dashes,
+ * so they get a hash suffix to stay unique across residents.
+ */
 export function agentIdFor(name: string): string {
-  const id = name.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
-  return AGENT_ID_PATTERN.test(id) ? id : 'hiero';
+  const slug = name.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64);
+  if (!/[^\x00-\x7F]/.test(name)) return AGENT_ID_PATTERN.test(slug) ? slug : 'hiero';
+  const digest = createHash('sha256').update(name).digest('hex').slice(0, 12);
+  const base = slug.replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  return base ? `${base}-${digest}` : `resident-${digest}`;
 }
 
 /** The town entrance is briefly occupied when a returning resident logs in; retrying later succeeds. */
