@@ -15,7 +15,8 @@ import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpSe
 import { McpToolClient } from './mcp-client.js';
 import { HotPlugRegistry, type PlugStatus } from './hot-plug.js';
 import { SNOWDOME_NAME, getResidentPersona, readSnowdomeConfig, rewriteResidentPersona, saveSnowdomeConfig, snowdomeResidentId, type SnowdomeConfig, type SnowdomeResidentConfig } from './snowdome-config.js';
-import { snowdomeAdapterPlug, wsSocketFactory } from './snowdome-adapter.js';
+import { snowdomeAdapterPlug, wsSocketFactory, type SnowdomeAdapter, type SnowdomeCommitmentAction } from './snowdome-adapter.js';
+import type { SnowdomeCommitmentReceipt, SnowdomeReputationResponse } from './snowdome-commitments.js';
 import { loadDriver, type DriverContext, type SnowdomeDriver } from './snowdome-driver.js';
 import type { AdapterPlug } from './hot-plug.js';
 import type { McpServerStatus } from './mcp-client.js';
@@ -1119,10 +1120,16 @@ export class HieroRuntime {
    * registry records it as this resident's error and the resident stays offline. There is no built-in fallback.
    */
   private snowdomeAdapterFor(resident: SnowdomeResidentConfig): AdapterPlug {
-    let inner: AdapterPlug | undefined;
+    let inner: (AdapterPlug & { adapter: SnowdomeAdapter }) | undefined;
+    const adapter = () => {
+      if (!inner) throw new Error(`Snowdome(${resident.name}) 尚未连接`);
+      return inner.adapter;
+    };
+    const commitments = (action: SnowdomeCommitmentAction) => adapter().commitment(action);
+    const reputation = (id: string) => adapter().reputation(id);
     return {
       start: async () => {
-        const driver = await loadDriver(resident.driver, this.createDriverContext(resident.name));
+        const driver = await loadDriver(resident.driver, this.createDriverContext(resident.name, commitments, reputation));
         inner = this.snowdomeAdapterPlugFor(resident, driver);
         await inner.start();
       },
@@ -1130,7 +1137,7 @@ export class HieroRuntime {
     };
   }
 
-  private snowdomeAdapterPlugFor(resident: SnowdomeResidentConfig, driver: SnowdomeDriver): AdapterPlug {
+  private snowdomeAdapterPlugFor(resident: SnowdomeResidentConfig, driver: SnowdomeDriver): AdapterPlug & { adapter: SnowdomeAdapter } {
     return snowdomeAdapterPlug({
       name: resident.name,
       url: resident.url,
@@ -1153,10 +1160,18 @@ export class HieroRuntime {
   }
 
   /** Capabilities handed to a driver. Each one is gated by the same hot-plug switches the chat path uses. */
-  private createDriverContext(residentName: string): DriverContext {
+  private createDriverContext(
+    residentName: string,
+    commitments: (action: SnowdomeCommitmentAction) => Promise<SnowdomeCommitmentReceipt>,
+    reputation: (id: string) => Promise<SnowdomeReputationResponse>,
+  ): DriverContext {
     return {
       getPersona: () => getResidentPersona(residentName),
       setPersona: (text) => rewriteResidentPersona(residentName, text),
+      proposeCommitment: (counterparty, content) => commitments({ kind: 'propose', counterparty, content }),
+      acceptCommitment: (commitmentId) => commitments({ kind: 'accept', commitmentId }),
+      reportCommitment: (commitmentId, outcome) => commitments({ kind: 'report', commitmentId, outcome }),
+      reputation,
       ask: async (prompt) => {
         const response = await this.gateway.complete(this.snowdomeTask(), { prompt, messages: [{ role: 'user', content: prompt }] });
         return response.content;

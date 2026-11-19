@@ -1,5 +1,12 @@
 import { WebSocket } from 'ws';
 import type { AdapterPlug } from './hot-plug.js';
+import { fetchReputation, postCommitment, snowdomeBaseUrl, type SnowdomeCommitmentReceipt, type SnowdomeCommitmentOutcome, type SnowdomeReputationResponse } from './snowdome-commitments.js';
+
+/** Commitment actions the driver may request. Counterparty and ids are sent as given; Snowdome enforces who may do what. */
+export type SnowdomeCommitmentAction =
+  | { kind: 'propose'; counterparty: string; content: string }
+  | { kind: 'accept'; commitmentId: string }
+  | { kind: 'report'; commitmentId: string; outcome: SnowdomeCommitmentOutcome };
 
 export const SNOWDOME_DEFAULT_URL = 'ws://localhost:3000/agent';
 export const SNOWDOME_DEFAULT_LOGIN_URL = 'http://localhost:3000/api/login';
@@ -145,6 +152,8 @@ export interface SnowdomeAdapterOptions {
   loginUrl?: string;
   connect: SnowdomeSocketFactory;
   login?: (loginUrl: string, name: string) => Promise<SnowdomeSession>;
+  /** HTTP client for commitment calls; tests inject a fake one. */
+  fetch?: typeof fetch;
   heartbeat?: (heartbeatUrl: string, token: string) => Promise<boolean>;
   heartbeatIntervalMs?: number;
   reconnectDelayMs?: number;
@@ -185,9 +194,9 @@ export function wsSocketFactory(url: string): Promise<SnowdomeSocket> {
 }
 
 /** Wraps a SnowdomeAdapter as a hot-pluggable adapter so the registry can start and stop it. */
-export function snowdomeAdapterPlug(options: SnowdomeAdapterOptions): AdapterPlug {
+export function snowdomeAdapterPlug(options: SnowdomeAdapterOptions): AdapterPlug & { adapter: SnowdomeAdapter } {
   const adapter = new SnowdomeAdapter(options);
-  return { start: () => adapter.start(), stop: () => adapter.stop() };
+  return { adapter, start: () => adapter.start(), stop: () => adapter.stop() };
 }
 
 /** Derives the heartbeat endpoint from the login endpoint, keeping any path prefix. Throws when the login URL has an unexpected shape rather than beating the wrong route. */
@@ -345,6 +354,27 @@ export class SnowdomeAdapter {
 
   public get actorId(): string | undefined {
     return this.session?.actorId;
+  }
+
+  /** Reputation is public, but the base URL must match the commitment calls, so it lives here too. */
+  public async reputation(id: string): Promise<SnowdomeReputationResponse> {
+    return fetchReputation(snowdomeBaseUrl(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL), id, this.options.fetch ?? fetch);
+  }
+
+  /** Commitment calls need the visitor token, which only the adapter holds; the driver reaches them through the runtime. */
+  public async commitment(action: SnowdomeCommitmentAction): Promise<SnowdomeCommitmentReceipt> {
+    const session = this.session;
+    if (!session) throw new Error('Snowdome adapter is not connected.');
+    const baseUrl = snowdomeBaseUrl(this.options.loginUrl ?? SNOWDOME_DEFAULT_LOGIN_URL);
+    const fetchImpl = this.options.fetch ?? fetch;
+    switch (action.kind) {
+      case 'propose':
+        return postCommitment(baseUrl, session.token, 'commitment', { counterparty: action.counterparty, content: action.content }, fetchImpl);
+      case 'accept':
+        return postCommitment(baseUrl, session.token, 'commitment/accept', { commitment_id: action.commitmentId }, fetchImpl);
+      case 'report':
+        return postCommitment(baseUrl, session.token, 'commitment/report', { commitment_id: action.commitmentId, outcome: action.outcome }, fetchImpl);
+    }
   }
 
   public stop(): void {

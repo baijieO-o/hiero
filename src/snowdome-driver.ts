@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import type { SnowdomeDecision, SnowdomeObservation } from './snowdome-adapter.js';
 import type { ModelToolDefinition } from './model-gateway.js';
 import type { SkillDetail } from './capability-router.js';
+import type { SnowdomeCommitmentReceipt, SnowdomeReputationResponse } from './snowdome-commitments.js';
 
 /** Capabilities a driver may use. Every call is checked against hot-plug switches by the runtime before it reaches here. */
 export interface DriverContext {
@@ -16,6 +17,14 @@ export interface DriverContext {
   getPersona(): string;
   /** Rewrites this resident's persona through the guarded path (length limit, fixed first line, rewrite interval, audit log). */
   setPersona(text: string): string;
+  /** Proposes a commitment to another resident; it has no effect on reputation until that resident accepts. */
+  proposeCommitment(counterparty: string, content: string): Promise<SnowdomeCommitmentReceipt>;
+  /** Confirms a commitment proposed to this resident; only the counterparty may accept. */
+  acceptCommitment(commitmentId: string): Promise<SnowdomeCommitmentReceipt>;
+  /** Reports the outcome of an active commitment; only the counterparty may report. */
+  reportCommitment(commitmentId: string, outcome: 'fulfilled' | 'breached'): Promise<SnowdomeCommitmentReceipt>;
+  /** Reads reputation counts as Snowdome reports them; no score is synthesized. */
+  reputation(id: string): Promise<SnowdomeReputationResponse>;
 }
 
 /**
