@@ -28,12 +28,12 @@ const OUTER_R = 104;
 const INNER_R = 54;
 const SECTOR_GAP_DEG = 3;
 
-// Sector i is centred on angle i*(360/count)deg, measured clockwise from the top.
+// Sector i spans [i*step, (i+1)*step) degrees clockwise from the top, matching sectorPath.
 function sectorIndexAt(dx: number, dy: number, count: number): number | null {
   if (Math.hypot(dx, dy) < INNER_R) return null;
   const step = 360 / count;
-  const deg = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360 + step / 2) % 360;
-  return Math.floor(deg / step);
+  const deg = (Math.atan2(dx, -dy) * 180) / Math.PI;
+  return Math.floor((((deg % 360) + 360) % 360) / step);
 }
 
 function sectorPath(index: number, count: number): string {
