@@ -103,9 +103,14 @@ async function runAction(id: ItemId): Promise<void> {
 
 type CursorMode = 'default' | 'hover' | 'down' | 'system';
 
-// Resize handles and text fields keep the system cursor (resize arrows, I-beam caret).
-const SYSTEM_CURSOR_SELECTOR =
-  'input, textarea, [contenteditable="true"], [contenteditable=""], [role="separator"], .dv-sash, [class*="resize-handle"], .chat-splitter';
+// Targets whose semantic CSS cursor (text I-beam, resize arrows, not-allowed, grab, ...)
+// must be shown by the system, so the ring is hidden there. Matches the rules in effects-demo.css.
+const SYSTEM_CURSOR_SELECTOR = [
+  'input', 'textarea', '[contenteditable="true"]', '[contenteditable=""]',
+  '[role="separator"]', '.dv-sash', '[class*="resize-handle"]', '.chat-splitter',
+  'button:disabled', '[aria-disabled="true"]', '[aria-busy="true"]',
+  '[draggable="true"]', '[class*="rc-cursor-"]',
+].join(', ');
 
 function isSystemCursorTarget(target: EventTarget | null): target is Element {
   return target instanceof Element && !!target.closest(SYSTEM_CURSOR_SELECTOR);

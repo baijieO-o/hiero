@@ -1,34 +1,96 @@
-/* Custom cursor: hide the system pointer, except over text inputs and on touch devices. */
-/* Enabled by RadialCursor on fine-pointer devices (see effects-cursor.tsx). */
+/* Custom cursor: the ring replaces the system pointer on fine-pointer devices.
+   Every other CSS cursor keyword is applied by semantic selectors below, so the
+   system shape still tells the user what the element does. Enabled by RadialCursor
+   (see effects-cursor.tsx). */
 @media (pointer: fine) {
+  /* Default: ring hides the pointer. Keep the ring visible only on the plain default target. */
   html.rc-enabled,
   html.rc-enabled * {
-    cursor: none !important;
+    cursor: none;
   }
-  /* Resize handles keep the system resize arrows (no !important needed beyond this). */
-  html.rc-enabled .chat-splitter {
-    cursor: col-resize !important;
-  }
-  html.rc-enabled .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash.dv-enabled {
-    cursor: ew-resize !important;
-  }
-  html.rc-enabled .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash.dv-enabled {
-    cursor: ns-resize !important;
-  }
-  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-top'],
-  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-bottom'] {
-    cursor: ns-resize !important;
-  }
-  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-left'],
-  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-right'] {
-    cursor: ew-resize !important;
-  }
-  /* Text fields keep the system I-beam; the ring is hidden there (see .rc-system). */
+
+  /* Basic */
+  html.rc-enabled .rc-cursor-auto { cursor: auto !important; }
+  html.rc-enabled .rc-cursor-default { cursor: default !important; }
+
+  /* Links and status */
+  html.rc-enabled a[href],
+  html.rc-enabled button:not(:disabled),
+  html.rc-enabled [role='button'],
+  html.rc-enabled summary,
+  html.rc-enabled select,
+  html.rc-enabled label[for],
+  html.rc-enabled .rc-cursor-pointer { cursor: pointer !important; }
+  html.rc-enabled .rc-cursor-context-menu { cursor: context-menu !important; }
+  html.rc-enabled .rc-cursor-help { cursor: help !important; }
+  html.rc-enabled .rc-cursor-progress { cursor: progress !important; }
+  html.rc-enabled .rc-cursor-wait,
+  html.rc-enabled [aria-busy='true'] { cursor: wait !important; }
+
+  /* Operations */
+  html.rc-enabled .rc-cursor-alias { cursor: alias !important; }
+  html.rc-enabled .rc-cursor-copy { cursor: copy !important; }
+  html.rc-enabled .rc-cursor-move { cursor: move !important; }
+  html.rc-enabled .rc-cursor-no-drop { cursor: no-drop !important; }
+  html.rc-enabled button:disabled,
+  html.rc-enabled [aria-disabled='true'],
+  html.rc-enabled .rc-cursor-not-allowed { cursor: not-allowed !important; }
+
+  /* Drag and drop */
+  html.rc-enabled [draggable='true'],
+  html.rc-enabled .rc-cursor-grab { cursor: grab !important; }
+  html.rc-enabled .rc-cursor-grabbing { cursor: grabbing !important; }
+
+  /* Scroll */
+  html.rc-enabled .rc-cursor-all-scroll { cursor: all-scroll !important; }
+
+  /* Selection and editing */
   html.rc-enabled input,
   html.rc-enabled textarea,
-  html.rc-enabled [contenteditable]:not([contenteditable='false']) {
-    cursor: text !important;
+  html.rc-enabled [contenteditable]:not([contenteditable='false']),
+  html.rc-enabled .rc-cursor-text { cursor: text !important; }
+  html.rc-enabled .rc-cursor-vertical-text { cursor: vertical-text !important; }
+  html.rc-enabled .rc-cursor-cell { cursor: cell !important; }
+  html.rc-enabled .rc-cursor-crosshair { cursor: crosshair !important; }
+
+  /* Resize: splitters and dockview handles */
+  html.rc-enabled .chat-splitter,
+  html.rc-enabled .rc-cursor-col-resize { cursor: col-resize !important; }
+  html.rc-enabled .rc-cursor-row-resize { cursor: row-resize !important; }
+  html.rc-enabled .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash.dv-enabled,
+  html.rc-enabled .rc-cursor-ew-resize { cursor: ew-resize !important; }
+  html.rc-enabled .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash.dv-enabled,
+  html.rc-enabled .rc-cursor-ns-resize { cursor: ns-resize !important; }
+  /* dockview edge handles: top/bottom are vertical, left/right horizontal. */
+  html.rc-enabled .dv-resize-container .dv-resize-handle-top,
+  html.rc-enabled .dv-resize-container .dv-resize-handle-bottom { cursor: ns-resize !important; }
+  html.rc-enabled .dv-resize-container .dv-resize-handle-left,
+  html.rc-enabled .dv-resize-container .dv-resize-handle-right { cursor: ew-resize !important; }
+  html.rc-enabled .dv-resize-container .dv-resize-handle-topleft,
+  html.rc-enabled .dv-resize-container .dv-resize-handle-bottomright { cursor: nwse-resize !important; }
+  html.rc-enabled .dv-resize-container .dv-resize-handle-topright,
+  html.rc-enabled .dv-resize-container .dv-resize-handle-bottomleft { cursor: nesw-resize !important; }
+
+  /* Exact single-direction keywords, for components that declare them explicitly. */
+  html.rc-enabled .rc-cursor-n-resize { cursor: n-resize !important; }
+  html.rc-enabled .rc-cursor-s-resize { cursor: s-resize !important; }
+  html.rc-enabled .rc-cursor-e-resize { cursor: e-resize !important; }
+  html.rc-enabled .rc-cursor-w-resize { cursor: w-resize !important; }
+  html.rc-enabled .rc-cursor-ne-resize { cursor: ne-resize !important; }
+  html.rc-enabled .rc-cursor-nw-resize { cursor: nw-resize !important; }
+  html.rc-enabled .rc-cursor-se-resize { cursor: se-resize !important; }
+  html.rc-enabled .rc-cursor-sw-resize { cursor: sw-resize !important; }
+  html.rc-enabled .rc-cursor-nesw-resize { cursor: nesw-resize !important; }
+  html.rc-enabled .rc-cursor-nwse-resize { cursor: nwse-resize !important; }
+
+  /* Custom image cursor: always end the list with a standard keyword as fallback. */
+  html.rc-enabled .rc-cursor-url {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%23000' stroke-width='2'/%3E%3C/svg%3E") 8 8, pointer !important;
   }
+
+  /* Zoom */
+  html.rc-enabled .rc-cursor-zoom-in { cursor: zoom-in !important; }
+  html.rc-enabled .rc-cursor-zoom-out { cursor: zoom-out !important; }
 }
 
 /* Ring: hotspot is the centre, translated by the JS mousemove handler. */
