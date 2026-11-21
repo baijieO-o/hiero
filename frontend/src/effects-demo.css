@@ -5,9 +5,28 @@
   html.rc-enabled * {
     cursor: none !important;
   }
+  /* Resize handles keep the system resize arrows (no !important needed beyond this). */
+  html.rc-enabled .chat-splitter {
+    cursor: col-resize !important;
+  }
+  html.rc-enabled .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash.dv-enabled {
+    cursor: ew-resize !important;
+  }
+  html.rc-enabled .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash.dv-enabled {
+    cursor: ns-resize !important;
+  }
+  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-top'],
+  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-bottom'] {
+    cursor: ns-resize !important;
+  }
+  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-left'],
+  html.rc-enabled .dv-resize-container [class*='dv-resize-handle-right'] {
+    cursor: ew-resize !important;
+  }
+  /* Text fields keep the system I-beam; the ring is hidden there (see .rc-system). */
   html.rc-enabled input,
   html.rc-enabled textarea,
-  html.rc-enabled [contenteditable='true'] {
+  html.rc-enabled [contenteditable]:not([contenteditable='false']) {
     cursor: text !important;
   }
 }
@@ -48,7 +67,8 @@
   height: 16px;
   margin: -8px 0 0 -8px;
 }
-.rc-ring.rc-text {
+.rc-ring.rc-menu,
+.rc-ring.rc-system {
   display: none;
 }
 

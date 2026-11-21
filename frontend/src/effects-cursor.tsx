@@ -50,26 +50,65 @@ function labelPos(index: number): { x: number; y: number } {
   return { x: OUTER_R + r * Math.cos((angle * Math.PI) / 180), y: OUTER_R + r * Math.sin((angle * Math.PI) / 180) };
 }
 
-// Hook for the menu actions. Add cases here as features are wired up.
-function runAction(id: ItemId): void {
-  switch (id) {
-    case 'undo': document.execCommand('undo'); break;
-    case 'redo': document.execCommand('redo'); break;
-    case 'cut': document.execCommand('cut'); break;
-    case 'copy': document.execCommand('copy'); break;
-    case 'paste': document.execCommand('paste'); break;
-    case 'selectAll': document.execCommand('selectAll'); break;
-    case 'delete': document.execCommand('delete'); break;
-    case 'more': break;
+type EditableField = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+
+// The focused editable element, or null when focus is elsewhere.
+function focusedEditable(): EditableField | null {
+  const el = document.activeElement;
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el;
+  if (el instanceof HTMLElement && el.isContentEditable) return el;
+  return null;
+}
+
+function selectedText(field: EditableField | null): string {
+  if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+    return field.value.slice(field.selectionStart ?? 0, field.selectionEnd ?? 0);
+  }
+  return window.getSelection()?.toString() ?? '';
+}
+
+// Runs a radial-menu action on the current focus or selection.
+async function runAction(id: ItemId): Promise<void> {
+  const field = focusedEditable();
+  try {
+    switch (id) {
+      case 'undo': document.execCommand('undo'); break;
+      case 'redo': document.execCommand('redo'); break;
+      case 'copy': {
+        const text = selectedText(field);
+        if (text) await navigator.clipboard.writeText(text);
+        break;
+      }
+      case 'cut': {
+        const text = selectedText(field);
+        if (!text) break;
+        await navigator.clipboard.writeText(text);
+        if (field) document.execCommand('delete');
+        break;
+      }
+      case 'paste': {
+        if (!field) break;
+        const text = await navigator.clipboard.readText();
+        document.execCommand('insertText', false, text);
+        break;
+      }
+      case 'selectAll': document.execCommand('selectAll'); break;
+      case 'delete': if (field) document.execCommand('delete'); break;
+      case 'more': break;
+    }
+  } catch (err) {
+    console.warn(`radial menu action "${id}" failed`, err);
   }
 }
 
-function isTextInput(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.isContentEditable) return true;
-  if (target instanceof HTMLTextAreaElement) return true;
-  if (target instanceof HTMLInputElement) return true;
-  return false;
+type CursorMode = 'default' | 'hover' | 'down' | 'system';
+
+// Resize handles and text fields keep the system cursor (resize arrows, I-beam caret).
+const SYSTEM_CURSOR_SELECTOR =
+  'input, textarea, [contenteditable="true"], [contenteditable=""], [role="separator"], .dv-sash, [class*="resize-handle"], .chat-splitter';
+
+function isSystemCursorTarget(target: EventTarget | null): target is Element {
+  return target instanceof Element && !!target.closest(SYSTEM_CURSOR_SELECTOR);
 }
 
 function isInteractive(target: EventTarget | null): boolean {
@@ -78,7 +117,7 @@ function isInteractive(target: EventTarget | null): boolean {
 
 export default function RadialCursor() {
   const ringRef = useRef<HTMLDivElement>(null);
-  const [mode, setMode] = useState<'default' | 'hover' | 'text' | 'down'>('default');
+  const [mode, setMode] = useState<CursorMode>('default');
   const [menu, setMenu] = useState<{ x: number; y: number; hover: number | null } | null>(null);
   const menuRef = useRef(menu);
   menuRef.current = menu;
@@ -97,7 +136,7 @@ export default function RadialCursor() {
     };
     const onOver = (e: MouseEvent) => {
       if (menuRef.current) return;
-      if (isTextInput(e.target)) setMode('text');
+      if (isSystemCursorTarget(e.target)) setMode('system');
       else if (isInteractive(e.target)) setMode('hover');
       else setMode('default');
     };
@@ -111,9 +150,9 @@ export default function RadialCursor() {
       const m = menuRef.current;
       if (!m || e.button !== 2) return;
       const idx = sectorIndexAt(e.clientX - m.x, e.clientY - m.y);
-      if (idx !== null) runAction(ITEMS[idx].id);
       setMenu(null);
       setMode('default');
+      if (idx !== null) void runAction(ITEMS[idx].id);
     };
     const onContext = (e: MouseEvent) => {
       if (e.shiftKey) return;
@@ -148,7 +187,7 @@ export default function RadialCursor() {
 
   return (
     <>
-      <div ref={ringRef} className={`rc-ring rc-${mode}`} aria-hidden="true">
+      <div ref={ringRef} className={`rc-ring rc-${menu ? 'menu' : mode}`} aria-hidden="true">
         <span className="rc-dot" />
       </div>
       {menu && (
