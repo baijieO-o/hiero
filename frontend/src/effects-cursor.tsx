@@ -161,19 +161,25 @@ export default function RadialCursor() {
   useEffect(() => {
     if (!enabled) return;
     document.documentElement.classList.add('rc-enabled');
+    const updateMode = (target: EventTarget | null) => {
+      if (isSystemCursorTarget(target)) setMode('system');
+      else if (isInteractive(target)) setMode('hover');
+      else setMode('default');
+    };
     const onMove = (e: MouseEvent) => {
       if (ringRef.current) ringRef.current.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
       const m = menuRef.current;
       if (m) {
         const idx = sectorIndexAt(e.clientX - m.x, e.clientY - m.y, listOf(m.sub).length);
         if (idx !== m.hover) setMenu({ ...m, hover: idx });
+        return;
       }
+      // Re-evaluate on every move: the element under the pointer can change without a new mouseover.
+      updateMode(e.target);
     };
     const onOver = (e: MouseEvent) => {
       if (menuRef.current) return;
-      if (isSystemCursorTarget(e.target)) setMode('system');
-      else if (isInteractive(e.target)) setMode('hover');
-      else setMode('default');
+      updateMode(e.target);
     };
     const onDown = (e: MouseEvent) => {
       const m = menuRef.current;
