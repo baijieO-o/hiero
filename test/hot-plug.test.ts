@@ -90,3 +90,64 @@ test('skill and tool toggles persist across registry instances', () => {
   assert.deepEqual(readHotPlugState(root).disabledSkills, []);
   rmSync(root, { recursive: true, force: true });
 });
+const fast = { baseDelayMs: 5, maxDelayMs: 20, firstAttemptWaitMs: 50 };
+
+const flaky = (failures: number) => {
+  let calls = 0;
+  return { attempt: async () => { calls += 1; if (calls <= failures) throw new Error(`boom ${calls}`); }, calls: () => calls };
+};
+
+const waitFor = async (predicate: () => boolean, ms = 2_000) => {
+  const until = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > until) throw new Error('timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
+
+test('an adapter that fails to start is retried with backoff until it comes online', async () => {
+  const mcp = new McpToolClient();
+  const registry = new HotPlugRegistry(mcp, tempRoot(), fast);
+  const plug = flaky(2);
+  registry.defineAdapter('probe', () => ({ start: plug.attempt, stop: () => undefined }));
+
+  await registry.enableAdapter('probe');
+  await waitFor(() => registry.status('adapter:probe').state === 'online');
+  const status = registry.status('adapter:probe');
+  assert.equal(status.error, undefined);
+  assert.equal(plug.calls(), 3);
+  await registry.disposeAll();
+});
+
+test('disabling a retrying plug cancels its retries and runs the teardown once', async () => {
+  const mcp = new McpToolClient();
+  const registry = new HotPlugRegistry(mcp, tempRoot(), fast);
+  let stops = 0;
+  const plug = flaky(Number.POSITIVE_INFINITY);
+  registry.defineAdapter('probe', () => ({ start: plug.attempt, stop: () => { stops += 1; } }));
+
+  await registry.enableAdapter('probe');
+  assert.equal(registry.status('adapter:probe').state, 'retrying');
+  await registry.disable('adapter:probe');
+  const callsAtDisable = plug.calls();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(plug.calls(), callsAtDisable, 'no attempts after disable');
+  assert.equal(registry.status('adapter:probe').enabled, false);
+  assert.equal(stops, 1);
+  await mcp.close();
+});
+
+test('disposeAll stops every enabled plug', async () => {
+  const mcp = new McpToolClient();
+  const registry = new HotPlugRegistry(mcp, tempRoot(), fast);
+  let stops = 0;
+  registry.defineAdapter('a', () => ({ start: async () => undefined, stop: () => { stops += 1; } }));
+  registry.defineAdapter('b', () => ({ start: async () => undefined, stop: () => { stops += 1; } }));
+  await registry.enableAdapter('a');
+  await registry.enableAdapter('b');
+  assert.equal(registry.list().length, 2);
+  await registry.disposeAll();
+  assert.deepEqual(registry.list(), []);
+  assert.equal(stops, 2);
+  await mcp.close();
+});

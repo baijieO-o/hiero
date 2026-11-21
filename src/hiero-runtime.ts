@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { AgentExecutor } from './agent-executor.js';
@@ -28,6 +28,13 @@ import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
 import { diffSnapshots, snapshotTextFiles } from './workspace-diff.js';
 import { loadLocalLlmEnv, modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+
+// Snowdome adapter errors go to a file: the backend's stdout is not kept, so a failed resident would otherwise leave no trace.
+function appendSnowdomeLog(message: string): void {
+  const dir = join(homedir(), '.hiero');
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, 'snowdome-errors.log'), `${new Date().toISOString()} ${message}\n`, 'utf8');
+}
 import { SecretStore, type SecretName } from './secret-store.js';
 import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
@@ -639,6 +646,7 @@ export class HieroRuntime {
   private readonly hotPlug = new HotPlugRegistry(this.mcpClient);
   private readonly capabilityRouter = new CapabilityRouter(this.mcpClient, (name) => this.hotPlug.isSkillEnabled(name));
   private readonly mcpSignatures = new Map<string, string>();
+  private readonly snowdomeSignatures = new Map<string, string>();
   private readonly approvals: ApprovalBroker;
   private readonly askUsers: AskUserBroker;
   private readonly browserSessions = new BrowserSessions({
@@ -1103,16 +1111,21 @@ export class HieroRuntime {
    */
   private async applySnowdome(): Promise<void> {
     const config = readSnowdomeConfig();
-    // Residents removed from the config must be stopped too, so disable everything the hot-plug registry knows about.
+    const wanted = new Map(config.enabled ? config.residents.map((resident) => [snowdomeResidentId(resident.name), resident] as const) : []);
+    // Residents removed from the config, or with a changed signature, are stopped. Unchanged residents keep their connection.
     for (const plug of this.hotPlug.list()) {
-      if (plug.id.startsWith(`adapter:${SNOWDOME_NAME}:`)) await this.hotPlug.disable(plug.id);
+      if (!plug.id.startsWith(`adapter:${SNOWDOME_NAME}:`)) continue;
+      const resident = wanted.get(plug.id.slice('adapter:'.length));
+      if (!resident) await this.hotPlug.disable(plug.id);
     }
-    if (!config.enabled) return;
-    for (const resident of config.residents) {
-      const id = snowdomeResidentId(resident.name);
+    // Residents start in parallel: each start may wait on a model call, and a slow one must not hold back the rest.
+    await Promise.all([...wanted].map(([id, resident]) => {
+      const signature = JSON.stringify(resident);
+      if (this.snowdomeSignatures.get(id) === signature && this.hotPlug.status(`adapter:${id}`).enabled) return undefined;
+      this.snowdomeSignatures.set(id, signature);
       this.hotPlug.defineAdapter(id, () => this.snowdomeAdapterFor(resident));
-      await this.hotPlug.enableAdapter(id);
-    }
+      return this.hotPlug.enableAdapter(id);
+    }));
   }
 
   /**
@@ -1146,7 +1159,7 @@ export class HieroRuntime {
         return driver.chooseBaselineEmote();
       },
       connect: wsSocketFactory,
-      onError: (message) => console.warn(`Snowdome(${resident.name}): ${message}`),
+      onError: (message) => appendSnowdomeLog(`Snowdome(${resident.name}): ${message}`),
       onNotice: (text) => this.runtime.broadcast({ type: 'AGENT_NOTICE', payload: { source: resident.name, text, at: new Date().toISOString() } }),
       ...(driver.onDayStart ? { onDayStart: driver.onDayStart.bind(driver) } : {}),
       onObservation: async (observation) => {
@@ -1215,14 +1228,17 @@ export class HieroRuntime {
     for (const plug of running.values()) {
       if (!desired.has(plug.name)) await this.hotPlug.disable(`mcp:${plug.name}`);
     }
+    // Servers start in parallel so one slow or failing server does not delay the others.
+    const starts: Promise<unknown>[] = [];
     for (const [name, config] of desired) {
       const previous = this.mcpSignatures.get(name);
       const signature = JSON.stringify(config);
       if (running.has(name) && previous === signature) continue;
       this.hotPlug.defineMcp(config);
       this.mcpSignatures.set(name, signature);
-      await this.hotPlug.enableMcp(name);
+      starts.push(this.hotPlug.enableMcp(name));
     }
+    await Promise.all(starts);
     for (const name of [...this.mcpSignatures.keys()]) {
       if (!desired.has(name)) this.mcpSignatures.delete(name);
     }
@@ -1714,6 +1730,8 @@ export class HieroRuntime {
   public async close(): Promise<void> {
     if (this.scheduleTimer) clearInterval(this.scheduleTimer);
     this.processes.stopAll();
+    await this.hotPlug.disposeAll();
+    await this.capabilityRouter.close();
     await this.runtime.close();
     await this.browserSessions.close();
     await this.systemAgent.close();

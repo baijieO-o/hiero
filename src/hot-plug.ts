@@ -1,8 +1,7 @@
-import { Context, type Fiber } from 'cordis';
-import { z } from 'zod';
-import type { McpServerConfig, McpServerStatus, McpToolClient } from './mcp-client.js';
+﻿import type { McpServerConfig, McpServerStatus, McpToolClient } from './mcp-client.js';
 import { mcpToolDefinition } from './mcp-client.js';
 import { readHotPlugState, writeHotPlugState } from './hot-plug-state.js';
+import { DEFAULT_RETRY_POLICY, PlugRunner, type PlugState, type RetryPolicy } from './hot-plug-runner.js';
 
 export type PlugKind = 'mcp' | 'tool' | 'skill' | 'adapter';
 
@@ -17,29 +16,37 @@ export interface PlugStatus {
   kind: PlugKind;
   name: string;
   enabled: boolean;
+  /** Present only for enabled plugs. 'starting' before the first attempt ends, 'retrying' while backing off. */
+  state?: PlugState;
   error?: string;
+  attempts?: number;
+  /** Epoch ms of the next scheduled retry, when state is 'retrying'. */
+  nextRetryAt?: number;
 }
 
 interface PlugRecord {
   kind: PlugKind;
   name: string;
-  fiber?: Fiber;
-  error?: string;
+  runner: PlugRunner;
 }
 
 /**
- * Hot-plug registry built on cordis. Each MCP server, tool and skill source is a plugin.
- * Enabling applies the plugin; disabling disposes it, which runs its teardown and removes its
- * tools from the gateway. Other plugins are not affected.
+ * Hot-plug registry on cordis. Each MCP server and adapter is a plugin in its own cordis context.
+ * Enabling starts it and retries failures with exponential backoff until it is disabled.
+ * Disabling aborts the retry loop and runs the teardown, which removes the connection.
  */
 export class HotPlugRegistry {
-  private readonly ctx: Context;
   private readonly plugs = new Map<string, PlugRecord>();
   private readonly configs = new Map<string, McpServerConfig>();
   private readonly adapters = new Map<string, () => AdapterPlug>();
+  private readonly disabledSkills: Set<string>;
+  private readonly disabledTools: Set<string>;
 
-  public constructor(private readonly mcp: McpToolClient, private readonly root = process.cwd()) {
-    this.ctx = new Context();
+  public constructor(
+    private readonly mcp: McpToolClient,
+    private readonly root = process.cwd(),
+    private readonly retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY,
+  ) {
     const saved = readHotPlugState(root);
     this.disabledSkills = new Set(saved.disabledSkills);
     this.disabledTools = new Set(saved.disabledTools);
@@ -55,23 +62,10 @@ export class HotPlugRegistry {
   }
 
   public async enableMcp(name: string): Promise<PlugStatus> {
-    const id = HotPlugRegistry.id('mcp', name);
     const config = this.configs.get(name);
     if (!config) throw new Error(`MCP server '${name}' is not defined`);
-    await this.disable(id);
-    const record: PlugRecord = { kind: 'mcp', name };
-    this.plugs.set(id, record);
-    const fiber = this.ctx.plugin((ctx: Context) => {
-      ctx.effect(() => () => {
-        const teardown = this.mcp.disconnect(name);
-        this.pendingTeardown.add(teardown);
-        void teardown.finally(() => this.pendingTeardown.delete(teardown));
-      });
-      return this.connectMcp(name, config, record);
-    });
-    record.fiber = fiber;
-    await fiber;
-    return this.status(id);
+    const id = HotPlugRegistry.id('mcp', name);
+    return this.enable(id, 'mcp', name, () => this.mcp.connect(config), () => this.mcp.disconnect(name));
   }
 
   /** Registers an adapter factory. Each enable builds a fresh adapter so stale connection state never leaks across restarts. */
@@ -80,60 +74,34 @@ export class HotPlugRegistry {
   }
 
   public async enableAdapter(name: string): Promise<PlugStatus> {
-    const id = HotPlugRegistry.id('adapter', name);
     const create = this.adapters.get(name);
     if (!create) throw new Error(`Adapter '${name}' is not defined`);
-    await this.disable(id);
-    const record: PlugRecord = { kind: 'adapter', name };
-    this.plugs.set(id, record);
     const adapter = create();
-    const fiber = this.ctx.plugin((ctx: Context) => {
-      ctx.effect(() => () => {
-        const teardown = Promise.resolve().then(() => adapter.stop());
-        this.pendingTeardown.add(teardown);
-        void teardown.finally(() => this.pendingTeardown.delete(teardown));
-      });
-      return this.startAdapter(adapter, record);
-    });
-    record.fiber = fiber;
-    await fiber;
+    const id = HotPlugRegistry.id('adapter', name);
+    return this.enable(id, 'adapter', name, () => adapter.start(), () => Promise.resolve().then(() => adapter.stop()));
+  }
+
+  /**
+   * Replaces any existing plug with this id, starts a new runner in its own cordis context,
+   * and returns the status after the first attempt or after the wait limit.
+   */
+  private async enable(id: string, kind: PlugKind, name: string, attempt: () => Promise<void>, teardown: () => void | Promise<void>): Promise<PlugStatus> {
+    await this.disable(id);
+    const runner = new PlugRunner(attempt, async () => { await teardown(); }, this.retryPolicy);
+    this.plugs.set(id, { kind, name, runner });
+    runner.start();
+    await runner.waitForFirstAttempt();
     return this.status(id);
   }
 
-  private async startAdapter(adapter: AdapterPlug, record: PlugRecord): Promise<void> {
-    try {
-      await adapter.start();
-      delete record.error;
-    } catch (cause) {
-      record.error = cause instanceof Error ? cause.message : String(cause);
-    }
-  }
-
-  private async connectMcp(name: string, config: McpServerConfig, record: PlugRecord): Promise<void> {
-    try {
-      await this.mcp.connect(config);
-      delete record.error;
-    } catch (cause) {
-      record.error = cause instanceof Error ? cause.message : String(cause);
-    }
-  }
-
-  /** Disposes an enabled plugin by id. Its teardown removes its tools and connection; other plugins are untouched. */
+  /** Disposes an enabled plug by id. Its teardown stops retries and removes its connection; other plugs are untouched. */
   public async disable(id: string): Promise<PlugStatus> {
     const record = this.plugs.get(id);
     if (record) {
       this.plugs.delete(id);
-      record.fiber?.dispose();
+      await record.runner.dispose();
     }
-    await this.settle();
     return this.status(id);
-  }
-
-  private readonly pendingTeardown = new Set<Promise<void>>();
-
-  /** Waits for in-flight teardown (connection close) so callers observe a clean state. */
-  private async settle(): Promise<void> {
-    await Promise.all([...this.pendingTeardown]);
   }
 
   public status(id: string): PlugStatus {
@@ -142,7 +110,17 @@ export class HotPlugRegistry {
       const [kind, ...rest] = id.split(':');
       return { id, kind: kind as PlugKind, name: rest.join(':'), enabled: false };
     }
-    return { id, kind: record.kind, name: record.name, enabled: true, ...(record.error ? { error: record.error } : {}) };
+    const { runner } = record;
+    return {
+      id,
+      kind: record.kind,
+      name: record.name,
+      enabled: true,
+      state: runner.state,
+      attempts: runner.attempts,
+      ...(runner.error ? { error: runner.error } : {}),
+      ...(runner.nextRetryAt ? { nextRetryAt: runner.nextRetryAt } : {}),
+    };
   }
 
   public list(): PlugStatus[] {
@@ -159,9 +137,6 @@ export class HotPlugRegistry {
   }
 
   /** Names of skills or built-in tools the user has turned off. Files on disk are never touched; the state is persisted. */
-  private readonly disabledSkills: Set<string>;
-  private readonly disabledTools: Set<string>;
-
   public setSkillEnabled(name: string, enabled: boolean): void {
     if (enabled) this.disabledSkills.delete(name);
     else this.disabledSkills.add(name);
@@ -184,7 +159,8 @@ export class HotPlugRegistry {
 
   public disabledToolNames(): string[] { return [...this.disabledTools]; }
 
+  /** Stops every enabled plug, cancelling pending retries. Called on runtime shutdown. */
   public async disposeAll(): Promise<void> {
-    for (const id of [...this.plugs.keys()]) await this.disable(id);
+    await Promise.all([...this.plugs.keys()].map((id) => this.disable(id)));
   }
 }
