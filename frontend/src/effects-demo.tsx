@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
+import RadialCursor from './effects-cursor';
 
 type Group = { id: string; title: string; items: string[]; render: () => ReactNode };
 
@@ -373,26 +374,12 @@ const groups: Group[] = [
   },
 ];
 
-// Page-wide custom cursor: follows the pointer everywhere and hides the system cursor (see .fx-page-root).
-function GlobalCursor() {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onMove = (e: globalThis.MouseEvent) => {
-      const el = ref.current;
-      if (el) el.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
-    };
-    window.addEventListener('mousemove', onMove);
-    return () => window.removeEventListener('mousemove', onMove);
-  }, []);
-  return <div ref={ref} className="fx-cursor-dot" aria-hidden="true" />;
-}
-
 export default function EffectsDemo() {
   const [active, setActive] = useState('hover');
   const current = groups.find((g) => g.id === active) ?? groups[0];
   return (
     <div className="fx-page-root">
-      <GlobalCursor />
+      <RadialCursor />
       <header className="fx-header">
         <h1>交互效果库</h1>
         <nav className="fx-nav">
