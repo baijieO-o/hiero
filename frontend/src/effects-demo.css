@@ -1,12 +1,13 @@
 /* Custom cursor: hide the system pointer, except over text inputs and on touch devices. */
+/* Enabled by RadialCursor on fine-pointer devices (see effects-cursor.tsx). */
 @media (pointer: fine) {
-  .fx-page-root,
-  .fx-page-root * {
+  html.rc-enabled,
+  html.rc-enabled * {
     cursor: none !important;
   }
-  .fx-page-root input,
-  .fx-page-root textarea,
-  .fx-page-root [contenteditable='true'] {
+  html.rc-enabled input,
+  html.rc-enabled textarea,
+  html.rc-enabled [contenteditable='true'] {
     cursor: text !important;
   }
 }

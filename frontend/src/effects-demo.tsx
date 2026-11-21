@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
-import RadialCursor from './effects-cursor';
 
 type Group = { id: string; title: string; items: string[]; render: () => ReactNode };
 
@@ -379,7 +378,6 @@ export default function EffectsDemo() {
   const current = groups.find((g) => g.id === active) ?? groups[0];
   return (
     <div className="fx-page-root">
-      <RadialCursor />
       <header className="fx-header">
         <h1>交互效果库</h1>
         <nav className="fx-nav">

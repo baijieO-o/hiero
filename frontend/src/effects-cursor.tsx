@@ -86,6 +86,7 @@ export default function RadialCursor() {
 
   useEffect(() => {
     if (!enabled) return;
+    document.documentElement.classList.add('rc-enabled');
     const onMove = (e: MouseEvent) => {
       if (ringRef.current) ringRef.current.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
       const m = menuRef.current;
@@ -131,6 +132,7 @@ export default function RadialCursor() {
     window.addEventListener('contextmenu', onContext);
     window.addEventListener('keydown', onKey);
     return () => {
+      document.documentElement.classList.remove('rc-enabled');
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseover', onOver);
       window.removeEventListener('mousedown', onDown);
