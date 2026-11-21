@@ -12,22 +12,32 @@ export const ITEMS = [
   { id: 'more', label: '更多' },
 ] as const;
 
+// Second-level menu, opened by releasing the right button over "更多".
+export const MORE_ITEMS = [
+  { id: 'copyUrl', label: '复制链接' },
+  { id: 'copyTitle', label: '复制标题' },
+  { id: 'upper', label: '转大写' },
+  { id: 'lower', label: '转小写' },
+  { id: 'clear', label: '清空输入' },
+] as const;
+
 type ItemId = (typeof ITEMS)[number]['id'];
+type ActionId = ItemId | (typeof MORE_ITEMS)[number]['id'];
 
 const OUTER_R = 104;
 const INNER_R = 54;
 const SECTOR_GAP_DEG = 3;
-const SECTORS = ITEMS.length;
 
-// Sector i is centred on angle i*45deg, measured clockwise from the top.
-function sectorIndexAt(dx: number, dy: number): number | null {
+// Sector i is centred on angle i*(360/count)deg, measured clockwise from the top.
+function sectorIndexAt(dx: number, dy: number, count: number): number | null {
   if (Math.hypot(dx, dy) < INNER_R) return null;
-  const deg = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360 + 360 / SECTORS / 2) % 360;
-  return Math.floor(deg / (360 / SECTORS));
+  const step = 360 / count;
+  const deg = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360 + step / 2) % 360;
+  return Math.floor(deg / step);
 }
 
-function sectorPath(index: number): string {
-  const step = 360 / SECTORS;
+function sectorPath(index: number, count: number): string {
+  const step = 360 / count;
   const start = index * step + SECTOR_GAP_DEG / 2 - 90;
   const end = (index + 1) * step - SECTOR_GAP_DEG / 2 - 90;
   const pt = (r: number, deg: number) => {
@@ -44,8 +54,8 @@ function sectorPath(index: number): string {
   ].join(' ');
 }
 
-function labelPos(index: number): { x: number; y: number } {
-  const angle = ((index + 0.5) * 360) / SECTORS - 90;
+function labelPos(index: number, count: number): { x: number; y: number } {
+  const angle = ((index + 0.5) * 360) / count - 90;
   const r = (OUTER_R + INNER_R) / 2;
   return { x: OUTER_R + r * Math.cos((angle * Math.PI) / 180), y: OUTER_R + r * Math.sin((angle * Math.PI) / 180) };
 }
@@ -68,10 +78,26 @@ function selectedText(field: EditableField | null): string {
 }
 
 // Runs a radial-menu action on the current focus or selection.
-async function runAction(id: ItemId): Promise<void> {
+async function runAction(id: ActionId): Promise<void> {
   const field = focusedEditable();
   try {
     switch (id) {
+      case 'copyUrl': await navigator.clipboard.writeText(location.href); break;
+      case 'copyTitle': await navigator.clipboard.writeText(document.title); break;
+      case 'upper':
+      case 'lower': {
+        const text = selectedText(field);
+        if (!field || !text) break;
+        document.execCommand('insertText', false, id === 'upper' ? text.toUpperCase() : text.toLowerCase());
+        break;
+      }
+      case 'clear': {
+        if (!field) break;
+        if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) field.select();
+        else document.execCommand('selectAll');
+        document.execCommand('delete');
+        break;
+      }
       case 'undo': document.execCommand('undo'); break;
       case 'redo': document.execCommand('redo'); break;
       case 'copy': {
@@ -112,6 +138,10 @@ const SYSTEM_CURSOR_SELECTOR = [
   '[draggable="true"]', '[class*="rc-cursor-"]',
 ].join(', ');
 
+function listOf(sub: boolean): ReadonlyArray<{ readonly id: ActionId; readonly label: string }> {
+  return sub ? MORE_ITEMS : ITEMS;
+}
+
 function isSystemCursorTarget(target: EventTarget | null): target is Element {
   return target instanceof Element && !!target.closest(SYSTEM_CURSOR_SELECTOR);
 }
@@ -123,7 +153,7 @@ function isInteractive(target: EventTarget | null): boolean {
 export default function RadialCursor() {
   const ringRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<CursorMode>('default');
-  const [menu, setMenu] = useState<{ x: number; y: number; hover: number | null } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; hover: number | null; sub: boolean } | null>(null);
   const menuRef = useRef(menu);
   menuRef.current = menu;
   const [enabled] = useState(() => window.matchMedia('(pointer: fine)').matches);
@@ -135,7 +165,7 @@ export default function RadialCursor() {
       if (ringRef.current) ringRef.current.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
       const m = menuRef.current;
       if (m) {
-        const idx = sectorIndexAt(e.clientX - m.x, e.clientY - m.y);
+        const idx = sectorIndexAt(e.clientX - m.x, e.clientY - m.y, listOf(m.sub).length);
         if (idx !== m.hover) setMenu({ ...m, hover: idx });
       }
     };
@@ -146,15 +176,28 @@ export default function RadialCursor() {
       else setMode('default');
     };
     const onDown = (e: MouseEvent) => {
+      const m = menuRef.current;
+      // The second-level menu stays open after release; any click picks a sector or dismisses it.
+      if (m?.sub) {
+        const idx = sectorIndexAt(e.clientX - m.x, e.clientY - m.y, MORE_ITEMS.length);
+        setMenu(null);
+        setMode('default');
+        if (idx !== null) void runAction(MORE_ITEMS[idx].id);
+        return;
+      }
       if (e.button !== 2 || e.shiftKey) return;
       e.preventDefault();
       setMode('down');
-      setMenu({ x: e.clientX, y: e.clientY, hover: null });
+      setMenu({ x: e.clientX, y: e.clientY, hover: null, sub: false });
     };
     const onUp = (e: MouseEvent) => {
       const m = menuRef.current;
-      if (!m || e.button !== 2) return;
-      const idx = sectorIndexAt(e.clientX - m.x, e.clientY - m.y);
+      if (!m || m.sub || e.button !== 2) return;
+      const idx = sectorIndexAt(e.clientX - m.x, e.clientY - m.y, ITEMS.length);
+      if (idx !== null && ITEMS[idx].id === 'more') {
+        setMenu({ ...m, hover: null, sub: true });
+        return;
+      }
       setMenu(null);
       setMode('default');
       if (idx !== null) void runAction(ITEMS[idx].id);
@@ -188,7 +231,8 @@ export default function RadialCursor() {
 
   if (!enabled) return null;
 
-  const hoverItem = menu?.hover != null ? ITEMS[menu.hover] : null;
+  const list = listOf(menu?.sub ?? false);
+  const hoverItem = menu?.hover != null ? list[menu.hover] : null;
 
   return (
     <>
@@ -198,17 +242,17 @@ export default function RadialCursor() {
       {menu && (
         <div className="rc-menu" style={{ left: menu.x - OUTER_R, top: menu.y - OUTER_R }} role="menu">
           <svg width={OUTER_R * 2} height={OUTER_R * 2} viewBox={`0 0 ${OUTER_R * 2} ${OUTER_R * 2}`}>
-            {ITEMS.map((item, i) => {
-              const p = labelPos(i);
+            {list.map((item, i) => {
+              const p = labelPos(i, list.length);
               return (
                 <g key={item.id} className={menu.hover === i ? 'rc-sector is-hover' : 'rc-sector'}>
-                  <path d={sectorPath(i)} />
+                  <path d={sectorPath(i, list.length)} />
                   <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="middle">{item.label}</text>
                 </g>
               );
             })}
           </svg>
-          <div className="rc-center">{hoverItem ? hoverItem.label : '松开取消'}</div>
+          <div className="rc-center">{hoverItem ? hoverItem.label : menu.sub ? '点击选择' : '松开取消'}</div>
         </div>
       )}
     </>

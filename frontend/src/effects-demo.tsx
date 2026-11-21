@@ -105,6 +105,26 @@ function Spotlight() {
   );
 }
 
+// Uses the native View Transitions API when available; otherwise switches instantly.
+function SharedElement() {
+  const [big, setBig] = useState(false);
+  const toggle = () => {
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+    if (doc.startViewTransition) doc.startViewTransition(() => setBig((v) => !v));
+    else setBig((v) => !v);
+  };
+  return (
+    <div className="fx-shared">
+      <button className="fx-chip" onClick={toggle}>
+        {big ? '缩回' : '展开'}
+      </button>
+      <div className={`fx-shared-box ${big ? 'is-big' : ''}`} style={{ viewTransitionName: 'fx-shared' }}>
+        共享元素
+      </div>
+    </div>
+  );
+}
+
 function Carousel() {
   const slides = ['第一张', '第二张', '第三张'];
   const [i, setI] = useState(0);
@@ -312,7 +332,7 @@ const groups: Group[] = [
   {
     id: 'cursor',
     title: '02 指针',
-    items: ['自定义光标', '指针响应背景', '光标拖尾'],
+    items: ['自定义光标', '指针响应背景'],
     render: () => <FollowCursor />,
   },
   {
@@ -330,7 +350,12 @@ const groups: Group[] = [
     id: 'spotlight',
     title: '04 挑版本',
     items: ['光标聚光灯', '共享元素转场'],
-    render: () => <Spotlight />,
+    render: () => (
+      <div className="fx-row fx-row-top">
+        <Spotlight />
+        <SharedElement />
+      </div>
+    ),
   },
   {
     id: 'detail',
