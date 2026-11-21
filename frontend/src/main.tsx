@@ -2,6 +2,8 @@ import '@fontsource/anton/latin-400.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import EffectsDemo from './effects-demo';
+import './effects-demo.css';
 import { installDevtools } from './devtools';
 import { loadModelPrices } from './token-cost';
 import './style.css';
@@ -10,7 +12,9 @@ import 'dockview/dist/styles/dockview.css';
 installDevtools();
 
 const root = createRoot(document.getElementById('app')!);
-const renderApp = (): void => root.render(<StrictMode><App /></StrictMode>);
+// `?effects=1` opens the standalone interaction-effects showcase instead of the app.
+const showEffects = new URLSearchParams(window.location.search).has('effects');
+const renderApp = (): void => root.render(<StrictMode>{showEffects ? <EffectsDemo /> : <App />}</StrictMode>);
 renderApp();
 // Hide the boot splash (index.html) after the first frame and once its draw-in animation has played.
 const SPLASH_MIN_MS = 3000;
