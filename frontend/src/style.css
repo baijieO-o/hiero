@@ -832,6 +832,9 @@ button, textarea, select { font: inherit; }
 .hot-plug-toggle input:checked + .hot-plug-track::after { transform: translateX(16px); background: #f2f2f5; }
 .hot-plug-toggle input:focus-visible + .hot-plug-track { outline: 2px solid var(--accent, #6d5efc); outline-offset: 2px; }
 .hot-plug-toggle input:disabled + .hot-plug-track { opacity: .5; }
+.capability-badge { margin-left: auto; margin-right: 8px; font-size: 12px; padding: 1px 6px; border-radius: 4px; background: #3a3d44; color: #c9ccd4; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.capability-available { background: #1f3d2c; color: #8fe0b0; }
+.capability-unconnected, .capability-retrying { background: #4a3a1c; color: #f0c674; }
 /* Diff review panel */
 .diff-panel .diff-empty { padding: 16px; color: var(--text-muted); font-size: 13px; }
 .diff-panel .diff-body { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; flex: 1; min-height: 0; }

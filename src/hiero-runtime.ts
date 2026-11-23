@@ -11,6 +11,7 @@ import { StateStore } from './state-store.js';
 import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type CompletionGateway } from './model-gateway.js';
 import { ToolGateway, type ApprovalHook } from './tool-gateway.js';
 import { CapabilityRouter } from './capability-router.js';
+import { capabilityPromptBlock } from './capability-summary.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
 import { McpToolClient } from './mcp-client.js';
 import { HotPlugRegistry, type PlugStatus } from './hot-plug.js';
@@ -398,11 +399,11 @@ function chatToolDefinitions(subagent: SubagentSettings): ModelToolDefinition[] 
  * Builds the model messages for a chat turn. When the client has compacted earlier history, the summary is placed
  * before the messages the client kept verbatim.
  */
-async function buildChatMessages(workspacePath: string, history: RuntimeChatRequest['messages'], compactedSummary?: string, skillMetadata = '', conversationId?: string): Promise<ModelMessage[]> {
+async function buildChatMessages(workspacePath: string, history: RuntimeChatRequest['messages'], compactedSummary?: string, skillMetadata = '', conversationId?: string, capabilityBlock = ''): Promise<ModelMessage[]> {
   const memory = await memoryContext(workspacePath);
   const lastUser = [...history].reverse().find((item) => item.role === 'user')?.content ?? '';
   const recalled = await deepRecallContext(workspacePath, lastUser, conversationId);
-  const memorySections = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : '', skillMetadata ? `Available skills (call load_skill to read one before following it):\n${skillMetadata}` : ''].filter(Boolean);
+  const memorySections = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : '', skillMetadata ? `Available skills (call load_skill to read one before following it):\n${skillMetadata}` : '', capabilityBlock ? `Capability status:\n${capabilityBlock}` : ''].filter(Boolean);
   const systemContent = [CHAT_SYSTEM_PROMPT, ...memorySections].join('\n\n');
   const summary = typeof compactedSummary === 'string' && compactedSummary.trim() ? [{ role: 'user' as const, content: `${COMPACT_SUMMARY_PREFIX}\n${compactedSummary.trim()}` }] : [];
   return [
@@ -1400,7 +1401,8 @@ export class HieroRuntime {
     const toolDefinitions = chatToolDefinitions(subagent);
     await this.capabilityRouter.discoverSkills(workspacePath).catch(() => undefined);
     const sharedContext = await sharedPagesContext(request.shared_urls);
-    const messages = await buildChatMessages(workspacePath, sharedContext ? withSharedContext(request.messages, sharedContext) : request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata(), request.conversation_id);
+    const capabilityBlock = capabilityPromptBlock(this.hotPlug.capabilityEntries(this.capabilityRouter.skillSummaries().map((skill) => skill.name), chatToolDefinitions(subagent).map((tool) => tool.function.name)));
+    const messages = await buildChatMessages(workspacePath, sharedContext ? withSharedContext(request.messages, sharedContext) : request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata(), request.conversation_id, capabilityBlock);
     const trace = new ChatTrace();
     const sendTrace = () => emit({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } });
     try {

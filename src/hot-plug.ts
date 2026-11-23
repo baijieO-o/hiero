@@ -2,6 +2,7 @@
 import { mcpToolDefinition } from './mcp-client.js';
 import { readHotPlugState, writeHotPlugState } from './hot-plug-state.js';
 import { DEFAULT_RETRY_POLICY, PlugRunner, type PlugState, type RetryPolicy } from './hot-plug-runner.js';
+import { mcpCapability, toggledCapability, type CapabilityEntry } from './capability-summary.js';
 
 export type PlugKind = 'mcp' | 'tool' | 'skill' | 'adapter';
 
@@ -129,6 +130,17 @@ export class HotPlugRegistry {
 
   public mcpStatuses(): McpServerStatus[] {
     return this.mcp.statuses([...this.configs.keys()]);
+  }
+
+  /** Usable-or-not state of every MCP server, built-in tool and skill the model could be offered. */
+  public capabilityEntries(skillNames: readonly string[], toolNames: readonly string[]): CapabilityEntry[] {
+    const statuses = new Map(this.mcpStatuses().map((status) => [status.name, status]));
+    const mcp = [...this.configs.keys()].map((name) => mcpCapability(name, this.plugs.has(HotPlugRegistry.id('mcp', name)), statuses.get(name)));
+    return [
+      ...mcp,
+      ...skillNames.map((name) => toggledCapability(name, this.isSkillEnabled(name))),
+      ...toolNames.map((name) => toggledCapability(name, this.isToolEnabled(name))),
+    ];
   }
 
   /** Tool definitions for the model, derived from the currently connected MCP servers. */

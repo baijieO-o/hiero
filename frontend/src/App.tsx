@@ -24,6 +24,7 @@ import { runtimeSocketFor, type RuntimeSocketMessage } from './runtime-socket';
 import { estimateCostUsd, formatCost } from './token-cost';
 import type { TerminalWriteLine } from './terminal-view';
 import { SettingsBuffer } from './settings-buffer';
+import { CAPABILITY_STATE_LABELS, mcpCapability, toggledCapability, type CapabilityEntry } from './capability-badge';
 
 const LazyTerminalView = lazy(() => import('./terminal-view').then((module) => ({ default: module.TerminalView })));
 import { MAX_TEXT_PREVIEW_BYTES, classifyFile, folderNameFromEntry } from './dropped-files';
@@ -2063,18 +2064,26 @@ function HotPlugToggle({ checked, label, onChange }: { checked: boolean; label: 
   );
 }
 
-function HotPlugList({ items, kind, note, onToggle }: { items: HotPlugItem[]; kind: HotPlugKind; note: string; onToggle: HotPlugToggleFn }): ReactElement {
+function HotPlugList({ items, kind, note, onToggle, stateOf }: { items: HotPlugItem[]; kind: HotPlugKind; note: string; onToggle: HotPlugToggleFn; stateOf?: (item: HotPlugItem) => CapabilityEntry }): ReactElement {
   if (items.length === 0) return <p className="skills-empty">暂无条目。</p>;
   return (
     <div className="hot-plug-list">
       <p className="skills-empty">{note}</p>
       <ul>
-        {items.map((item) => (
-          <li key={item.name} className={item.enabled ? '' : 'disabled'}>
-            <span>{item.name}</span>
-            <HotPlugToggle checked={item.enabled} label={`${kind} ${item.name}`} onChange={(checked) => onToggle(kind, item.name, checked)} />
-          </li>
-        ))}
+        {items.map((item) => {
+          const capability = stateOf?.(item);
+          return (
+            <li key={item.name} className={item.enabled ? '' : 'disabled'}>
+              <span>{item.name}</span>
+              {capability ? (
+                <span className={`capability-badge capability-${capability.state}`} title={capability.reason}>
+                  {CAPABILITY_STATE_LABELS[capability.state]}{capability.reason ? `：${capability.reason}` : ''}
+                </span>
+              ) : null}
+              <HotPlugToggle checked={item.enabled} label={`${kind} ${item.name}`} onChange={(checked) => onToggle(kind, item.name, checked)} />
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -2088,7 +2097,7 @@ function ToolsCategoryView(): ReactElement {
     <div className="skills-editor">
       {error ? <p role="alert">{error}</p> : null}
       {snapshot ? (
-        <HotPlugList items={snapshot.tools} kind="tool" note="内置工具。开关对新对话生效，已有对话保持不变。" onToggle={toggle} />
+        <HotPlugList items={snapshot.tools} kind="tool" note="内置工具。开关对新对话生效，已有对话保持不变。" onToggle={toggle} stateOf={(item) => toggledCapability(item.name, item.enabled)} />
       ) : <p className="skills-empty">正在读取工具列表…</p>}
     </div>
   );
@@ -2146,6 +2155,7 @@ function McpCategoryView(): ReactElement {
           kind="mcp"
           note="启停立即生效，并写入 mcp.json，重启后保持。"
           onToggle={hotPlug.toggle}
+          stateOf={(item) => mcpCapability(item.name, item.enabled, hotPlug.snapshot?.statuses.find((status) => status.name === item.name))}
         />
       ) : null}
       {hotPlug.snapshot ? (
