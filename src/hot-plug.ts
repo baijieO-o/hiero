@@ -132,10 +132,18 @@ export class HotPlugRegistry {
     return this.mcp.statuses([...this.configs.keys()]);
   }
 
+  /** Names of MCP servers whose plug is backing off after a failed connection attempt. */
+  public retryingMcpNames(): string[] {
+    return [...this.configs.keys()].filter((name) => this.status(HotPlugRegistry.id('mcp', name)).state === 'retrying');
+  }
+
   /** Usable-or-not state of every MCP server, built-in tool and skill the model could be offered. */
   public capabilityEntries(skillNames: readonly string[], toolNames: readonly string[]): CapabilityEntry[] {
     const statuses = new Map(this.mcpStatuses().map((status) => [status.name, status]));
-    const mcp = [...this.configs.keys()].map((name) => mcpCapability(name, this.plugs.has(HotPlugRegistry.id('mcp', name)), statuses.get(name)));
+    const mcp = [...this.configs.keys()].map((name) => {
+      const id = HotPlugRegistry.id('mcp', name);
+      return mcpCapability(name, this.plugs.has(id), statuses.get(name), this.status(id).state === 'retrying');
+    });
     return [
       ...mcp,
       ...skillNames.map((name) => toggledCapability(name, this.isSkillEnabled(name))),

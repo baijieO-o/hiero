@@ -20,6 +20,13 @@ test('prompt block names usable capabilities and explains unusable ones', () => 
   assert.doesNotMatch(block, /Currently usable capabilities: [^.]*write_file/);
 });
 
+test('MCP server is retrying only while its plug is backing off', () => {
+  const failed = { name: 'fs', connected: false, tool_count: 0, error: 'spawn failed' };
+  assert.deepEqual(mcpCapability('fs', true, failed, true), { name: 'fs', state: 'retrying', reason: 'spawn failed' });
+  assert.equal(mcpCapability('fs', true, failed).state, 'unconnected');
+  assert.equal(mcpCapability('fs', false, failed, true).state, 'disabled');
+});
+
 test('prompt block is empty when there are no capabilities', () => {
   assert.equal(capabilityPromptBlock([]), '');
 });

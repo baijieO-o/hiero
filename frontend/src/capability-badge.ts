@@ -20,9 +20,10 @@ export const CAPABILITY_STATE_LABELS: Record<CapabilityState, string> = {
   retrying: '重试中',
 };
 
-export function mcpCapability(name: string, enabled: boolean, status: McpStatusLike | undefined): CapabilityEntry {
+export function mcpCapability(name: string, enabled: boolean, status: McpStatusLike | undefined, retrying = false): CapabilityEntry {
   if (!enabled) return { name, state: 'disabled' };
   if (status?.connected) return { name, state: 'available' };
+  if (retrying) return { name, state: 'retrying', ...(status?.error ? { reason: status.error } : {}) };
   return { name, state: 'unconnected', ...(status?.error ? { reason: status.error } : {}) };
 }
 

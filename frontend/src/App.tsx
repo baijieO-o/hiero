@@ -2017,7 +2017,7 @@ type HotPlugItem = { name: string; enabled: boolean };
 type SnowdomeResidentState = { name: string; url: string; persona: string; driver: string };
 type SnowdomeConfigDraft = { residents: SnowdomeResidentState[] };
 type SnowdomeAdapterState = { enabled: boolean; residents: SnowdomeResidentState[]; statuses: Record<string, { enabled: boolean; error?: string } | undefined> };
-type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; adapters: SnowdomeAdapterState; skills: HotPlugItem[]; tools: HotPlugItem[] };
+type HotPlugSnapshot = { servers: McpServerEntry[]; statuses: McpServerStatus[]; retrying?: string[]; adapters: SnowdomeAdapterState; skills: HotPlugItem[]; tools: HotPlugItem[] };
 type HotPlugKind = 'mcp' | 'skill' | 'tool' | 'adapter';
 
 /** Hot-plug state for MCP servers, skills and built-in tools, sharing one backend socket per view. */
@@ -2039,7 +2039,7 @@ function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null;
         if (result.ok) { setSnapshot(result); setError(null); } else setError(result.message);
       } catch { /* Ignore non-JSON runtime messages. */ }
     };
-    socket.onerror = () => { if (active) setError('未连接到后端（localhost:8080）。'); };
+    socket.onerror = () => { if (active) setError(`未连接到后端（${RUNTIME_WS_URL}）。`); };
     return () => { active = false; socketRef.current = null; socket.close(); };
   }, []);
   const toggle = (kind: HotPlugKind, name: string, enabled: boolean) => {
@@ -2155,7 +2155,7 @@ function McpCategoryView(): ReactElement {
           kind="mcp"
           note="启停立即生效，并写入 mcp.json，重启后保持。"
           onToggle={hotPlug.toggle}
-          stateOf={(item) => mcpCapability(item.name, item.enabled, hotPlug.snapshot?.statuses.find((status) => status.name === item.name))}
+          stateOf={(item) => mcpCapability(item.name, item.enabled, hotPlug.snapshot?.statuses.find((status) => status.name === item.name), hotPlug.snapshot?.retrying?.includes(item.name) ?? false)}
         />
       ) : null}
       {hotPlug.snapshot ? (

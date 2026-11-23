@@ -1134,6 +1134,7 @@ export class HieroRuntime {
           ok: true,
           servers: config.servers,
           statuses: this.hotPlug.mcpStatuses(),
+          retrying: this.hotPlug.retryingMcpNames(),
           adapters: this.snowdomeSnapshot(),
           skills: this.capabilityRouter.discoveredSkillSummaries().map((skill) => ({ name: skill.name, enabled: this.hotPlug.isSkillEnabled(skill.name) })),
           tools: this.createChatToolGateway(resolveChatWorkspace(undefined), false).registeredNames().map((name) => ({ name, enabled: this.hotPlug.isToolEnabled(name) })),

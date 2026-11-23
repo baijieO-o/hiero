@@ -21,10 +21,14 @@ export const CAPABILITY_STATE_LABELS: Record<CapabilityState, string> = {
   retrying: '重试中',
 };
 
-/** Marks an MCP server as available only when it is enabled and connected; otherwise it reports the cause. */
-export function mcpCapability(name: string, enabled: boolean, status: McpStatusLike | undefined): CapabilityEntry {
+/**
+ * Marks an MCP server as available only when it is enabled and connected; otherwise it reports the cause.
+ * `retrying` is true while the plug is backing off after a failed connection attempt.
+ */
+export function mcpCapability(name: string, enabled: boolean, status: McpStatusLike | undefined, retrying = false): CapabilityEntry {
   if (!enabled) return { name, state: 'disabled' };
   if (status?.connected) return { name, state: 'available' };
+  if (retrying) return { name, state: 'retrying', ...(status?.error ? { reason: status.error } : {}) };
   return { name, state: 'unconnected', ...(status?.error ? { reason: status.error } : {}) };
 }
 
