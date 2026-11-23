@@ -43,7 +43,7 @@ Set-Location frontend; npm run dev   # 前端
 - **快照持久化**：`~/.hiero/write-snapshots.json` 在重启后保留；仅在没有 checkpoint 的新任务开始时清空（`src/hiero-runtime.ts`）。有回滚测试覆盖重启后回滚与跳过人工修改（`test/write-snapshots.test.ts`）。
 - **失败反思**：验证失败与异常时写入 `.hiero/reflections.jsonl`（最近 5 条，单条截断 500 字符），下一次 Plan 时注入（`src/reflection-store.ts`、`src/agent-workflow.ts`）。
 - **审批式技能沉淀**：仅在验证通过的任务后，从成功的 write_file/edit_file 生成候选，经 UI 审批后保存到 `<workspace>/.agent/skills/<name>/SKILL.md`（沿用现有项目技能目录，未采用 `.hiero/skills`），并记录来源任务（`src/skill-promotion.ts`）。审批超时 120 秒视为拒绝。
-- **分支式重试（默认关闭）**：设置 `HIERO_BRANCH_WIDTH>1` 后，新任务并行运行 N 个候选，各在独立 git worktree（`.hiero/branches/`）与分支中执行；胜者（验证通过优先，其次步数少）提交后合并回主分支，冲突则放弃合并；结束后清理所有候选目录与分支（`src/branch-retry.ts`，`test/branch-retry.test.ts`）。定时任务、续跑、非 git 或无 HEAD 时回退单路径。候选的审批请求经 `createSerializedApprover` 排队，同一时间只弹出一个审批；尚未在真实模型上做端到端验证；并行占用的 LLM 配额与 Docker 沙箱未解决。
+- **分支式重试（默认关闭）**：设置 `HIERO_BRANCH_WIDTH>1` 后，新任务并行运行 N 个候选，各在独立 git worktree（`.hiero/branches/`）与分支中执行；胜者（验证通过优先，其次步数少）提交后合并回主分支，冲突则放弃合并；结束后清理所有候选目录与分支（`src/branch-retry.ts`，`test/branch-retry.test.ts`）。定时任务、续跑、非 git 或无 HEAD 时回退单路径。候选的审批请求经 `createSerializedApprover` 排队，同一时间只弹出一个审批；已有离线端到端测试（`test/branch-retry-e2e.test.ts`，脚本化模型，校验分支路径确实多于单路径的模型调用，并检查候选分支与 worktree 已清理）；尚未在真实模型上验证；并行占用的 LLM 配额与 Docker 沙箱未解决。
 - **深层记忆**：第 0、1 层已实现；第 2 层为关键词检索，配置 `HIERO_EMBED_*` 后可加向量检索。
 - **Trace 与成本**：每次聊天记录执行时间线，持久化到工作区 `.hiero/traces.jsonl`；会话累计 token 与估算成本（价格表自动拉取，缓存 24 小时）。
 - **令牌用量**：模型网关记录 `usage`；价格估算为估算值。
