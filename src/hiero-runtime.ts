@@ -84,6 +84,8 @@ import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
 import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace-services.js';
+import { runVerification, VERIFY_COMMAND_PREFIX } from './verification.js';
+import { buildTaskStatus } from './task-status.js';
 import { ensureConversationWorktree, mergeConversationWorktree, removeConversationWorktree, type NonGitPolicy } from './worktree.js';
 import { ProcessManager } from './process-manager.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
@@ -1477,11 +1479,15 @@ export class HieroRuntime {
       const longReply = toolRuns === 0 && response.content.length > LONG_REPLY_THRESHOLD
         ? await saveLongReply(workspacePath, request.request_id, response.content).catch(() => undefined)
         : undefined;
+      const verification = task.acceptance_criteria.some((item) => item.startsWith(VERIFY_COMMAND_PREFIX))
+        ? await runVerification({ workspacePath, acceptanceCriteria: task.acceptance_criteria, permissionMode: task.permission_mode }).catch(() => undefined)
+        : undefined;
+      const status = buildTaskStatus({ execution: 'completed', verified: verification?.verified, produced: toolRuns > 0 ? `执行了 ${toolRuns} 次工具调用` : undefined });
       if (longReply) {
         const note = `${longReply.summary}\n\n回复较长（${response.content.length} 字符），已保存到 \`${longReply.path}\`。`;
-        emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: note, model: response.model, usage, saved_path: longReply.path } });
+        emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: note, model: response.model, usage, saved_path: longReply.path, status, verification } });
       } else {
-        emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage } });
+        emit({ type: 'CHAT_REPLY', payload: { request_id: request.request_id, content: response.content, model: response.model, usage, status, verification } });
       }
     } catch (cause) {
       if (signal.aborted) return;

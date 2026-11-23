@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { ErrorRecord, HandoffDocument } from './contracts.js';
 import { AgentStateMachine, type AgentState, type StateTransition } from './state-machine.js';
 import type { VerificationResult } from './verification.js';
+import type { TaskStatus } from './task-status.js';
 import type { ChatTraceEvent } from './chat-trace.js';
 import type { StoredChatTrace } from './trace-store.js';
 import type { ManagedProcessInfo, ManagedProcessLine } from './process-manager.js';
@@ -38,7 +39,7 @@ export type RuntimeEvent =
   | { type: 'CHAT_DELTA'; payload: { request_id: string; text: string } }
   | { type: 'CHAT_RESET'; payload: { request_id: string } }
   | { type: 'CHAT_TOOL'; payload: { request_id: string; name: string; arguments: string; result: string } }
-  | { type: 'CHAT_REPLY'; payload: { request_id: string; content: string; model: string; saved_path?: string; usage?: { input_tokens: number; output_tokens: number; calls: number; duration_ms: number } } }
+  | { type: 'CHAT_REPLY'; payload: { request_id: string; content: string; model: string; saved_path?: string; usage?: { input_tokens: number; output_tokens: number; calls: number; duration_ms: number }; status?: TaskStatus; verification?: VerificationResult | undefined } }
   | { type: 'CHAT_ERROR'; payload: { request_id: string; code: string; message: string } }
   | { type: 'CHAT_TRACE'; payload: { request_id: string; events: ChatTraceEvent[] } }
   | { type: 'CHAT_TRACE_HISTORY'; payload: { workspace: string; traces: StoredChatTrace[] } }

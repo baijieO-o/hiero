@@ -223,6 +223,8 @@ interface ChatMessage {
   segments?: ChatSegment[];
   usage?: ChatUsage;
   model?: string;
+  /** Execution and verification status reported by the backend; kept separate so "finished" is never shown as "verified". */
+  status?: ReplyStatus;
   trace?: TraceEvent[];
   requestId?: string;
   completedAt?: number;
@@ -231,6 +233,19 @@ interface ChatMessage {
 }
 
 interface ChatUsage { input_tokens: number; output_tokens: number; calls: number; duration_ms: number }
+
+const EXECUTION_LABELS: Record<string, string> = { completed: '已完成', failed: '失败', cancelled: '已取消' };
+const VERIFICATION_LABELS: Record<string, string> = { not_run: '未验证', passed: '通过', failed: '未通过' };
+
+interface ReplyStatus { execution: string; verification: string; summary: string[] }
+
+/** Reads the backend status; ignores malformed payloads so an older server never breaks the chat. */
+function parseReplyStatus(value: unknown): ReplyStatus | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const status = value as Partial<ReplyStatus>;
+  if (typeof status.execution !== 'string' || typeof status.verification !== 'string' || !Array.isArray(status.summary)) return undefined;
+  return { execution: status.execution, verification: status.verification, summary: status.summary.filter((line): line is string => typeof line === 'string') };
+}
 
 const MAX_CHAT_IMAGES = 4;
 const MAX_IMAGE_EDGE = 1600;
@@ -509,8 +524,10 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         const trace = pendingTrace;
         const requestId = activeRequest.requestId;
         const savedPath = typeof message.payload?.saved_path === 'string' ? message.payload.saved_path : undefined;
+        const status = parseReplyStatus(message.payload?.status);
         if (savedPath) pendingFiles.push(savedPath);
         const finished = finishStream({ usage, model, trace, requestId });
+        if (status) finished.status = status;
         // The final reply text is authoritative; replace the last text segment when the server sends it.
         if (replied !== undefined) finished.content = replied;
         updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
@@ -998,7 +1015,20 @@ function FadingStreamingText({ text, streaming }: { text: string; streaming: boo
   return <div className="chat-segment-text"><MarkdownBody content={text} /></div>;
 }
 
-function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, onFork, onEditResend, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; onFork?: () => void; onEditResend?: (text: string) => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
+/** Shows execution and verification as two separate labels, then the fixed four-line summary. */
+function ReplyStatusCard({ status }: { status: ReplyStatus }): ReactElement {
+  return <div className="reply-status" aria-label="任务状态">
+    <div className="reply-status-badges">
+      <span className={`reply-status-badge reply-exec-${status.execution}`}>执行：{EXECUTION_LABELS[status.execution] ?? status.execution}</span>
+      <span className={`reply-status-badge reply-verify-${status.verification}`}>验证：{VERIFICATION_LABELS[status.verification] ?? status.verification}</span>
+    </div>
+    <ul className="reply-status-summary">
+      {status.summary.map((line) => <li key={line}>{line}</li>)}
+    </ul>
+  </div>;
+}
+
+function ChatMessageView({ role, content, images, files, steps, segments, usage, model, status, trace, completedAt, onRewind, onFork, onEditResend, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; status?: ReplyStatus; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; onFork?: () => void; onEditResend?: (text: string) => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(content);
@@ -1062,6 +1092,7 @@ function ChatMessageView({ role, content, images, files, steps, segments, usage,
     {files && files.length > 0 && <div className="chat-files">
       {files.map((file) => <button type="button" key={file} className="chat-file" onClick={() => requestOpenFile(file)} title={`在文件管理器中打开 ${file}`}>📄 {file}</button>)}
     </div>}
+    {status && <ReplyStatusCard status={status} />}
     {usage && usage.calls > 0 && <div className="chat-usage" title="模型调用轨迹">
       {model && <>模型 {model} · </>}模型调用 {usage.calls} 次 · 输入 {usage.input_tokens} / 输出 {usage.output_tokens} tokens · 耗时 {(usage.duration_ms / 1000).toFixed(1)}s · 成本 {formatCost(estimateCostUsd(usage, model))}
     </div>}
@@ -1479,7 +1510,7 @@ function ChatPanel(): ReactElement {
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
           {messages.map((message, index) => message.compactedMarker
             ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
-            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} onFork={message.role === 'user' ? () => forkConversation(index) : undefined} onEditResend={message.role === 'user' ? (text) => editAndResend(index, text) : undefined} rewindDisabled={pending} />)}
+            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} status={message.status} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} onFork={message.role === 'user' ? () => forkConversation(index) : undefined} onEditResend={message.role === 'user' ? (text) => editAndResend(index, text) : undefined} rewindDisabled={pending} />)}
           {pending && <StreamingBubble />}
         </div>
         {scrolledUp && <button type="button" className="chat-scroll-bottom" onClick={scrollToBottom}>回到底部 ↓</button>}

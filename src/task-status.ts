@@ -14,9 +14,9 @@ export interface TaskStatus {
 export interface TaskStatusInput {
   execution: ExecutionStatus;
   /** Result of the `cmd:` acceptance checks; undefined when none were run. */
-  verified?: boolean;
+  verified?: boolean | undefined;
   /** Short description of what was produced, shown on the 已完成 line. */
-  produced?: string;
+  produced?: string | undefined;
 }
 
 /** Builds the status pair and the fixed summary. A failed or cancelled run never reports as completed. */
