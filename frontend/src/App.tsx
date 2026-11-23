@@ -1603,12 +1603,14 @@ function ChatOptionSelect({ label, value, options, disabled, onChange }: { label
 }
 
 
+const DOCKVIEW_MESSAGES = { closeTab: (title: string) => `关闭 ${title}`, closeTabPlain: () => '关闭' };
+
 type DevtoolsTab = 'console' | 'network' | 'runtime';
 
 const DEVTOOLS_TABS: { id: DevtoolsTab; label: string }[] = [
-  { id: 'console', label: 'Console' },
-  { id: 'network', label: 'Network' },
-  { id: 'runtime', label: 'Runtime' },
+  { id: 'console', label: '控制台' },
+  { id: 'network', label: '网络' },
+  { id: 'runtime', label: '运行时' },
 ];
 
 function formatClock(time: number): string {
@@ -2997,7 +2999,7 @@ function App(): ReactElement {
         {railOpen && RAIL_KINDS.map((kind) => <button key={kind} type="button" className="rail-item" onClick={() => openBuffer(kind)}><span>{kind.toUpperCase().slice(0, 3)}</span>{PANEL_TITLES[kind]}</button>)}
       </aside>
       <div className="workspace">
-        <div className="dockview-host"><DockviewReact components={panelComponents} rightHeaderActionsComponent={GroupHeaderActions} onReady={onReady} className="dockview-theme-abyss" /></div>
+        <div className="dockview-host"><DockviewReact components={panelComponents} rightHeaderActionsComponent={GroupHeaderActions} onReady={onReady} className="dockview-theme-abyss" messages={DOCKVIEW_MESSAGES} /></div>
       </div>
     </div>
     <footer className="buffer-bar">
