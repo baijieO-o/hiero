@@ -5,11 +5,11 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { AgentExecutor } from './agent-executor.js';
 import { COMPACT_SUMMARY_PREFIX, ContextCompactor, DEFAULT_KEEP_RECENT } from './context-compactor.js';
 import { breakdownContextUsage, type ContextUsageBreakdown } from './context-usage.js';
-import { AgentWorkflow, type WorkflowOptions } from './agent-workflow.js';
+import { AgentWorkflow, type AutomaticHandoffResult, type WorkflowOptions, type WorkflowOutcome } from './agent-workflow.js';
 import { AgentStateMachine, AgentState } from './state-machine.js';
 import { StateStore } from './state-store.js';
 import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type CompletionGateway } from './model-gateway.js';
-import { ToolGateway } from './tool-gateway.js';
+import { ToolGateway, type ApprovalHook } from './tool-gateway.js';
 import { CapabilityRouter } from './capability-router.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
 import { McpToolClient } from './mcp-client.js';
@@ -22,7 +22,7 @@ import type { AdapterPlug } from './hot-plug.js';
 import type { McpServerStatus } from './mcp-client.js';
 import { RuntimeWebSocketServer, type RuntimeEvent } from './runtime-server.js';
 import type { ModelMessage, ModelResponse, ModelToolCall, ModelToolDefinition } from './model-gateway.js';
-import type { TaskContract, ErrorRecord, PermissionMode } from './contracts.js';
+import type { TaskContract, ErrorRecord, EvidenceRecord, PermissionMode } from './contracts.js';
 import { z } from 'zod';
 import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
@@ -87,6 +87,9 @@ import { listDirectory, pickFolder, readTextFile, runCommand } from './workspace
 import { ensureConversationWorktree, mergeConversationWorktree, removeConversationWorktree, type NonGitPolicy } from './worktree.js';
 import { ProcessManager } from './process-manager.js';
 import { deleteSkill, listSkills, readSkill, saveSkill, type SkillScope } from './skill-store.js';
+import { canBranchFrom, createSerializedApprover, runBranchRetry } from './branch-retry.js';
+import { isGitRepo } from './worktree.js';
+import { buildSkillCandidate, promoteSkillWithApproval } from './skill-promotion.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
 import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder } from './deep-memory.js';
 import { createEmbedder, embeddingConfigFromEnv } from './embedding.js';
@@ -939,27 +942,71 @@ export class HieroRuntime {
     return index;
   }
 
+  /** Proposes a skill distilled from a verified task. Nothing is written unless the operator approves. */
+  private async proposeSkill(workspacePath: string, taskId: string, goal: string, evidence: readonly EvidenceRecord[]): Promise<void> {
+    const candidate = buildSkillCandidate(evidence, { task_id: taskId, goal, generated_at: new Date().toISOString() });
+    if (!candidate) return;
+    await promoteSkillWithApproval(this.approvals, workspacePath, candidate);
+  }
+
   private createWorkflow(workspacePath: string = process.cwd(), extra: Pick<WorkflowOptions, 'onCheckpoint' | 'resume'> = {}): AgentWorkflow {
+    return this.buildWorkflow(workspacePath, this.machine, this.writeSnapshots, extra, true);
+  }
+
+  /**
+   * Builds a workflow for one workspace. Branch candidates pass their own machine and snapshot store and
+   * `broadcast: false`, so parallel attempts do not share state or flood the UI with intermediate events.
+   */
+  private buildWorkflow(workspacePath: string, machine: AgentStateMachine, snapshots: WriteSnapshotStore, extra: Pick<WorkflowOptions, 'onCheckpoint' | 'resume'>, broadcast: boolean, candidateApprover?: ApprovalHook): AgentWorkflow {
     // Per-step Verify is opt-in (HIERO_STEP_VERIFY=1) because each run starts a sandbox container.
     const tools = new ToolGateway();
     tools.register(createReadFileTool(workspacePath));
     tools.register(createListDirTool(workspacePath));
-    tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
-    tools.register(createEditFileTool(workspacePath, this.writeSnapshots));
-    tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
+    tools.register(createWriteFileTool(workspacePath, snapshots));
+    tools.register(createEditFileTool(workspacePath, snapshots));
+    tools.setApprover(candidateApprover ?? ((toolName, input) => this.requestToolApproval(toolName, input)));
     tools.setBreakpoints(hitlBreakpointsFromEnv());
-    return new AgentWorkflow(this.machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter, 0.8, this.createCompactor()), (to, verified) => this.runtime.transition(to, verified), (document) => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document }), {
+    const quiet = (fn: () => void) => { if (broadcast) fn(); };
+    return new AgentWorkflow(machine, new AgentExecutor(this.gateway, tools, 8, this.capabilityRouter, 0.8, this.createCompactor()), (to, verified) => (broadcast ? this.runtime.transition(to, verified) : machine.transition(to, verified)), (document) => quiet(() => this.runtime.broadcast({ type: 'HANDOFF_TRIGGERED', payload: document })), {
       useDagPlan: true,
       stepVerify: process.env.HIERO_STEP_VERIFY === '1',
       ...extra,
-      onVerification: (result) => this.runtime.broadcast({ type: 'VERIFY_RESULT', payload: result }),
-      onDagTask: (event) => this.runtime.broadcast({ type: 'DAG_TASK', payload: event }),
+      onVerification: (result) => quiet(() => this.runtime.broadcast({ type: 'VERIFY_RESULT', payload: result })),
+      onDagTask: (event) => quiet(() => this.runtime.broadcast({ type: 'DAG_TASK', payload: event })),
       rewind: async () => {
-        const result = await this.writeSnapshots.rollback();
-        if (result.skipped.length > 0) this.runtime.broadcast({ type: 'ERROR', payload: humanModifiedWarning(result.skipped).record });
-        this.runtime.broadcast({ type: 'REWIND_RESULT', payload: { restored: result.restored, skipped: result.skipped } });
+        const result = await snapshots.rollback();
+        if (result.skipped.length > 0) quiet(() => this.runtime.broadcast({ type: 'ERROR', payload: humanModifiedWarning(result.skipped).record }));
+        quiet(() => this.runtime.broadcast({ type: 'REWIND_RESULT', payload: { restored: result.restored, skipped: result.skipped } }));
       },
     });
+  }
+
+  /**
+   * Runs `width` candidates, each in its own git worktree with its own state machine and snapshot store.
+   * Only the verified winner is merged back; the rest are discarded.
+   */
+  private async runBranchCandidates(task: TaskContract, goal: string, tools: ModelToolDefinition[], width: number): Promise<WorkflowOutcome | AutomaticHandoffResult> {
+    const outcomes = new Map<number, WorkflowOutcome | AutomaticHandoffResult>();
+    // All candidates share one approval queue, so the operator sees one prompt at a time.
+    const queuedApprover: ApprovalHook = createSerializedApprover((toolName: string, input: unknown) => this.requestToolApproval(toolName, input));
+    const result = await runBranchRetry({
+      root: task.workspace_path,
+      roundId: task.task_id,
+      width,
+      attempt: async (worktreePath, index) => {
+        const outcome = await this.buildWorkflow(worktreePath, new AgentStateMachine(), new WriteSnapshotStore(), {}, false, queuedApprover).run({ ...task, workspace_path: worktreePath }, goal, tools);
+        outcomes.set(index, outcome);
+        if ('handoff' in outcome) return { verified: false, steps: 0, summary: outcome.handoff.completed_steps?.join('; ') ?? '' };
+        return { verified: true, steps: outcome.evidence.length, summary: 'verified' };
+      },
+    });
+    if (!result.winner) {
+      const reasons = result.attempts.map((entry) => entry.error ?? entry.attempt?.summary ?? 'unknown').join('; ');
+      throw new Error(`Branch retry: none of ${width} candidates passed verification; the main workspace is unchanged. Reasons: ${reasons}`);
+    }
+    const winning = outcomes.get(result.winner.index);
+    if (!winning || 'handoff' in winning) throw new Error('Branch retry: the winning candidate result was lost; the winner was merged into the main workspace but its result could not be returned.');
+    return winning;
   }
 
   /** Returns model settings for display. API tokens are never returned, only their count. */
@@ -1592,7 +1639,8 @@ export class HieroRuntime {
       }
       const goal = resumable ? resumable.goal : message.goal;
       this.machine.beginTask();
-      this.writeSnapshots.clear();
+      // A resumed task keeps the snapshots persisted before the interruption, so its rollback still covers earlier writes.
+      if (!checkpoint) this.writeSnapshots.clear();
       this.currentTaskId = task.task_id;
       taskIdForCleanup = task.task_id;
       if (checkpoint) this.stateStore.resumeTask(task.task_id);
@@ -1604,7 +1652,13 @@ export class HieroRuntime {
         ...(checkpoint ? { resume: checkpoint } : {}),
       });
       const writeTools = [WRITE_FILE_TOOL_DEFINITION, EDIT_FILE_TOOL_DEFINITION];
-      const outcome = await workflow.run(task, goal, [...CHAT_TOOL_DEFINITIONS.filter((tool) => READ_ONLY_WORKSPACE_TOOLS.has(tool.function.name)), ...writeTools, ...(message.tools ?? [])]);
+      const chatTools = [...CHAT_TOOL_DEFINITIONS.filter((tool) => READ_ONLY_WORKSPACE_TOOLS.has(tool.function.name)), ...writeTools, ...(message.tools ?? [])];
+      // Branch retry is opt-in (HIERO_BRANCH_WIDTH > 1) and only for fresh interactive tasks in a git repository.
+      const branchWidth = Number.parseInt(process.env.HIERO_BRANCH_WIDTH ?? '', 10);
+      const useBranches = !checkpoint && !message.scheduled && branchWidth > 1 && await isGitRepo(task.workspace_path) && await canBranchFrom(task.workspace_path);
+      const outcome = useBranches
+        ? await this.runBranchCandidates(task, goal, chatTools, branchWidth)
+        : await workflow.run(task, goal, chatTools);
       if ('handoff' in outcome) {
         this.runtime.completeState(AgentState.Handoff);
         const reason = outcome.handoff.completed_steps?.join('; ') || 'verification did not pass';
@@ -1621,6 +1675,8 @@ export class HieroRuntime {
       // A run abandoned by the wall-clock limit was already marked failed; do not let it overwrite that.
       if (this.abandonedTaskIds.delete(task.task_id)) return { task_id: task.task_id, status: 'failed', summary: '定时检查已因超时被放弃' };
       this.stateStore.finishTask(task.task_id, 'completed');
+      // Skill promotion waits for operator approval; it runs in the background so the task result is not delayed.
+      void this.proposeSkill(task.workspace_path, task.task_id, goal, outcome.evidence).catch((cause: unknown) => this.runtime.reportError(cause));
       return { task_id: task.task_id, status: 'completed', summary: outcome.response.content ?? '' };
     } catch (cause) {
       const failedTaskId = this.currentTaskId;

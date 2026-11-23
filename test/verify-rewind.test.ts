@@ -9,6 +9,7 @@ import type { TaskContract } from '../src/contracts.js';
 import { AgentState, AgentStateMachine } from '../src/state-machine.js';
 import type { VerificationResult } from '../src/verification.js';
 import { runVerification } from '../src/verification.js';
+import { listReflections } from '../src/reflection-store.js';
 
 function task(workspace: string, acceptanceCriteria: string[] = []): TaskContract {
   return {
@@ -56,6 +57,7 @@ test('a passing verification completes Exec 鈫?Verify without rewinding', async
     assert.equal(outcome.retries, 0);
     assert.equal(execCalls(), 1);
     assert.equal(rewinds, 0);
+    assert.deepEqual(await listReflections(workspace), []);
     assert.deepEqual(machine.transitions.map(({ from, to }) => `${from}->${to}`), ['Plan->Exec', 'Exec->Verify']);
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -70,7 +72,10 @@ test('a failed verification rewinds, replans and retries until it passes', async
     const results = [false, true];
     let rewinds = 0;
     const workflow = new AgentWorkflow(machine, executor, undefined, undefined, {
-      verify: async () => ({ verified: results.shift() ?? true, checks: [] }),
+      verify: async () => {
+        const verified = results.shift() ?? true;
+        return { verified, checks: verified ? [] : [{ criterion: 'build passes', status: 'failed', reason: 'tsc exited 2' }] };
+      },
       rewind: async () => { rewinds += 1; },
     });
     const outcome = await workflow.run(task(workspace), 'goal') as WorkflowOutcome;
@@ -78,6 +83,10 @@ test('a failed verification rewinds, replans and retries until it passes', async
     assert.equal(execCalls(), 2);
     assert.equal(rewinds, 1);
     assert.equal(machine.state, AgentState.Verify);
+    const reflections = await listReflections(workspace);
+    assert.equal(reflections.length, 1);
+    assert.equal(reflections[0]?.attempt, 1);
+    assert.equal(reflections[0]?.task_id, 'task-verify');
     assert.deepEqual(machine.transitions.map(({ from, to }) => `${from}->${to}`), [
       'Plan->Exec', 'Exec->Verify', 'Verify->Rewind', 'Rewind->Plan', 'Plan->Exec', 'Exec->Verify',
     ]);

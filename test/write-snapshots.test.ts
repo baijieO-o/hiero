@@ -89,6 +89,34 @@ test('rollback skips files a human edited after the agent wrote them', async () 
   }
 });
 
+test('a file-backed store rolls back after a restart and still skips human edits', async () => {
+  const root = await workspace();
+  const storeFile = join(root, 'state', 'write-snapshots.json');
+  try {
+    const first = new WriteSnapshotStore(storeFile);
+    const gateway = new ToolGateway();
+    gateway.register(createWriteFileTool(root, first));
+    await writeFile(join(root, 'a.txt'), 'original', 'utf8');
+    await writeFile(join(root, 'b.txt'), 'original', 'utf8');
+    await gateway.execute('write_file', { path: 'a.txt', content: 'agent a' }, 'intent-1', 'auto');
+    await gateway.execute('write_file', { path: 'b.txt', content: 'agent b' }, 'intent-1', 'auto');
+    await gateway.execute('write_file', { path: 'new.txt', content: 'fresh' }, 'intent-1', 'auto');
+    await writeFile(join(root, 'b.txt'), 'human b', 'utf8');
+
+    // A new instance simulates the process restarting before the rollback.
+    const restarted = new WriteSnapshotStore(storeFile);
+    const result = await restarted.rollback();
+
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'original');
+    assert.equal(await readFile(join(root, 'b.txt'), 'utf8'), 'human b');
+    await assert.rejects(stat(join(root, 'new.txt')));
+    assert.deepEqual(result.skipped, [join(root, 'b.txt')]);
+    assert.equal(result.restored.length, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('standard mode asks before workspace writes by default', async () => {
   const root = await workspace();
   try {

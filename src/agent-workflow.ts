@@ -5,6 +5,7 @@ import { AgentState, AgentStateMachine, type StateTransition } from './state-mac
 import { ContextManager } from './context-manager.js';
 import { runVerification, type VerificationResult } from './verification.js';
 import { appendRegressionCases, formatRegressionContext, listRegressionCases } from './regression-store.js';
+import { appendReflection, formatReflectionContext, listReflections } from './reflection-store.js';
 import { parsePlanDag, runPlanDag, type PlanDag, type PlanTask } from './plan-dag.js';
 
 export interface WorkflowTransition { (to: AgentState, verified?: boolean): StateTransition; }
@@ -103,7 +104,8 @@ export class AgentWorkflow {
           result = await this.executor.exec(task, goal, tools, { resume: resumed, onCheckpoint: this.options.onCheckpoint, onStep: this.stepVerifier(task) });
         } else {
           const regressionContext = formatRegressionContext(await listRegressionCases(task.workspace_path).catch(() => []));
-          const withRegressions = regressionContext ? `${goal}\n\n${regressionContext}` : goal;
+          const reflectionContext = formatReflectionContext(await listReflections(task.workspace_path).catch(() => []));
+          const withRegressions = [goal, regressionContext, reflectionContext].filter(Boolean).join('\n\n');
           const planGoal = previousFailure ? `${withRegressions}\n\nThe previous attempt failed. Fix these problems:\n${previousFailure}` : withRegressions;
           const planned = await this.executor.planWithCapabilities(task, planGoal, tools, { dag: this.options.useDagPlan === true });
           this.transitionState(AgentState.Exec);
@@ -122,6 +124,7 @@ export class AgentWorkflow {
           : [])).catch(() => undefined);
         lastFailure = failed.map((check) => check.criterion).join('; ');
         previousFailure = failed.map((check) => `- ${check.criterion}\n${check.guidance ? `[${check.failureKind}] ${check.guidance}\n` : ''}${check.errorSummary ?? check.reason ?? ''}`).join('\n');
+        await appendReflection(task.workspace_path, task.task_id, retries + 1, previousFailure).catch(() => undefined);
       } catch (cause) {
         if (cause instanceof HandoffRequiredError) {
           const document = await this.handoff(task, goal, { completed_steps: ['Context limit checked before model request.'], next_steps: ['Resume the task from the saved handoff document.'] });
@@ -132,6 +135,7 @@ export class AgentWorkflow {
         if (cause instanceof Error && 'code' in cause && (cause as { code?: unknown }).code === 'MOD-004' && cause.message.includes('maximum ReAct turns')) throw cause;
         lastFailure = cause instanceof Error ? cause.message : String(cause);
         previousFailure = lastFailure;
+        await appendReflection(task.workspace_path, task.task_id, retries + 1, previousFailure).catch(() => undefined);
       }
       if (retries >= maxRetries) {
         const document = await this.handoff(task, goal, { completed_steps: [`Verification failed after ${retries + 1} attempt(s): ${lastFailure}`], next_steps: ['Review the failed checks and resume from the handoff checkpoint.'] });
