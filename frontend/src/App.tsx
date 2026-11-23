@@ -1805,10 +1805,12 @@ type WorkspaceRequestBody = { workspace?: string } & (
   | { type: 'memory_save'; scope: MemoryScope; content: string }
   | { type: 'deep_memory_list' }
   | { type: 'deep_memory_delete'; scope: MemoryScope; id: string }
+  | { type: 'deep_memory_update'; scope: MemoryScope; id: string; content: string }
+  | { type: 'deep_memory_set_enabled'; scope: MemoryScope; id: string; enabled: boolean }
 );
 
 type MemoryScope = 'global' | 'project';
-type DeepMemoryEntry = { id: string; scope: MemoryScope; content: string; tags: string[]; created_at: string };
+type DeepMemoryEntry = { id: string; scope: MemoryScope; content: string; tags: string[]; created_at: string; source?: 'user' | 'inferred'; session_id?: string; enabled?: boolean };
 const MEMORY_SCOPE_LABELS: Record<MemoryScope, string> = { global: '全局准则', project: '项目记忆' };
 
 function requestWorkspace(body: WorkspaceRequestBody): Promise<Record<string, unknown>> {
@@ -2310,10 +2312,19 @@ function DeepMemoryBuffer(): ReactElement {
 
   useEffect(refresh, []);
 
+  const act = (request: Parameters<typeof requestWorkspace>[0]) => {
+    requestWorkspace(request).then(refresh).catch((cause: Error) => setError(cause.message));
+  };
+
   const remove = (entry: DeepMemoryEntry) => {
-    requestWorkspace({ type: 'deep_memory_delete', scope: entry.scope, id: entry.id })
-      .then(refresh)
-      .catch((cause: Error) => setError(cause.message));
+    if (!window.confirm('删除会移除这条记忆在记忆文件中的副本，不会清除备份、Git 历史或聊天记录中的内容。确定删除？')) return;
+    act({ type: 'deep_memory_delete', scope: entry.scope, id: entry.id });
+  };
+
+  const edit = (entry: DeepMemoryEntry) => {
+    const next = window.prompt('修改这条记忆的内容：', entry.content);
+    if (next === null || !next.trim() || next.trim() === entry.content) return;
+    act({ type: 'deep_memory_update', scope: entry.scope, id: entry.id, content: next.trim() });
   };
 
   return (
@@ -2325,13 +2336,23 @@ function DeepMemoryBuffer(): ReactElement {
             <button type="button" onClick={refresh}>刷新</button>
           </div>
           <ul aria-label="深层记忆列表">
-            {entries.map((entry) => (
-              <li key={entry.id}>
-                <small>{entry.scope === 'global' ? '全局' : '项目'} · {entry.created_at.slice(0, 16).replace('T', ' ')}{entry.tags.length ? ` · ${entry.tags.join(', ')}` : ''}</small>
-                <p>{entry.content}</p>
-                <button type="button" onClick={() => remove(entry)}>删除</button>
-              </li>
-            ))}
+            {entries.map((entry) => {
+              const enabled = entry.enabled !== false;
+              return (
+                <li key={entry.id}>
+                  <small>
+                    {entry.scope === 'global' ? '全局' : '项目'} · {entry.source === 'inferred' ? '系统推断' : '用户告知'}
+                    {entry.session_id ? ' · 仅本次会话' : ''}
+                    {!enabled ? ' · 已停用' : ''}
+                    {' · '}{entry.created_at.slice(0, 16).replace('T', ' ')}{entry.tags.length ? ` · ${entry.tags.join(', ')}` : ''}
+                  </small>
+                  <p>{entry.content}</p>
+                  <button type="button" onClick={() => act({ type: 'deep_memory_set_enabled', scope: entry.scope, id: entry.id, enabled: !enabled })}>{enabled ? '停用' : '启用'}</button>
+                  <button type="button" onClick={() => edit(entry)}>编辑</button>
+                  <button type="button" onClick={() => remove(entry)}>删除</button>
+                </li>
+              );
+            })}
           </ul>
           {entries.length === 0 && <p className="skills-status">还没有深层记忆。模型可通过 memory_remember 写入，或在对话中让它记住事情。</p>}
           {error && <p className="skills-error">{error}</p>}

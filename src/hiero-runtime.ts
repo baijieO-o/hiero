@@ -93,7 +93,7 @@ import { canBranchFrom, createSerializedApprover, runBranchRetry } from './branc
 import { isGitRepo } from './worktree.js';
 import { buildSkillCandidate, promoteSkillWithApproval } from './skill-promotion.js';
 import { appendMemory, memoryContext, readMemory, saveMemory, type MemoryScope } from './memory-store.js';
-import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder } from './deep-memory.js';
+import { addDeepMemory, deepRecallContext, deleteDeepMemory, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder, setDeepMemoryEnabled, updateDeepMemory } from './deep-memory.js';
 import { createEmbedder, embeddingConfigFromEnv } from './embedding.js';
 import type { ExtensionReady, SystemAgentError } from './system_agent.js';
 import type { WebSocket } from 'ws';
@@ -312,8 +312,8 @@ const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     type: 'function',
     function: {
       name: 'memory_remember',
-      description: 'Store one short fact, preference, or decision in long-term memory (layer 2, max 500 characters). Use scope "project" for workspace facts and "global" for user-wide preferences.',
-      parameters: { type: 'object', additionalProperties: false, properties: { content: { type: 'string' }, scope: { type: 'string', enum: ['global', 'project'] }, tags: { type: 'array', items: { type: 'string' } } }, required: ['content', 'scope'] },
+      description: 'Store one short fact, preference, or decision in long-term memory (layer 2, max 500 characters). Use scope "project" for workspace facts and "global" for user-wide preferences. Set source to "user" when the user stated it, or "inferred" when you derived it yourself. Set session_only to true to keep it for this conversation only.',
+      parameters: { type: 'object', additionalProperties: false, properties: { content: { type: 'string' }, scope: { type: 'string', enum: ['global', 'project'] }, tags: { type: 'array', items: { type: 'string' } }, source: { type: 'string', enum: ['user', 'inferred'] }, session_only: { type: 'boolean' } }, required: ['content', 'scope'] },
     },
   },
   {
@@ -398,10 +398,10 @@ function chatToolDefinitions(subagent: SubagentSettings): ModelToolDefinition[] 
  * Builds the model messages for a chat turn. When the client has compacted earlier history, the summary is placed
  * before the messages the client kept verbatim.
  */
-async function buildChatMessages(workspacePath: string, history: RuntimeChatRequest['messages'], compactedSummary?: string, skillMetadata = ''): Promise<ModelMessage[]> {
+async function buildChatMessages(workspacePath: string, history: RuntimeChatRequest['messages'], compactedSummary?: string, skillMetadata = '', conversationId?: string): Promise<ModelMessage[]> {
   const memory = await memoryContext(workspacePath);
   const lastUser = [...history].reverse().find((item) => item.role === 'user')?.content ?? '';
-  const recalled = await deepRecallContext(workspacePath, lastUser);
+  const recalled = await deepRecallContext(workspacePath, lastUser, conversationId);
   const memorySections = [memory ? `Memory:\n${memory}` : '', recalled ? `Relevant long-term memory:\n${recalled}` : '', skillMetadata ? `Available skills (call load_skill to read one before following it):\n${skillMetadata}` : ''].filter(Boolean);
   const systemContent = [CHAT_SYSTEM_PROMPT, ...memorySections].join('\n\n');
   const summary = typeof compactedSummary === 'string' && compactedSummary.trim() ? [{ role: 'user' as const, content: `${COMPACT_SUMMARY_PREFIX}\n${compactedSummary.trim()}` }] : [];
@@ -467,7 +467,7 @@ function isUsageStatsRequest(message: unknown): message is UsageStatsRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'usage_stats' && typeof (message as { request_id?: unknown }).request_id === 'string';
 }
 
-interface ChatUsageRequest { type: 'chat_usage'; request_id: string; messages: RuntimeChatRequest['messages']; workspace?: string; subagent?: Partial<SubagentSettings>; compacted_summary?: string }
+interface ChatUsageRequest { type: 'chat_usage'; request_id: string; messages: RuntimeChatRequest['messages']; workspace?: string; subagent?: Partial<SubagentSettings>; compacted_summary?: string; conversation_id?: string }
 
 function isChatUsageRequest(message: unknown): message is ChatUsageRequest {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'chat_usage' && typeof (message as { request_id?: unknown }).request_id === 'string';
@@ -628,12 +628,14 @@ type WorkspaceRequest = { workspace?: string } & (
   | { type: 'memory_save'; request_id: string; scope: MemoryScope; content: string }
   | { type: 'deep_memory_list'; request_id: string }
   | { type: 'deep_memory_delete'; request_id: string; scope: MemoryScope; id: string }
+  | { type: 'deep_memory_update'; request_id: string; scope: MemoryScope; id: string; content: string }
+  | { type: 'deep_memory_set_enabled'; request_id: string; scope: MemoryScope; id: string; enabled: boolean }
 );
 
 function isWorkspaceRequest(message: unknown): message is WorkspaceRequest {
   if (typeof message !== 'object' || message === null) return false;
   const type = (message as { type?: unknown }).type;
-  return type === 'folder_pick' || type === 'fs_list' || type === 'fs_read' || type === 'term_exec' || type === 'skill_list' || type === 'skill_read' || type === 'skill_save' || type === 'skill_delete' || type === 'memory_read' || type === 'memory_save' || type === 'deep_memory_list' || type === 'deep_memory_delete';
+  return type === 'folder_pick' || type === 'fs_list' || type === 'fs_read' || type === 'term_exec' || type === 'skill_list' || type === 'skill_read' || type === 'skill_save' || type === 'skill_delete' || type === 'memory_read' || type === 'memory_save' || type === 'deep_memory_list' || type === 'deep_memory_delete' || type === 'deep_memory_update' || type === 'deep_memory_set_enabled';
 }
 
 /** Tool names from HIERO_HITL_TOOLS (comma-separated) that always pause for approval outside auto mode. */
@@ -819,6 +821,8 @@ export class HieroRuntime {
       else if (request.type === 'memory_save') reply({ ok: true, memory: await saveMemory(root, request.scope, request.content) });
       else if (request.type === 'deep_memory_list') reply({ ok: true, entries: (await listDeepMemory(root)).map(({ embedding: _vector, ...entry }) => entry) });
       else if (request.type === 'deep_memory_delete') { await deleteDeepMemory(root, request.scope, request.id); reply({ ok: true }); }
+      else if (request.type === 'deep_memory_update') { await updateDeepMemory(root, request.scope, request.id, request.content); reply({ ok: true }); }
+      else if (request.type === 'deep_memory_set_enabled') { await setDeepMemoryEnabled(root, request.scope, request.id, request.enabled); reply({ ok: true }); }
       else {
         const mode = parsePermissionMode(request.permission, 'standard');
         const policy = checkCommandPolicy(request.command, mode);
@@ -887,7 +891,7 @@ export class HieroRuntime {
    const workspacePath = this.workspaceFor(request.workspace);
    const subagent = normalizeSubagentSettings(request.subagent);
    const tools = chatToolDefinitions(subagent);
-   const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary);
+   const messages = await buildChatMessages(workspacePath, request.messages, request.compacted_summary, '', request.conversation_id);
    this.runtime.send({ type: 'CHAT_USAGE', payload: { request_id: request.request_id, usage: breakdownContextUsage(messages, tools) } }, client);
   }
 
@@ -1394,7 +1398,7 @@ export class HieroRuntime {
     const toolDefinitions = chatToolDefinitions(subagent);
     await this.capabilityRouter.discoverSkills(workspacePath).catch(() => undefined);
     const sharedContext = await sharedPagesContext(request.shared_urls);
-    const messages = await buildChatMessages(workspacePath, sharedContext ? withSharedContext(request.messages, sharedContext) : request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata());
+    const messages = await buildChatMessages(workspacePath, sharedContext ? withSharedContext(request.messages, sharedContext) : request.messages, request.compacted_summary, this.capabilityRouter.systemPromptMetadata(), request.conversation_id);
     const trace = new ChatTrace();
     const sendTrace = () => emit({ type: 'CHAT_TRACE', payload: { request_id: request.request_id, events: trace.snapshot() } });
     try {
@@ -1445,7 +1449,7 @@ export class HieroRuntime {
           } else if (call.function.name === 'ask_user') {
             result = await this.runAskUser(call.function.arguments, signal);
           } else {
-            result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode, request.category_rules);
+            result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode, request.category_rules, request.conversation_id);
           }
           endToolCall({ ok: !isToolErrorResult(result), detail: summarizeForTrace(result) });
           sendTrace();
@@ -1505,7 +1509,7 @@ export class HieroRuntime {
    * Memory writes change persistent state, so they are irreversible and need approval outside auto mode.
    */
   /** Builds the per-chat tool set. `applyHotPlug=false` keeps disabled tools listed, for the management API. */
-  private createChatToolGateway(workspacePath: string, applyHotPlug = true, categoryRules?: unknown): ToolGateway {
+  private createChatToolGateway(workspacePath: string, applyHotPlug = true, categoryRules?: unknown, conversationId?: string): ToolGateway {
     const tools = new ToolGateway();
     tools.setCategoryRules(normalizeCategoryRules(categoryRules));
     tools.register(createReadFileTool(workspacePath));
@@ -1523,18 +1527,22 @@ export class HieroRuntime {
       inputSchema: z.object({ query: z.string().default('') }),
       effect: 'read',
       execute: async ({ query }) => {
-        const hits = await searchDeepMemory(workspacePath, query);
-        return { hits: hits.map(({ id, scope, content, tags, score }) => ({ id, scope, content, tags, score })) };
+        const hits = await searchDeepMemory(workspacePath, query, 5, conversationId);
+        return { hits: hits.map(({ id, scope, content, tags, score, source }) => ({ id, scope, content, tags, score, source })) };
       },
     });
     tools.register({
       name: 'memory_remember',
-      inputSchema: z.object({ scope: z.string().optional(), content: z.string().default(''), tags: z.array(z.string()).optional() }),
+      inputSchema: z.object({ scope: z.string().optional(), content: z.string().default(''), tags: z.array(z.string()).optional(), source: z.string().optional(), session_only: z.boolean().optional() }),
       irreversible: true,
       effect: 'workspace',
       execute: async (args) => {
-        const entry = await addDeepMemory(workspacePath, args.scope === 'global' ? 'global' : 'project', args.content, args.tags ?? []);
-        return { ok: true, id: entry.id };
+        const entry = await addDeepMemory(workspacePath, args.scope === 'global' ? 'global' : 'project', args.content, {
+          tags: args.tags ?? [],
+          source: args.source === 'inferred' ? 'inferred' : 'user',
+          ...(args.session_only && conversationId ? { sessionId: conversationId } : {}),
+        });
+        return { ok: true, id: entry.id, source: entry.source };
       },
     });
     tools.register({
@@ -1603,10 +1611,10 @@ export class HieroRuntime {
     }
   }
 
-  private async runChatTool(name: string, rawArguments: string, workspacePath: string, mode: PermissionMode, categoryRules?: unknown): Promise<string> {
+  private async runChatTool(name: string, rawArguments: string, workspacePath: string, mode: PermissionMode, categoryRules?: unknown, conversationId?: string): Promise<string> {
     try {
       const args = JSON.parse(rawArguments) as unknown;
-      const record = await this.createChatToolGateway(workspacePath, true, categoryRules).execute(name, args, randomUUID(), mode);
+      const record = await this.createChatToolGateway(workspacePath, true, categoryRules, conversationId).execute(name, args, randomUUID(), mode);
       return JSON.stringify(record.result);
     } catch (cause) {
       return JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) });

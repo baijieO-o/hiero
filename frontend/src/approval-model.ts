@@ -29,6 +29,7 @@ export function explainApproval(toolName: string, input: unknown): ApprovalExpla
         reversible: true,
       };
     case 'deep_memory_add':
+    case 'memory_remember':
     case 'memory_save':
     case 'memory_append':
       return {

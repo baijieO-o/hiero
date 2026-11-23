@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { addDeepMemory, DEEP_MEMORY_ENTRY_LIMIT_CHARS, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder } from '../src/deep-memory.js';
+import { addDeepMemory, DEEP_MEMORY_ENTRY_LIMIT_CHARS, listDeepMemory, searchDeepMemory, setDeepMemoryEmbedder, setDeepMemoryEnabled, updateDeepMemory } from '../src/deep-memory.js';
 import { cosineSimilarity, createEmbedder, embeddingConfigFromEnv } from '../src/embedding.js';
 
 // Fake embedder: vectors point along a topic axis so "install" and "package manager" are semantically close.
@@ -116,5 +116,46 @@ test('an entry over the MEM-001 character limit is rejected', async () => {
       addDeepMemory(workspace, 'project', 'x'.repeat(DEEP_MEMORY_ENTRY_LIMIT_CHARS + 1)),
       /MEM-001/,
     );
+  });
+});
+
+test('disabled memories are not recalled but stay listed', async () => {
+  await withWorkspace(async (workspace) => {
+    const entry = await addDeepMemory(workspace, 'project', 'Use pnpm for installing dependencies');
+    await setDeepMemoryEnabled(workspace, 'project', entry.id, false);
+    assert.deepEqual(await searchDeepMemory(workspace, 'install pnpm'), []);
+    const listed = await listDeepMemory(workspace);
+    assert.equal(listed.find((item) => item.id === entry.id)?.enabled, false);
+  });
+});
+
+test('session-only memories are recalled only within their own conversation', async () => {
+  await withWorkspace(async (workspace) => {
+    await addDeepMemory(workspace, 'project', 'Use pnpm for installing dependencies', { sessionId: 'conv-a' });
+    assert.equal((await searchDeepMemory(workspace, 'install pnpm', 5, 'conv-a')).length, 1);
+    assert.deepEqual(await searchDeepMemory(workspace, 'install pnpm', 5, 'conv-b'), []);
+    assert.deepEqual(await searchDeepMemory(workspace, 'install pnpm'), []);
+  });
+});
+
+test('updating a memory keeps its id and source', async () => {
+  await withWorkspace(async (workspace) => {
+    const entry = await addDeepMemory(workspace, 'project', 'Use pnpm for installing dependencies', { source: 'inferred' });
+    const updated = await updateDeepMemory(workspace, 'project', entry.id, 'Use pnpm 9 for installing dependencies');
+    assert.equal(updated.id, entry.id);
+    assert.equal(updated.source, 'inferred');
+    assert.equal(updated.content, 'Use pnpm 9 for installing dependencies');
+  });
+});
+
+test('legacy entries without source or enabled fields load as enabled user memories', async () => {
+  await withWorkspace(async (workspace) => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(join(workspace, '.agent'), { recursive: true });
+    const legacy = { id: 'legacy-1', scope: 'project', content: 'Use pnpm for installing dependencies', tags: [], created_at: '2024-01-01T00:00:00.000Z' };
+    await writeFile(join(workspace, '.agent', 'deep-memory.jsonl'), JSON.stringify(legacy) + '\n', 'utf8');
+    const listed = await listDeepMemory(workspace);
+    assert.equal(listed[0]?.enabled, undefined);
+    assert.equal((await searchDeepMemory(workspace, 'install pnpm')).length, 1);
   });
 });

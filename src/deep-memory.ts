@@ -17,6 +17,21 @@ export interface DeepMemoryEntry {
   tags: string[];
   created_at: string;
   embedding?: number[];
+  /** 'user' when the user stated it; 'inferred' when the model wrote it on its own. Missing on entries saved before this field existed. */
+  source?: MemorySource;
+  /** Set for session-only memories; they are recalled only inside that conversation. */
+  session_id?: string;
+  /** Disabled entries are kept but never recalled. Missing means enabled. */
+  enabled?: boolean;
+  updated_at?: string;
+}
+
+export type MemorySource = 'user' | 'inferred';
+
+export interface AddDeepMemoryOptions {
+  tags?: string[];
+  source?: MemorySource;
+  sessionId?: string;
 }
 
 export interface DeepMemoryHit extends DeepMemoryEntry {
@@ -58,11 +73,25 @@ export async function listDeepMemory(workspacePath: string): Promise<DeepMemoryE
   return entries.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
-export async function addDeepMemory(workspacePath: string, scope: MemoryScope, content: string, tags: string[] = []): Promise<DeepMemoryEntry> {
+function checkContent(content: string): string {
   const text = content.trim();
   if (!text) throw new Error('记忆内容不能为空。');
   if (text.length > DEEP_MEMORY_ENTRY_LIMIT_CHARS) throw new Error(`单条记忆超过上限 ${DEEP_MEMORY_ENTRY_LIMIT_CHARS} 字符（MEM-001）。`);
-  const entry: DeepMemoryEntry = { id: randomUUID(), scope, content: text, tags: tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 8), created_at: new Date().toISOString() };
+  return text;
+}
+
+export async function addDeepMemory(workspacePath: string, scope: MemoryScope, content: string, options: AddDeepMemoryOptions = {}): Promise<DeepMemoryEntry> {
+  const text = checkContent(content);
+  const entry: DeepMemoryEntry = {
+    id: randomUUID(),
+    scope,
+    content: text,
+    tags: (options.tags ?? []).map((tag) => tag.trim()).filter(Boolean).slice(0, 8),
+    created_at: new Date().toISOString(),
+    source: options.source ?? 'user',
+    enabled: true,
+    ...(options.sessionId ? { session_id: options.sessionId } : {}),
+  };
   const vector = await embedSafely([entryText(entry)]);
   if (vector?.[0]) entry.embedding = vector[0];
   const entries = await readEntries(scope, workspacePath);
@@ -70,6 +99,27 @@ export async function addDeepMemory(workspacePath: string, scope: MemoryScope, c
   return entry;
 }
 
+/** Replaces an entry's text. The id, source, and scope are kept; the vector is recomputed. */
+export async function updateDeepMemory(workspacePath: string, scope: MemoryScope, id: string, content: string): Promise<DeepMemoryEntry> {
+  const text = checkContent(content);
+  const entries = await readEntries(scope, workspacePath);
+  const target = entries.find((entry) => entry.id === id);
+  if (!target) throw new Error('找不到这条记忆。');
+  const updated: DeepMemoryEntry = { ...target, content: text, updated_at: new Date().toISOString() };
+  delete updated.embedding;
+  const vector = await embedSafely([entryText(updated)]);
+  if (vector?.[0]) updated.embedding = vector[0];
+  await writeEntries(scope, workspacePath, entries.map((entry) => (entry.id === id ? updated : entry)));
+  return updated;
+}
+
+export async function setDeepMemoryEnabled(workspacePath: string, scope: MemoryScope, id: string, enabled: boolean): Promise<void> {
+  const entries = await readEntries(scope, workspacePath);
+  if (!entries.some((entry) => entry.id === id)) throw new Error('找不到这条记忆。');
+  await writeEntries(scope, workspacePath, entries.map((entry) => (entry.id === id ? { ...entry, enabled } : entry)));
+}
+
+/** Removes the stored copy from the memory file. It does not touch copies in backups, git history, or chat transcripts. */
 export async function deleteDeepMemory(workspacePath: string, scope: MemoryScope, id: string): Promise<void> {
   const entries = await readEntries(scope, workspacePath);
   await writeEntries(scope, workspacePath, entries.filter((entry) => entry.id !== id));
@@ -86,8 +136,8 @@ function tokenize(text: string): Set<string> {
   return tokens;
 }
 
-export async function deepRecallContext(workspacePath: string, query: string): Promise<string> {
-  const hits = await searchDeepMemory(workspacePath, query, 5);
+export async function deepRecallContext(workspacePath: string, query: string, sessionId?: string): Promise<string> {
+  const hits = await searchDeepMemory(workspacePath, query, 5, sessionId);
   return hits.map((hit) => `- [${hit.scope === 'global' ? '全局' : '项目'}] ${hit.content}`).join('\n');
 }
 
@@ -106,10 +156,11 @@ async function embedSafely(texts: string[]): Promise<number[][] | undefined> {
 }
 
 /** Hybrid recall: keyword overlap always applies; when an embedder is configured, cosine similarity can also surface an entry. */
-export async function searchDeepMemory(workspacePath: string, query: string, limit = 5): Promise<DeepMemoryHit[]> {
+/** Recalls enabled entries. Session-only entries are visible only when `sessionId` matches their session. */
+export async function searchDeepMemory(workspacePath: string, query: string, limit = 5, sessionId?: string): Promise<DeepMemoryHit[]> {
   const queryTokens = [...tokenize(query)];
   if (queryTokens.length === 0) return [];
-  const entries = await listDeepMemory(workspacePath);
+  const entries = (await listDeepMemory(workspacePath)).filter((entry) => entry.enabled !== false && (!entry.session_id || entry.session_id === sessionId));
   const queryVector = entries.some((entry) => entry.embedding) ? (await embedSafely([query]))?.[0] : undefined;
   return entries
     .map((entry) => {
