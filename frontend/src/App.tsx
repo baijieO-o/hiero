@@ -56,7 +56,12 @@ const PANEL_TITLES: Record<PanelKind, string> = {
 const PANEL_KINDS = Object.keys(PANEL_TITLES).filter((kind) => kind !== 'blank') as PanelKind[];
 
 const HIDDEN_RAIL_KINDS: PanelKind[] = ['docs'];
-const RAIL_KINDS = PANEL_KINDS.filter((kind) => !HIDDEN_RAIL_KINDS.includes(kind));
+// 按常用度排序：越常用越靠前
+const RAIL_ORDER: PanelKind[] = ['chat', 'terminal', 'files', 'browser', 'diff', 'skills', 'memory', 'schedules', 'process', 'usage', 'debug', 'settings'];
+const RAIL_KINDS = [
+  ...RAIL_ORDER.filter((kind) => PANEL_KINDS.includes(kind) && !HIDDEN_RAIL_KINDS.includes(kind)),
+  ...PANEL_KINDS.filter((kind) => !RAIL_ORDER.includes(kind) && !HIDDEN_RAIL_KINDS.includes(kind)),
+];
 
 const DEFAULT_SCREEN = '默认';
 
