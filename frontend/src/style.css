@@ -73,7 +73,7 @@ button, textarea, select { font: inherit; }
 .screen-tab-close:hover { color: var(--text-strong); opacity: 1; }
 .screen-add input { width: 110px; padding: 6px 9px; border: 1px dashed var(--border); border-radius: 7px; outline: none; color: var(--text); background: var(--input-bg); font-size: 11px; }
 .screen-add input:focus { border-color: var(--accent-mid); }
-.workspace-body { flex: 1 1 auto; min-height: 0; height: calc(100vh - 48px); display: flex; overflow: hidden; }
+.workspace-body { flex: 1 1 auto; min-height: 0; height: calc(100vh - 48px - 36px); display: flex; overflow: hidden; }
 .skills-panel { display: flex; height: 100%; min-height: 0; overflow: hidden; }
 .skills-categories { flex: 0 0 150px; display: flex; flex-direction: column; gap: 2px; padding: 8px; border-right: 1px solid var(--line, #2a2f36); overflow-y: auto; }
 .skills-categories button { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
@@ -153,7 +153,7 @@ button, textarea, select { font: inherit; }
 .command-prompt { color: var(--accent); font-family: 'JetBrains Mono', Consolas, monospace; font-weight: 800; }
 .command-bar input { flex: 1; min-width: 0; border: none; outline: none; color: var(--text); background: transparent; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; }
 .command-bar input::placeholder { color: var(--text-muted); }
-.buffer-bar { display: flex; align-items: center; gap: 12px; height: 50px; padding: 0 20px; border-top: 1px solid var(--surface-3); background: color-mix(in srgb, var(--bg) calc(var(--panel-opacity) * 92%), transparent); }
+.buffer-bar { display: flex; align-items: center; gap: 12px; height: 36px; padding: 0 20px; border-top: 1px solid var(--surface-3); background: color-mix(in srgb, var(--bg) calc(var(--panel-opacity) * 92%), transparent); }
 .buffer-list { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; min-height: 0; overflow-x: auto; scrollbar-width: thin; }
 .buffer-list:empty { flex: 0 0 0; }
 .buffer-chip { display: inline-flex; align-items: center; border: 1px solid transparent; border-radius: 4px; background: var(--surface-2); white-space: nowrap; }
