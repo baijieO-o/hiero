@@ -9,20 +9,34 @@ import { categoryOf, DEFAULT_CATEGORY_RULES, type CategoryRules } from './tool-c
  */
 export type ToolEffect = 'read' | 'workspace' | 'external';
 
-export interface RegisteredTool<TInput, TResult> {
+export interface RegisteredTool<TInput, TResult, TExecutable = TInput> {
   name: string;
   inputSchema: ZodType<TInput>;
-  execute(input: TInput): Promise<TResult> | TResult;
+  execute(input: TExecutable): Promise<TResult> | TResult;
   irreversible?: boolean;
   effect?: ToolEffect;
   networkAccess?: boolean;
+  /**
+   * Optional preview for approval. Runs on the validated model input and returns what the operator sees
+   * plus a builder for the executable input from the hunks they accepted. Null means nothing would change.
+   */
+  review?: (input: TInput) => Promise<ReviewPlan<TExecutable>> | ReviewPlan<TExecutable>;
 }
 
-/** Asks a human to approve an irreversible tool call. Resolves true to allow the call. */
-export type ApprovalHook = (toolName: string, input: unknown) => Promise<{ approved: boolean }>;
+export interface ReviewPlan<TExecutable> {
+  /** Shown to the operator, e.g. one entry per hunk. */
+  preview: unknown;
+  /** Hunk ids the operator may accept or reject. */
+  hunkIds: number[];
+  /** Builds the executable input from the accepted hunk ids, or null when no change remains. */
+  apply: (acceptedHunks: ReadonlySet<number>) => TExecutable | null;
+}
+
+/** Asks a human to approve an irreversible tool call. `accepted_hunks` limits a reviewed change to chosen hunks. */
+export type ApprovalHook = (toolName: string, input: unknown) => Promise<{ approved: boolean; accepted_hunks?: number[] | undefined }>;
 
 export class ToolGateway {
-  private readonly tools = new Map<string, RegisteredTool<unknown, unknown>>();
+  private readonly tools = new Map<string, RegisteredTool<unknown, unknown, unknown>>();
   private approver: ApprovalHook | undefined;
   private breakpoints: ReadonlySet<string> = new Set();
   private categoryRules: CategoryRules = DEFAULT_CATEGORY_RULES;
@@ -50,8 +64,8 @@ export class ToolGateway {
     return [...this.tools.keys()];
   }
 
-  public register<TInput, TResult>(tool: RegisteredTool<TInput, TResult>): void {
-    this.tools.set(tool.name, tool as RegisteredTool<unknown, unknown>);
+  public register<TInput, TResult, TExecutable = TInput>(tool: RegisteredTool<TInput, TResult, TExecutable>): void {
+    this.tools.set(tool.name, tool as RegisteredTool<unknown, unknown, unknown>);
   }
 
   /** MCP tools may have arbitrary external effects, so they are treated as irreversible external tools by default. */
@@ -69,7 +83,7 @@ export class ToolGateway {
     intentId: string,
     permissionMode: PermissionMode,
   ): Promise<EvidenceRecord> {
-    const tool = this.tools.get(toolName) as RegisteredTool<TInput, TResult> | undefined;
+    const tool = this.tools.get(toolName) as RegisteredTool<TInput, TResult, unknown> | undefined;
     if (!tool) throw error('GOV-001', 'blocker', `Tool '${toolName}' is not registered.`, 'Register the tool before attempting execution.');
     const parsed = tool.inputSchema.safeParse(rawInput);
     if (!parsed.success) {
@@ -82,18 +96,38 @@ export class ToolGateway {
       || (tool.irreversible === true && permissionMode === 'strict')
       || (categoryAsks && tool.effect !== 'read')
       || this.breakpoints.has(toolName);
-    if (needsApproval && permissionMode !== 'auto') {
-      if (!this.approver) {
-        throw error('GOV-001', 'blocker', `Tool '${toolName}' requires approval${this.breakpoints.has(toolName) ? ' (breakpoint)' : ' for irreversible effects'}.`, 'Obtain human approval or use an allowed permission mode.');
+    const requiresApproval = needsApproval && permissionMode !== 'auto';
+    const approver = this.approver;
+    if (requiresApproval && !approver) {
+      throw error('GOV-001', 'blocker', `Tool '${toolName}' requires approval${this.breakpoints.has(toolName) ? ' (breakpoint)' : ' for irreversible effects'}.`, 'Obtain human approval or use an allowed permission mode.');
+    }
+
+    // Tools with a review always run it, so the executable input is built the same way in every mode.
+    let executable: unknown = parsed.data;
+    if (tool.review) {
+      const plan = await tool.review(parsed.data);
+      let accepted = new Set(plan.hunkIds);
+      if (requiresApproval && approver) {
+        const decision = await approver(toolName, { ...parsed.data, review: plan.preview, hunk_ids: plan.hunkIds });
+        if (!decision.approved) {
+          throw error('GOV-001', 'blocker', `Tool '${toolName}' was denied by the operator.`, 'Choose a different approach or ask for approval again.');
+        }
+        accepted = new Set(decision.accepted_hunks ?? plan.hunkIds);
       }
-      const decision = await this.approver(toolName, parsed.data);
+      const next = plan.apply(accepted);
+      if (next === null) {
+        throw error('GOV-001', 'blocker', `Tool '${toolName}' made no change: no hunks were accepted or nothing differs.`, 'Choose a different approach or ask for approval again.');
+      }
+      executable = next;
+    } else if (requiresApproval && approver) {
+      const decision = await approver(toolName, parsed.data);
       if (!decision.approved) {
         throw error('GOV-001', 'blocker', `Tool '${toolName}' was denied by the operator.`, 'Choose a different approach or ask for approval again.');
       }
     }
 
     try {
-      const result = await tool.execute(parsed.data);
+      const result = await tool.execute(executable as TInput);
       return {
         evidence_id: randomUUID(),
         intent_id: intentId,

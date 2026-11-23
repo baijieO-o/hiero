@@ -9,6 +9,8 @@ export interface ApprovalRequest {
 
 export interface ApprovalDecision {
   approved: boolean;
+  /** For file edits, the hunk ids the operator accepted. Omitted means every hunk. */
+  accepted_hunks?: number[] | undefined;
 }
 
 interface PendingApproval {
@@ -36,8 +38,8 @@ export class ApprovalBroker {
   }
 
   /** Returns false when the id is unknown or already settled, so duplicate replies are ignored. */
-  public respond(approvalId: string, approved: boolean): boolean {
-    return this.settle(approvalId, { approved });
+  public respond(approvalId: string, approved: boolean, acceptedHunks?: number[]): boolean {
+    return this.settle(approvalId, acceptedHunks === undefined ? { approved } : { approved, accepted_hunks: acceptedHunks });
   }
 
   public pendingRequests(): ApprovalRequest[] {

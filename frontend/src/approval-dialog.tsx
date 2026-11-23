@@ -11,9 +11,19 @@ export interface ApprovalDialogRequest {
 /** The backend auto-denies after this long (ApprovalBroker default). The countdown mirrors it. */
 export const APPROVAL_TIMEOUT_MS = 120_000;
 
+/** Hunk list the backend attaches to file-edit approvals. Empty or absent for other tools. */
+interface ReviewHunk { id: number; removed: string[]; added: string[] }
+
+function readHunks(input: unknown): ReviewHunk[] {
+  const review = (input as { review?: { hunks?: unknown } } | null)?.review;
+  if (!review || !Array.isArray(review.hunks)) return [];
+  return review.hunks.filter((hunk): hunk is ReviewHunk => typeof hunk?.id === 'number' && Array.isArray(hunk.removed) && Array.isArray(hunk.added));
+}
+
 interface ApprovalDialogProps {
   request: ApprovalDialogRequest;
-  onRespond: (approved: boolean) => void;
+  /** `acceptedHunks` is set only for file edits: the hunk ids the operator kept. */
+  onRespond: (approved: boolean, acceptedHunks?: number[]) => void;
   now?: () => number;
   /** Total queued requests, including this one. Batch controls appear when it is above 1. */
   pendingCount?: number;
@@ -27,6 +37,8 @@ export function ApprovalDialog({ request, onRespond, now = Date.now, pendingCoun
   const [deadline] = useState(() => now() + APPROVAL_TIMEOUT_MS);
   const [remaining, setRemaining] = useState(() => secondsLeft(deadline, now()));
   const explanation = explainApproval(request.tool_name, request.input);
+  const hunks = readHunks(request.input);
+  const [chosen, setChosen] = useState<number[]>(() => hunks.map((hunk) => hunk.id));
   const batching = pendingCount > 1 && onRespondAll !== undefined;
   const risk = batching && queueRisk ? queueRisk : explanation.risk;
 
@@ -64,13 +76,35 @@ export function ApprovalDialog({ request, onRespond, now = Date.now, pendingCoun
           <dt>工具</dt><dd>{request.tool_name}</dd>
           <dt>可撤销</dt><dd>{explanation.reversible ? '可以（部分）' : '否'}</dd>
         </dl>
+        {hunks.length > 0 && (
+          <fieldset className="approval-hunks">
+            <legend>改动块（默认全部保留，取消勾选即不写入）</legend>
+            {hunks.map((hunk) => (
+              <label key={hunk.id} className="approval-hunk">
+                <input
+                  type="checkbox"
+                  checked={chosen.includes(hunk.id)}
+                  onChange={(event) => setChosen((current) => event.target.checked ? [...current, hunk.id] : current.filter((id) => id !== hunk.id))}
+                />
+                <span>第 {hunk.id + 1} 块：删除 {hunk.removed.length} 行，新增 {hunk.added.length} 行</span>
+                <pre>{[...hunk.removed.map((line) => `- ${line}`), ...hunk.added.map((line) => `+ ${line}`)].join('\n')}</pre>
+              </label>
+            ))}
+          </fieldset>
+        )}
         <details className="approval-details">
           <summary>查看参数</summary>
           <pre>{detail}</pre>
         </details>
         <div className="approval-actions">
           <button type="button" className="approval-deny" autoFocus onClick={() => onRespond(false)}>拒绝（Esc）</button>
-          <button type="button" className="approval-approve" onClick={() => onRespond(true)}>同意执行</button>
+          {hunks.length > 0 ? (
+            <button type="button" className="approval-approve" disabled={chosen.length === 0} onClick={() => onRespond(chosen.length > 0, [...chosen].sort((a, b) => a - b))}>
+              同意所选（{chosen.length}/{hunks.length} 块）
+            </button>
+          ) : (
+            <button type="button" className="approval-approve" onClick={() => onRespond(true)}>同意执行</button>
+          )}
         </div>
         {batching && (
           <div className="approval-actions approval-batch-actions">

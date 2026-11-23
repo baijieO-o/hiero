@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
-import type { RegisteredTool } from './tool-gateway.js';
+import { applyHunks, computeHunks, type Hunk } from './hunk-diff.js';
+import type { RegisteredTool, ReviewPlan } from './tool-gateway.js';
 import type { WriteSnapshotStore } from './write-snapshots.js';
 
 export const writeFileInput = z.object({
@@ -112,39 +114,82 @@ export const editFileInput = z.object({
   new_string: z.string(),
 });
 
+/**
+ * A file write ready to execute. `content` is the full final file text. `reviewedHash` is the hash of the text the
+ * operator reviewed, so a write is refused if a human changed the file while approval was pending.
+ */
+export interface ReviewedFileWrite {
+  target: string;
+  content: string;
+  reviewedHash: string;
+}
+
+function contentHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/** Builds the preview for a whole-file change. `apply` keeps only the accepted hunks, so a rejected hunk is never written. */
+function reviewFileWrite(target: string, current: string | null, proposed: string, displayPath: string): ReviewPlan<ReviewedFileWrite> {
+  const original = current ?? '';
+  const hunks: Hunk[] = computeHunks(original, proposed);
+  const reviewedHash = contentHash(original);
+  return {
+    preview: { path: displayPath, created: current === null, hunks: hunks.map(({ id, removed, added }) => ({ id, removed, added })) },
+    hunkIds: hunks.map((hunk) => hunk.id),
+    apply: (accepted) => {
+      const content = applyHunks(original, hunks, accepted);
+      return content === original ? null : { target, content, reviewedHash };
+    },
+  };
+}
+
+/** Writes only if the file still matches the reviewed text. Snapshots the previous content first so it can be reverted. */
+async function executeFileWrite(write: ReviewedFileWrite, snapshots?: WriteSnapshotStore): Promise<void> {
+  const current = await readFile(write.target, 'utf8').catch(() => null);
+  if (contentHash(current ?? '') !== write.reviewedHash) {
+    throw new Error('The file changed after review. Re-read it and propose the change again.');
+  }
+  const { previous } = snapshots ? await snapshots.captureBeforeWrite(write.target) : { previous: current };
+  await writeFile(write.target, write.content, 'utf8');
+  snapshots?.recordWrite(write.target, previous, write.content);
+}
+
 /** Applies one exact, unique string replacement. Unlike write_file, it never rewrites unrelated content. */
-export function createEditFileTool(workspacePath: string, snapshots?: WriteSnapshotStore): RegisteredTool<z.infer<typeof editFileInput>, { path: string; replacements: number }> {
+export function createEditFileTool(workspacePath: string, snapshots?: WriteSnapshotStore): RegisteredTool<z.infer<typeof editFileInput>, { path: string; replacements: number }, ReviewedFileWrite> {
   return {
     name: 'edit_file',
     inputSchema: editFileInput,
     irreversible: true,
     effect: 'workspace',
-    execute: async ({ path, old_string, new_string }) => {
+    review: async ({ path, old_string, new_string }) => {
       const target = resolveWorkspacePath(workspacePath, path);
       const current = await readFile(target, 'utf8');
       const occurrences = current.split(old_string).length - 1;
       if (occurrences === 0) throw new Error(`old_string was not found in "${path}". Read the file and copy the exact text.`);
       if (occurrences > 1) throw new Error(`old_string matches ${occurrences} places in "${path}". Include more surrounding context so it is unique.`);
-      const next = current.replace(old_string, () => new_string);
-      await writeFile(target, next, 'utf8');
-      snapshots?.recordWrite(target, current, next);
-      return { path: target, replacements: 1 };
+      return reviewFileWrite(target, current, current.replace(old_string, () => new_string), path);
+    },
+    execute: async (write) => {
+      await executeFileWrite(write, snapshots);
+      return { path: write.target, replacements: 1 };
     },
   };
 }
 
-export function createWriteFileTool(workspacePath: string, snapshots?: WriteSnapshotStore): RegisteredTool<z.infer<typeof writeFileInput>, { path: string; bytes: number }> {
+export function createWriteFileTool(workspacePath: string, snapshots?: WriteSnapshotStore): RegisteredTool<z.infer<typeof writeFileInput>, { path: string; bytes: number }, ReviewedFileWrite> {
   return {
     name: 'write_file',
     inputSchema: writeFileInput,
     irreversible: true,
     effect: 'workspace',
-    execute: async ({ path, content }) => {
+    review: async ({ path, content }) => {
       const target = resolveWorkspacePath(workspacePath, path);
-      const { previous } = snapshots ? await snapshots.captureBeforeWrite(target) : { previous: null };
-      await writeFile(target, content, 'utf8');
-      snapshots?.recordWrite(target, previous, content);
-      return { path: target, bytes: Buffer.byteLength(content, 'utf8') };
+      const current = await readFile(target, 'utf8').catch(() => null);
+      return reviewFileWrite(target, current, content, path);
+    },
+    execute: async (write) => {
+      await executeFileWrite(write, snapshots);
+      return { path: write.target, bytes: Buffer.byteLength(write.content, 'utf8') };
     },
   };
 }

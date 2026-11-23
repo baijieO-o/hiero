@@ -28,6 +28,13 @@ export function explainApproval(toolName: string, input: unknown): ApprovalExpla
         risk: 'medium',
         reversible: true,
       };
+    case 'edit_file':
+      return {
+        title: '修改文件',
+        effect: path ? `将修改：${path}（可逐块勾选要保留的改动；写入后可用“回滚”恢复）` : '将修改一个工作区文件',
+        risk: 'medium',
+        reversible: true,
+      };
     case 'deep_memory_add':
     case 'memory_remember':
     case 'memory_save':

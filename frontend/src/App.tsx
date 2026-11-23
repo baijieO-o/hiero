@@ -1944,10 +1944,10 @@ function ApprovalModal(): ReactElement | null {
 
   const current = queue[0];
   const approvalId = current?.approval_id;
-  const respond = useCallback((approved: boolean) => {
+  const respond = useCallback((approved: boolean, acceptedHunks?: number[]) => {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN && approvalId) {
-      socket.send(JSON.stringify({ type: 'approval_response', payload: { approval_id: approvalId, approved } }));
+      socket.send(JSON.stringify({ type: 'approval_response', payload: { approval_id: approvalId, approved, ...(acceptedHunks ? { accepted_hunks: acceptedHunks } : {}) } }));
     }
     setQueue((rest) => rest.slice(1));
   }, [approvalId]);

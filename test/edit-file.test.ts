@@ -87,3 +87,37 @@ test('write snapshots persist to disk and survive a reload', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('approval can accept only some hunks of an edit', async () => {
+  const root = await workspace();
+  try {
+    const gateway = new ToolGateway();
+    gateway.register(createEditFileTool(root));
+    gateway.setApprover(async () => ({ approved: true, accepted_hunks: [] }));
+    await writeFile(join(root, 'a.txt'), 'a\nb\nc\nd\ne', 'utf8');
+
+    await assert.rejects(gateway.execute('edit_file', { path: 'a.txt', old_string: 'a\nb', new_string: 'A\nB' }, 'intent-1', 'standard'), /no hunks were accepted/);
+    assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'a\nb\nc\nd\ne');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an approved edit is refused when the file changed while approval was pending', async () => {
+  const root = await workspace();
+  try {
+    const target = join(root, 'a.txt');
+    const gateway = new ToolGateway();
+    gateway.register(createEditFileTool(root));
+    gateway.setApprover(async () => {
+      await writeFile(target, 'changed by a human', 'utf8');
+      return { approved: true };
+    });
+    await writeFile(target, 'before', 'utf8');
+
+    await assert.rejects(gateway.execute('edit_file', { path: 'a.txt', old_string: 'before', new_string: 'after' }, 'intent-1', 'standard'), /changed after review/);
+    assert.equal(await readFile(target, 'utf8'), 'changed by a human');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

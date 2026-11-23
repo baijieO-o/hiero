@@ -39,7 +39,7 @@ import { SecretStore, type SecretName } from './secret-store.js';
 import { parseTaskModelOverrides, resolveTaskModel, TASK_MODEL_KINDS, type TaskModelKind, type TaskModelOverrides } from './task-model-selection.js';
 import { checkCommandPolicy, parsePermissionMode } from './permission-policy.js';
 import { normalizeCategoryRules } from './tool-category-policy.js';
-import { ApprovalBroker } from './approval-broker.js';
+import { ApprovalBroker, type ApprovalDecision } from './approval-broker.js';
 import { checkForUpdate, type UpdateStatus } from './update-check.js';
 import { AskUserBroker, type AskUserField, type AskUserResult } from './ask-user-broker.js';
 import { createScheduledTask, defaultSchedulesPath, dueTasks, loadSchedules, nextRunAfter, saveSchedules, type ScheduledTask } from './scheduled-tasks.js';
@@ -487,12 +487,14 @@ function sanitizeChatImages(images: unknown): string[] {
   return images.filter((item): item is string => typeof item === 'string' && IMAGE_DATA_URL.test(item)).slice(0, MAX_CHAT_IMAGES);
 }
 
-interface ApprovalResponse { type: 'approval_response'; payload: { approval_id: string; approved: boolean } }
+interface ApprovalResponse { type: 'approval_response'; payload: { approval_id: string; approved: boolean; accepted_hunks?: number[] } }
 
 function isApprovalResponse(message: unknown): message is ApprovalResponse {
   if (typeof message !== 'object' || message === null) return false;
-  const candidate = message as { type?: unknown; payload?: { approval_id?: unknown; approved?: unknown } };
-  return candidate.type === 'approval_response' && typeof candidate.payload?.approval_id === 'string' && typeof candidate.payload?.approved === 'boolean';
+  const candidate = message as { type?: unknown; payload?: { approval_id?: unknown; approved?: unknown; accepted_hunks?: unknown } };
+  const hunks = candidate.payload?.accepted_hunks;
+  const hunksValid = hunks === undefined || (Array.isArray(hunks) && hunks.every((id) => typeof id === 'number' && Number.isInteger(id) && id >= 0));
+  return candidate.type === 'approval_response' && typeof candidate.payload?.approval_id === 'string' && typeof candidate.payload?.approved === 'boolean' && hunksValid;
 }
 
 interface AskUserResponse { type: 'ask_user_response'; payload: { ask_id: string; status: 'submitted' | 'declined'; values?: Record<string, unknown> } }
@@ -715,7 +717,7 @@ export class HieroRuntime {
     this.gateway = this.createGateway();
     this.workflow = this.createWorkflow();
     this.runtime.onMessage(async (message, client) => {
-      if (isApprovalResponse(message)) this.approvals.respond(message.payload.approval_id, message.payload.approved);
+      if (isApprovalResponse(message)) this.approvals.respond(message.payload.approval_id, message.payload.approved, message.payload.accepted_hunks);
       else if (isAskUserResponse(message)) this.askUsers.respond(message.payload.ask_id, message.payload.status === 'submitted' ? { status: 'submitted', values: message.payload.values ?? {} } : { status: 'declined' });
       else if (isWriteRollbackRequest(message)) await this.handleWriteRollback(client);
       else if (isFileRevertRequest(message)) await this.handleFileRevert(message, client);
@@ -928,7 +930,7 @@ export class HieroRuntime {
    }
   }
 
-  private requestToolApproval(toolName: string, input: unknown): Promise<{ approved: boolean }> {
+  private requestToolApproval(toolName: string, input: unknown): Promise<ApprovalDecision> {
     return this.approvals.request(toolName, `执行不可逆工具：${toolName}`, input);
   }
 
