@@ -309,6 +309,8 @@ interface ChatState {
   togglePin: (id: string) => void;
   rewindConversation: (messageIndex: number) => void;
   forkConversation: (messageIndex: number) => void;
+  /** Rewinds to a user message and sends its edited text in its place. */
+  editAndResend: (messageIndex: number, text: string) => void;
   send:  (text: string, images?: string[], sharedUrls?: string[], taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } }) => void;
   retry: () => void;
   cancel: () => void;
@@ -669,6 +671,17 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       });
       set({ error: null });
     },
+    editAndResend: (messageIndex, text) => {
+      if (get().pending) return;
+      const trimmed = text.trim();
+      const conversation = get().conversations.find((conv) => conv.id === get().activeId);
+      const original = conversation?.messages[messageIndex];
+      if (!conversation || !original || original.role !== 'user' || !trimmed) return;
+      // Images and files on the original message are kept; only the text changes.
+      const images = original.images;
+      get().rewindConversation(messageIndex);
+      get().send(trimmed, images ?? []);
+    },
     forkConversation: (messageIndex) => {
       if (get().pending) return;
       const state = get();
@@ -979,8 +992,10 @@ function FadingStreamingText({ text, streaming }: { text: string; streaming: boo
   return <div className="chat-segment-text"><MarkdownBody content={text} /></div>;
 }
 
-function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, onFork, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; onFork?: () => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
+function ChatMessageView({ role, content, images, files, steps, segments, usage, model, trace, completedAt, onRewind, onFork, onEditResend, rewindDisabled, anchorIndex }: { role: ChatMessage['role']; content: string; images?: string[]; files?: string[]; steps?: ToolStep[]; segments?: ChatSegment[]; usage?: ChatUsage; model?: string; trace?: TraceEvent[]; completedAt?: number; onRewind?: () => void; onFork?: () => void; onEditResend?: (text: string) => void; rewindDisabled?: boolean; anchorIndex?: number }): ReactElement {
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(content);
   const [timeVisible, setTimeVisible] = useState(false);
   const idleTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(idleTimer.current), []);
@@ -1007,11 +1022,36 @@ function ChatMessageView({ role, content, images, files, steps, segments, usage,
     {images && images.length > 0 && <div className="chat-images">
       {images.map((src, index) => <img key={index} src={src} alt={`上传的图片 ${index + 1}`} />)}
     </div>}
-    {segments && segments.length > 0
+    {editing && onEditResend
+      ? <div className="chat-edit">
+        <textarea
+          className="chat-edit-input"
+          value={draft}
+          autoFocus
+          rows={Math.min(8, Math.max(2, draft.split('\n').length))}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') { setEditing(false); setDraft(content); }
+            else if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              if (draft.trim()) { setEditing(false); onEditResend(draft); }
+            }
+          }}
+        />
+        <div className="chat-edit-actions">
+          <button type="button" onClick={() => { setEditing(false); setDraft(content); }}>取消</button>
+          <button type="button" className="chat-edit-submit" disabled={!draft.trim()} onClick={() => { setEditing(false); onEditResend(draft); }}>重新发送</button>
+        </div>
+      </div>
+      : segments && segments.length > 0
       ? <SegmentList segments={segments} />
       : <>
         {steps && steps.length > 0 && <ToolChain steps={steps} />}
-        {content && <MarkdownBody content={content} />}
+        {content && (onEditResend && !rewindDisabled
+          ? <div className="chat-editable" role="button" tabIndex={0} title="单击可编辑" onClick={() => { setDraft(content); setEditing(true); }} onKeyDown={(event) => { if (event.key === 'Enter') { setDraft(content); setEditing(true); } }}>
+            <MarkdownBody content={content} />
+          </div>
+          : <MarkdownBody content={content} />)}
       </>}
     {files && files.length > 0 && <div className="chat-files">
       {files.map((file) => <button type="button" key={file} className="chat-file" onClick={() => requestOpenFile(file)} title={`在文件管理器中打开 ${file}`}>📄 {file}</button>)}
@@ -1106,7 +1146,7 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, send, retry, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, send: state.send, retry: state.retry, cancel: state.cancel })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, editAndResend, send, retry, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, editAndResend: state.editAndResend, send: state.send, retry: state.retry, cancel: state.cancel })));
   const [draft, setDraft] = useState('');
   const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1433,7 +1473,7 @@ function ChatPanel(): ReactElement {
           {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
           {messages.map((message, index) => message.compactedMarker
             ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
-            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} onFork={message.role === 'user' ? () => forkConversation(index) : undefined} rewindDisabled={pending} />)}
+            : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} onFork={message.role === 'user' ? () => forkConversation(index) : undefined} onEditResend={message.role === 'user' ? (text) => editAndResend(index, text) : undefined} rewindDisabled={pending} />)}
           {pending && <StreamingBubble />}
         </div>
         {scrolledUp && <button type="button" className="chat-scroll-bottom" onClick={scrollToBottom}>回到底部 ↓</button>}

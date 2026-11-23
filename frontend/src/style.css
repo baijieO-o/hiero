@@ -339,6 +339,14 @@ button, textarea, select { font: inherit; }
 .chat-jump-index { flex: none; min-width: 2em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .chat-jump-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-message-flash { animation: chat-message-flash 1.2s ease-out; }
+.chat-editable { cursor: text; border-radius: 6px; }
+.chat-editable:hover { background: color-mix(in srgb, var(--text-strong) 6%, transparent); }
+.chat-editable:focus-visible { outline: 1px solid var(--accent, #4a9eff); outline-offset: 2px; }
+.chat-edit { display: flex; flex-direction: column; gap: 6px; }
+.chat-edit-input { width: 100%; box-sizing: border-box; resize: vertical; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1, transparent); color: inherit; font: inherit; }
+.chat-edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.chat-edit-actions button { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.chat-edit-actions .chat-edit-submit:disabled { opacity: 0.5; cursor: default; }
 @keyframes chat-message-flash { from { box-shadow: 0 0 0 2px var(--accent, #5b9cff); } to { box-shadow: 0 0 0 2px transparent; } }
 
 /* Settings panel: dense, APEX-style rows. */
