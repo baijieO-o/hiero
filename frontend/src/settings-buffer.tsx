@@ -17,7 +17,7 @@ export function SettingsBuffer(): ReactElement {
   const fetchModels = (input: { endpoint: string; tokens: string }) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setModelList({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端。' });
+      setModelList({ status: 'error', message: `未连接到后端（${RUNTIME_WS_URL}），请先启动后端。` });
       return;
     }
     setModelList({ status: 'loading' });
@@ -26,7 +26,7 @@ export function SettingsBuffer(): ReactElement {
   const saveModel = (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setSaveState({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端再保存。' });
+      setSaveState({ status: 'error', message: `未连接到后端（${RUNTIME_WS_URL}），请先启动后端再保存。` });
       return;
     }
     setSaveState({ status: 'saving' });
@@ -35,7 +35,7 @@ export function SettingsBuffer(): ReactElement {
   const saveMcp = (servers: McpServerEntry[]) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setMcpSaveState({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端再保存。' });
+      setMcpSaveState({ status: 'error', message: `未连接到后端（${RUNTIME_WS_URL}），请先启动后端再保存。` });
       return;
     }
     setMcpSaveState({ status: 'saving' });

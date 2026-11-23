@@ -65,7 +65,7 @@ export function SchedulesPanel({ wsUrl }: { wsUrl: string }): ReactElement {
   const send = (request: Record<string, unknown>) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setState((current) => ({ ...current, status: 'error', message: '未连接到后端（localhost:8080），请先启动后端。' }));
+      setState((current) => ({ ...current, status: 'error', message: `未连接到后端（${wsUrl}），请先启动后端。` }));
       return;
     }
     socket.send(JSON.stringify({ type: 'SCHEDULE', ...request }));
@@ -89,7 +89,7 @@ export function SchedulesPanel({ wsUrl }: { wsUrl: string }): ReactElement {
       } catch { /* Ignore non-JSON runtime messages. */ }
     };
     socket.onerror = () => {
-      if (active) setState((current) => ({ ...current, status: 'error', message: '未连接到后端（localhost:8080），请先启动后端。' }));
+      if (active) setState((current) => ({ ...current, status: 'error', message: `未连接到后端（${wsUrl}），请先启动后端。` }));
     };
     return () => {
       active = false;

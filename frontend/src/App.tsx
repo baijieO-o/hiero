@@ -2044,12 +2044,12 @@ function useHotPlug(): { snapshot: HotPlugSnapshot | null; error: string | null;
   }, []);
   const toggle = (kind: HotPlugKind, name: string, enabled: boolean) => {
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
+    if (!socket || socket.readyState !== WebSocket.OPEN) { setError(`未连接到后端（${RUNTIME_WS_URL}）。`); return; }
     socket.send(JSON.stringify({ type: 'hot_plug_set', kind, name, enabled }));
   };
   const saveAdapter = (config: SnowdomeConfigDraft) => {
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) { setError('未连接到后端（localhost:8080）。'); return; }
+    if (!socket || socket.readyState !== WebSocket.OPEN) { setError(`未连接到后端（${RUNTIME_WS_URL}）。`); return; }
     socket.send(JSON.stringify({ type: 'hot_plug_set', snowdome: config }));
   };
   return { snapshot, error, toggle, saveAdapter };
@@ -2134,13 +2134,13 @@ function McpCategoryView(): ReactElement {
         }
       } catch { /* Ignore non-JSON runtime messages. */ }
     };
-    socket.onerror = () => { if (active) setSaveState({ status: 'error', message: '未连接到后端（localhost:8080）。' }); };
+    socket.onerror = () => { if (active) setSaveState({ status: 'error', message: `未连接到后端（${RUNTIME_WS_URL}）。` }); };
     return () => { active = false; socketRef.current = null; socket.close(); };
   }, []);
   const save = (servers: McpServerEntry[]) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setSaveState({ status: 'error', message: '未连接到后端（localhost:8080），请先启动后端再保存。' });
+      setSaveState({ status: 'error', message: `未连接到后端（${RUNTIME_WS_URL}），请先启动后端再保存。` });
       return;
     }
     setSaveState({ status: 'saving' });
