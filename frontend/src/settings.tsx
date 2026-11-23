@@ -14,6 +14,7 @@ export interface PreferenceValues {
   accentColor: string;
   sendKey: SendKey;
   autoScroll: boolean;
+  customCursor: boolean;
   fontSize: number;
   uiFontSize: number;
   bubbleWidth: number;
@@ -78,6 +79,7 @@ export const PREFERENCE_SCHEMA: PreferenceField[] = [
   { key: 'compact', domain: '外观', title: '紧凑模式', description: '缩小消息之间的间距', type: 'boolean', default: false },
   { key: 'reduceMotion', domain: '外观', title: '减少动效', description: '关闭过渡动画', type: 'boolean', default: false, advanced: true },
   { key: 'sendKey', domain: '交互', title: '发送快捷键', description: 'Enter 发送，或 Ctrl/Cmd+Enter 发送', type: 'enum', options: [{ value: 'enter', label: 'Enter 发送' }, { value: 'mod-enter', label: 'Ctrl/Cmd+Enter 发送' }], default: 'enter' },
+  { key: 'customCursor', domain: '交互', title: '自定义光标', description: '用圆环光标替换系统指针，右键可打开径向菜单；关闭后使用系统光标', type: 'boolean', default: true },
   { key: 'autoScroll', domain: '交互', title: '流式输出自动吸底', description: '回复生成时自动滚动到底部', type: 'boolean', default: true, advanced: true },
   { key: 'wrapCode', domain: '交互', title: '代码块自动换行', description: '长代码行换行显示，而不是横向滚动', type: 'boolean', default: false, advanced: true },
   { key: 'backgroundImage', domain: '外观', title: '背景图片', description: '图片地址（http(s):// 或 file 可访问的 URL），或上传本地图片；留空则不使用背景图', type: 'text', default: '' },
