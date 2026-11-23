@@ -679,7 +679,8 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       if (!conversation || !original || original.role !== 'user' || !trimmed) return;
       // Images and files on the original message are kept; only the text changes.
       const images = original.images;
-      get().rewindConversation(messageIndex);
+      // Resend in a fork so the original conversation and its later replies stay intact.
+      get().forkConversation(messageIndex);
       get().send(trimmed, images ?? []);
     },
     forkConversation: (messageIndex) => {
