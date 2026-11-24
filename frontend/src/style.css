@@ -79,7 +79,7 @@ button, textarea, select { font: inherit; }
 .skills-categories button { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; text-align: left; }
 .skills-categories button:hover, .skills-categories button.active { background: var(--hover, rgba(255,255,255,.06)); }
 .skills-categories b { font-weight: 500; opacity: .6; }
-.skills-main { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.skills-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
 .skills-body { flex: 1; min-width: 0; display: flex; min-height: 0; }
 .skills-list { flex: 0 0 240px; margin: 0; padding: 6px; list-style: none; overflow-y: auto; border-right: 1px solid var(--line, #2a2f36); }
 .skills-list button { display: flex; flex-direction: column; width: 100%; padding: 6px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; text-align: left; }

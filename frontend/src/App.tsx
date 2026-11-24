@@ -2313,17 +2313,18 @@ function SkillsBuffer(): ReactElement {
 function DeepMemoryBuffer(): ReactElement {
   const [entries, setEntries] = useState<DeepMemoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const workspaceRoot = useWorkspaceStore((state) => state.roots[state.activeScreen] || undefined);
 
   const refresh = () => {
-    requestWorkspace({ type: 'deep_memory_list' })
+    requestWorkspace({ type: 'deep_memory_list', workspace: workspaceRoot })
       .then((payload) => { setEntries(payload.entries as DeepMemoryEntry[]); setError(null); })
       .catch((cause: Error) => setError(cause.message));
   };
 
-  useEffect(refresh, []);
+  useEffect(refresh, [workspaceRoot]);
 
   const act = (request: Parameters<typeof requestWorkspace>[0]) => {
-    requestWorkspace(request).then(refresh).catch((cause: Error) => setError(cause.message));
+    requestWorkspace({ ...request, workspace: workspaceRoot }).then(refresh).catch((cause: Error) => setError(cause.message));
   };
 
   const remove = (entry: DeepMemoryEntry) => {
