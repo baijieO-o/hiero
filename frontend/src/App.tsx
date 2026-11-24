@@ -2840,6 +2840,31 @@ function CommandBar({ onRun }: { onRun: (kind: PanelKind) => void }): ReactEleme
   return <form className="command-bar" onSubmit={(event) => { event.preventDefault(); submit(); }}><span className="command-prompt">&gt;</span><input value={value} onChange={(event) => setValue(event.target.value)} placeholder="输入命令：DBG / SET / FILES" aria-label="命令输入" /></form>;
 }
 
+// 任务列表布局：只读取已有的会话状态分组。全局只有一个 pending 标记，因此“运行中”仅对当前会话准确。
+function TaskList({ onOpen }: { onOpen: (id: string) => void }): ReactElement {
+  const conversations = useChatStore((state) => state.conversations);
+  const activeId = useChatStore((state) => state.activeId);
+  const pending = useChatStore((state) => state.pending);
+  const groups: { title: string; items: Conversation[] }[] = [
+    { title: '运行中', items: [] },
+    { title: '待处理', items: [] },
+    { title: '已完成', items: [] },
+  ];
+  for (const conv of [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)) {
+    const last = conv.messages[conv.messages.length - 1];
+    if (conv.id === activeId && pending) groups[0]?.items.push(conv);
+    else if (last?.role === 'user') groups[1]?.items.push(conv);
+    else groups[2]?.items.push(conv);
+  }
+  return <aside className="task-list" aria-label="任务列表">
+    {groups.map((group) => <section key={group.title} className="task-group">
+      <h3>{group.title}（{group.items.length}）</h3>
+      {group.items.length === 0 && <p className="task-empty">暂无</p>}
+      {group.items.map((conv) => <button key={conv.id} type="button" className={`task-item ${conv.id === activeId ? 'active' : ''}`} onClick={() => onOpen(conv.id)}>{conv.title || '新对话'}</button>)}
+    </section>)}
+  </aside>;
+}
+
 function App(): ReactElement {
   const screens = useWorkspaceStore((state) => state.screens);
   const activeScreen = useWorkspaceStore((state) => state.activeScreen);
@@ -2858,6 +2883,7 @@ function App(): ReactElement {
   const [api, setApi] = useState<DockviewApi | null>(null);
   const [screenDraft, setScreenDraft] = useState('');
   const hotEdgeSidebar = usePreferences((state) => state.values.hotEdgeSidebar);
+  const layoutMode = usePreferences((state) => state.values.layoutMode);
   const [railOpen, setRailOpen] = useState(() => !usePreferences.getState().values.hotEdgeSidebar);
   const [runtimeConnected, setRuntimeConnected] = useState(false);
   useEffect(() => runtimeSocketFor(RUNTIME_WS_URL).onStatus(setRuntimeConnected), []);
@@ -3062,7 +3088,8 @@ function App(): ReactElement {
       </nav>
       <span className="topbar-meta"><button type="button" className="layout-reset" onClick={() => openBuffer('docs')}>文档</button><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className={`live-pill ${runtimeConnected ? 'online' : 'offline'}`} role="status" aria-live="polite"><b /> {runtimeConnected ? '在线' : '离线'}</span></span>
     </header>
-    <div className="workspace-body">
+    <div className={`workspace-body ${layoutMode === 'tasks' ? 'layout-tasks' : ''}`}>
+      {layoutMode === 'tasks' && <TaskList onOpen={(id) => { useChatStore.getState().selectConversation(id); openBuffer('chat'); }} />}
       <aside className={`quick-rail ${railOpen ? 'open' : 'closed'}`} aria-label="快捷入口" onPointerEnter={keepRailOpen} onPointerLeave={scheduleHideRail}>
         <button type="button" className="rail-toggle" onClick={toggleRail} aria-label={railOpen ? '收起快捷栏' : '展开快捷栏'}>{railOpen ? '«' : '»'}</button>
         {railOpen && RAIL_KINDS.map((kind) => <button key={kind} type="button" className="rail-item" onClick={() => openBuffer(kind)}><span>{kind.toUpperCase().slice(0, 3)}</span>{PANEL_TITLES[kind]}</button>)}
