@@ -897,3 +897,5 @@ button, textarea, select { font: inherit; }
 .task-item { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 6px 8px; border-radius: 6px; color: inherit; cursor: pointer; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-item:hover { background: rgba(255, 255, 255, 0.06); }
 .task-item.active { background: rgba(255, 255, 255, 0.12); }
+.task-item { display: flex; flex-direction: column; gap: 2px; }
+.task-item small { opacity: 0.6; font-size: 11px; }

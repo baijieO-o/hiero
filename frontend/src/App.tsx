@@ -2845,6 +2845,7 @@ function TaskList({ onOpen }: { onOpen: (id: string) => void }): ReactElement {
   const conversations = useChatStore((state) => state.conversations);
   const activeId = useChatStore((state) => state.activeId);
   const pending = useChatStore((state) => state.pending);
+  const showMeta = usePreferences((state) => state.values.taskMeta);
   const groups: { title: string; items: Conversation[] }[] = [
     { title: '运行中', items: [] },
     { title: '待处理', items: [] },
@@ -2860,7 +2861,10 @@ function TaskList({ onOpen }: { onOpen: (id: string) => void }): ReactElement {
     {groups.map((group) => <section key={group.title} className="task-group">
       <h3>{group.title}（{group.items.length}）</h3>
       {group.items.length === 0 && <p className="task-empty">暂无</p>}
-      {group.items.map((conv) => <button key={conv.id} type="button" className={`task-item ${conv.id === activeId ? 'active' : ''}`} onClick={() => onOpen(conv.id)}>{conv.title || '新对话'}</button>)}
+      {group.items.map((conv) => <button key={conv.id} type="button" className={`task-item ${conv.id === activeId ? 'active' : ''}`} onClick={() => onOpen(conv.id)}>
+        <span>{conv.title || '新对话'}</span>
+        {showMeta && <small>{new Date(conv.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} · {conv.messages.length} 条消息</small>}
+      </button>)}
     </section>)}
   </aside>;
 }

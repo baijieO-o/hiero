@@ -33,6 +33,7 @@ export interface PreferenceValues {
   scrollbarVisibility: ScrollbarVisibility;
   hotEdgeSidebar: boolean;
   layoutMode: LayoutMode;
+  taskMeta: boolean;
   themePreset: string;
   customPalette: ThemePalette;
   customCss: string;
@@ -96,6 +97,7 @@ export const PREFERENCE_SCHEMA: PreferenceField[] = [
   { key: 'scrollbarVisibility', domain: '交互', title: '滚动条显示', description: '始终显示、鼠标悬停时显示，或隐藏（仍可滚动）', type: 'enum', options: [{ value: 'always', label: '始终显示' }, { value: 'hover', label: '悬停时显示' }, { value: 'hidden', label: '隐藏' }], default: 'hover' },
   { key: 'hotEdgeSidebar', domain: '交互', title: '热边：鼠标靠近左边缘展开侧栏', description: '鼠标移到窗口左边缘时自动展开聊天侧栏，离开后收起', type: 'boolean', default: true, advanced: true },
   { key: 'layoutMode', domain: '交互', title: '界面布局', description: '经典：以聊天为中心；任务列表：左侧按状态列出任务。两者使用同一份数据，可随时切换', type: 'enum', options: [{ value: 'classic', label: '经典（聊天为中心）' }, { value: 'tasks', label: '任务列表' }], default: 'classic' },
+  { key: 'taskMeta', domain: '交互', title: '任务列表显示时间与消息数', description: '在任务列表每项下方显示最后更新时间和消息条数', type: 'boolean', default: false },
   { key: 'themePreset', domain: '外观', title: '配色预设', description: '内置配色方案，选择后可在「自定义配色」中继续微调', type: 'enum', options: THEME_PRESETS.map((preset) => ({ value: preset.id, label: preset.name })), default: 'default-dark' },
   { key: 'customPalette', domain: '外观', title: '自定义配色', description: '覆盖预设的颜色变量，留空项使用预设值；支持导入/导出 JSON 主题', type: 'text', default: {}, advanced: true },
   { key: 'customCss', domain: '外观', title: '自定义 CSS', description: '全局样式覆盖，作用于整个界面，请谨慎使用', type: 'text', default: '', advanced: true },
