@@ -36,11 +36,23 @@
 验证：
 - context7、playwright 两者均通过 `initialize` 请求返回 `serverInfo`（已确认）。
 - `.hiero/mcp.json` 通过 `src/mcp-config.ts` 的 `mcpConfigSchema` 校验（已确认）。
-- github 需要环境变量 `GITHUB_PERSONAL_ACCESS_TOKEN`，本机未设置，因此尚未连通（未确认）。配置里用 `${GITHUB_PERSONAL_ACCESS_TOKEN}` 占位，不写入明文 token。
+- github 需要环境变量 `GITHUB_PERSONAL_ACCESS_TOKEN`，配置里用 `${GITHUB_PERSONAL_ACCESS_TOKEN}` 占位，不写入明文 token。环境变量设为用户级后，重启 Hiero 时 github 显示 `connected`，工具数 46（已确认）。
+- token 的权限范围未确认（GitHub API 返回 200 只说明认证通过，不代表 token 仅只读或仅限本仓库）。
 
-## 三、未完成项
+## 三、运行时验证（2026-11-24）
 
-- 设置 `GITHUB_PERSONAL_ACCESS_TOKEN` 后，验证 github MCP 连通。
-- 决定是否安装 `agent-browser` 的 CLI，并验证其来源。
-- 决定 `grill-me` 是否改写为 `load_skill` 调用，或不启用。
-- 验证 Hiero 运行时是否能列出并加载上述技能。
+- `skill_list`（WebSocket，`workspace: d:/hiero`）返回 30 个技能，其中包含上述 8 个项目级技能（已确认）。
+- 聊天往返：模型经子代理 `delegate_task` 调用 `search_tools` 找到 GitHub 工具，查询 `baijieO-o/hiero` 的默认分支，返回 `main`，状态 `completed`（已确认）。
+- 第一次测试超时的原因：测试脚本没有回应审批请求。运行时对 `web_fetch`、`delegate_task` 等工具的审批会阻塞，120 秒后自动拒绝（`src/approval-broker.ts`）。真实使用时需要用户在界面中点击批准。
+- 第二次测试拒绝审批后，模型报告 `search_tools` 被拒绝，并未能查询仓库。这说明审批是实际生效的（已确认）。
+- MCP 调用路径：主聊天模型默认看不到 MCP 工具，需先调用 `search_tools` 注册工具（`src/agent-executor.ts`、`src/capability-router.ts`）。第一次测试中模型直接用了 `web_fetch`，未走 MCP（已确认现象，原因未完全确认）。
+- `load_skill` 在 Hiero 内的端到端调用未验证（未确认）。
+
+## 四、未完成项
+
+- 确认 token 权限：应为 fine-grained，仅限 `baijieO-o/hiero`，Contents / Issues / Pull requests / Metadata 只读（需用户在 GitHub 设置中核实）。
+- 撤销曾在聊天与 cmd 中泄露过的两个 token（需用户操作）。
+- 决定是否安装 `agent-browser` 的全局 CLI（会改动整机环境，需用户批准），并验证其 npm 包来源。
+- 决定 `grill-me` 是否改写为 `load_skill("grilling")` 调用，或不启用。SKILL.md 原文引用的 `Skill` 工具在 Hiero 中不存在。
+- 决定 `code-review` 是否保留。它依赖子代理并行与 `/setup-matt-pocock-skills`，Hiero 未验证支持。
+- 验证 `load_skill` 能否加载任一项目技能并返回完整内容。
