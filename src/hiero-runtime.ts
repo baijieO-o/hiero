@@ -1450,7 +1450,7 @@ export class HieroRuntime {
           let result: string;
           if (isDelegate) {
             const mode = call.function.name === 'delegate_task' ? 'general' : call.function.name === 'delegate_write' ? 'write' : 'read';
-            result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent, request.category_rules);
+            result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent, request.category_rules, request.conversation_id);
           } else if (call.function.name === 'ask_user') {
             result = await this.runAskUser(call.function.arguments, signal);
           } else {
@@ -1589,7 +1589,7 @@ export class HieroRuntime {
    * Runs a sub-agent with a fixed tool allowlist. It cannot delegate further, and it shares the parent's
    * ToolGateway so write_file still goes through the approval policy. Write mode never widens the parent's permission.
    */
-  private async runDelegatedTask(mode: 'read' | 'write' | 'general', rawArguments: string, workspacePath: string, task: TaskContract, signal: AbortSignal, settings: SubagentSettings, categoryRules?: unknown): Promise<string> {
+  private async runDelegatedTask(mode: 'read' | 'write' | 'general', rawArguments: string, workspacePath: string, task: TaskContract, signal: AbortSignal, settings: SubagentSettings, categoryRules?: unknown, conversationId?: string): Promise<string> {
     try {
       const args = JSON.parse(rawArguments) as { task?: unknown; tools?: unknown };
       const goal = typeof args.task === 'string' ? args.task.trim() : '';
@@ -1600,7 +1600,7 @@ export class HieroRuntime {
         const decision = await this.requestToolApproval(toolName, { task: goal, tools: args.tools });
         if (!decision.approved) return JSON.stringify({ error: `${toolName} was denied by the operator.` });
       }
-      const toolGateway = this.createChatToolGateway(workspacePath, true, categoryRules);
+      const toolGateway = this.createChatToolGateway(workspacePath, true, categoryRules, conversationId);
       const allowlist = mode === 'write' || mode === 'general' ? WRITE_SUBAGENT_TOOLS : READ_ONLY_SUBAGENT_TOOLS;
       const allowedTools: ModelToolDefinition[] = CHAT_TOOL_DEFINITIONS.filter((tool) => allowlist.has(tool.function.name));
       if (mode === 'general' && typeof args.tools === 'string' && args.tools.trim()) {

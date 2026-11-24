@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HieroRuntime } from '../src/hiero-runtime.js';
 import { createListDirTool, createReadFileTool } from '../src/basic-tools.js';
+import { addDeepMemory } from '../src/deep-memory.js';
 import type { RuntimeWebSocketServer } from '../src/runtime-server.js';
 
 interface CapturedEvent {
@@ -114,6 +115,60 @@ test('scheduled runs offer write tools and report a failed check as failed, not 
   const toolNames = new Set(requests.flatMap((request) => (request.tools ?? []).map((tool) => tool.function.name)));
   assert.ok(toolNames.has('edit_file'), 'scheduled runs offer edit_file, constrained by acceptance commands');
   assert.ok(toolNames.has('write_file'), 'scheduled runs offer write_file, constrained by acceptance commands');
+});
+
+test('delegated sub-agent recalls session-only memory of its own conversation', async () => {
+  const requests: Array<{ tools?: Array<{ function: { name: string } }>; messages: Array<{ role: string; content?: string }> }> = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += String(chunk); });
+    req.on('end', () => {
+      const parsed = JSON.parse(body) as { tools?: Array<{ function: { name: string } }>; messages: Array<{ role: string; content?: string }> };
+      requests.push(parsed);
+      const toolNames = (parsed.tools ?? []).map((tool) => tool.function.name);
+      const isSubagent = toolNames.includes('memory_recall') && !toolNames.includes('delegate_read');
+      const toolMessage = parsed.messages.find((message) => message.role === 'tool');
+      let message: Record<string, unknown>;
+      if (isSubagent && toolMessage) {
+        message = { role: 'assistant', content: toolMessage.content ?? '' };
+      } else if (isSubagent) {
+        message = { role: 'assistant', content: '', tool_calls: [{ id: 'sub-1', type: 'function', function: { name: 'memory_recall', arguments: JSON.stringify({ query: 'pnpm install' }) } }] };
+      } else if (toolMessage) {
+        message = { role: 'assistant', content: 'done' };
+      } else {
+        message = { role: 'assistant', content: '', tool_calls: [{ id: 'delegate-1', type: 'function', function: { name: 'delegate_read', arguments: JSON.stringify({ task: 'recall pnpm' }) } }] };
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ model: 'mock', choices: [{ message }] }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+
+  const workDir = await mkdtemp(join(tmpdir(), 'hiero-subagent-memory-'));
+  const previousCwd = process.cwd();
+  const previousEnv = { endpoint: process.env.HIERO_LLM_ENDPOINT, tokens: process.env.HIERO_LLM_TOKENS };
+  process.env.HIERO_LLM_ENDPOINT = `http://127.0.0.1:${address.port}/v1`;
+  process.env.HIERO_LLM_TOKENS = 'test-token';
+  process.chdir(workDir);
+
+  const runtime = new HieroRuntime(0);
+  try {
+    await addDeepMemory(workDir, 'project', 'Use pnpm for installing dependencies', { sessionId: 'conv-a' });
+    await runtime.handleChat({ type: 'CHAT', request_id: 'r3', conversation_id: 'conv-a', messages: [{ role: 'user', content: 'recall pnpm' }] } as never);
+  } finally {
+    await runtime.close();
+    process.chdir(previousCwd);
+    process.env.HIERO_LLM_ENDPOINT = previousEnv.endpoint;
+    process.env.HIERO_LLM_TOKENS = previousEnv.tokens;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  const subagentToolResult = requests
+    .flatMap((request) => request.messages)
+    .find((message) => message.role === 'tool' && message.content?.includes('summary'));
+  assert.ok(subagentToolResult?.content?.includes('Use pnpm for installing dependencies'), 'sub-agent should see session-only memory of its own conversation');
 });
 
 test('list_dir returns workspace entries and read_file returns directory listings', async () => {
