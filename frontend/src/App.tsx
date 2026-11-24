@@ -2846,12 +2846,19 @@ function TaskList({ onOpen }: { onOpen: (id: string) => void }): ReactElement {
   const activeId = useChatStore((state) => state.activeId);
   const pending = useChatStore((state) => state.pending);
   const showMeta = usePreferences((state) => state.values.taskMeta);
-  const groups: { title: string; items: Conversation[] }[] = [
-    { title: '运行中', items: [] },
-    { title: '待处理', items: [] },
-    { title: '已完成', items: [] },
-  ];
+  const groupMode = usePreferences((state) => state.values.taskGroupMode);
+  const groups: { title: string; items: Conversation[] }[] = groupMode === 'time'
+    ? [{ title: '今天', items: [] }, { title: '近 7 天', items: [] }, { title: '更早', items: [] }]
+    : [{ title: '运行中', items: [] }, { title: '待处理', items: [] }, { title: '已完成', items: [] }];
+  const dayStart = new Date().setHours(0, 0, 0, 0);
+  const weekStart = dayStart - 6 * 24 * 60 * 60 * 1000;
   for (const conv of [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)) {
+    if (groupMode === 'time') {
+      if (conv.updatedAt >= dayStart) groups[0]?.items.push(conv);
+      else if (conv.updatedAt >= weekStart) groups[1]?.items.push(conv);
+      else groups[2]?.items.push(conv);
+      continue;
+    }
     const last = conv.messages[conv.messages.length - 1];
     if (conv.id === activeId && pending) groups[0]?.items.push(conv);
     else if (last?.role === 'user') groups[1]?.items.push(conv);

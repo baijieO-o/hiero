@@ -34,6 +34,7 @@ export interface PreferenceValues {
   hotEdgeSidebar: boolean;
   layoutMode: LayoutMode;
   taskMeta: boolean;
+  taskGroupMode: TaskGroupMode;
   themePreset: string;
   customPalette: ThemePalette;
   customCss: string;
@@ -43,6 +44,7 @@ type LoaderStyle = 'dots' | 'spinner' | 'pulse' | 'none';
 type PanelAnimation = 'fade' | 'slide' | 'none';
 type ScrollbarVisibility = 'always' | 'hover' | 'hidden';
 export type LayoutMode = 'classic' | 'tasks';
+export type TaskGroupMode = 'status' | 'time';
 
 const DEFAULT_ACCENT = '#a5ec68';
 
@@ -98,6 +100,7 @@ export const PREFERENCE_SCHEMA: PreferenceField[] = [
   { key: 'hotEdgeSidebar', domain: '交互', title: '热边：鼠标靠近左边缘展开侧栏', description: '鼠标移到窗口左边缘时自动展开聊天侧栏，离开后收起', type: 'boolean', default: true, advanced: true },
   { key: 'layoutMode', domain: '交互', title: '界面布局', description: '经典：以聊天为中心；任务列表：左侧按状态列出任务。两者使用同一份数据，可随时切换', type: 'enum', options: [{ value: 'classic', label: '经典（聊天为中心）' }, { value: 'tasks', label: '任务列表' }], default: 'classic' },
   { key: 'taskMeta', domain: '交互', title: '任务列表显示时间与消息数', description: '在任务列表每项下方显示最后更新时间和消息条数', type: 'boolean', default: false },
+  { key: 'taskGroupMode', domain: '交互', title: '任务列表分组方式', description: '按状态：运行中 / 待处理 / 已完成；按时间：今天 / 近 7 天 / 更早', type: 'enum', options: [{ value: 'status', label: '按状态' }, { value: 'time', label: '按时间' }], default: 'status' },
   { key: 'themePreset', domain: '外观', title: '配色预设', description: '内置配色方案，选择后可在「自定义配色」中继续微调', type: 'enum', options: THEME_PRESETS.map((preset) => ({ value: preset.id, label: preset.name })), default: 'default-dark' },
   { key: 'customPalette', domain: '外观', title: '自定义配色', description: '覆盖预设的颜色变量，留空项使用预设值；支持导入/导出 JSON 主题', type: 'text', default: {}, advanced: true },
   { key: 'customCss', domain: '外观', title: '自定义 CSS', description: '全局样式覆盖，作用于整个界面，请谨慎使用', type: 'text', default: '', advanced: true },
