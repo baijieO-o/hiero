@@ -1418,6 +1418,8 @@ export class HieroRuntime {
       };
       let delegatedChatTotal = 0;
       let toolRuns = 0;
+      // One gateway per chat turn: its registrations and policy depend only on this request.
+      const chatToolGateway = this.createChatToolGateway(workspacePath, true, request.category_rules, request.conversation_id);
       const compactor = this.createCompactor();
       for (let step = 0; step < CHAT_TOOL_ROUNDS; step += 1) {
         if (estimateTokens(messages, toolDefinitions) > CHAT_COMPACT_TOKENS) {
@@ -1454,7 +1456,7 @@ export class HieroRuntime {
           } else if (call.function.name === 'ask_user') {
             result = await this.runAskUser(call.function.arguments, signal);
           } else {
-            result = await this.runChatTool(call.function.name, call.function.arguments, workspacePath, task.permission_mode, request.category_rules, request.conversation_id);
+            result = await this.runChatTool(chatToolGateway, call.function.name, call.function.arguments, task.permission_mode);
           }
           endToolCall({ ok: !isToolErrorResult(result), detail: summarizeForTrace(result) });
           sendTrace();
@@ -1616,10 +1618,10 @@ export class HieroRuntime {
     }
   }
 
-  private async runChatTool(name: string, rawArguments: string, workspacePath: string, mode: PermissionMode, categoryRules?: unknown, conversationId?: string): Promise<string> {
+  private async runChatTool(gateway: ToolGateway, name: string, rawArguments: string, mode: PermissionMode): Promise<string> {
     try {
       const args = JSON.parse(rawArguments) as unknown;
-      const record = await this.createChatToolGateway(workspacePath, true, categoryRules, conversationId).execute(name, args, randomUUID(), mode);
+      const record = await gateway.execute(name, args, randomUUID(), mode);
       return JSON.stringify(record.result);
     } catch (cause) {
       return JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) });
