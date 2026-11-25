@@ -65,6 +65,6 @@ interface RegisteredTool<TInput, TResult> {
 
 ## 5. 提交前检查
 
-- `npm test` 通过
+- 后端改动：优先运行相关的单文件测试（例如 `node --test dist/test/chat-tools.test.js`），几秒内完成。全量 `npm test` 在本机可能长时间无输出，不能作为唯一依据；未完成时要如实说明。
 - 新工具有对应测试，覆盖正常路径和越界路径
-- 前端改动运行 `cd frontend && npm run build`
+- 前端改动运行 `cd frontend && npx tsc --noEmit && npm run build`（前端没有测试脚本）；面板的运行时行为需在浏览器中手动确认

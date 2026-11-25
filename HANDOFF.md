@@ -107,4 +107,6 @@ Set-Location frontend; npm run dev   # 前端
 - 子代理：`src/read-only-subagent.ts`
 - 浏览器：`src/browser-session.ts`
 - 前端压缩切分：`frontend/src/compaction.ts`
+- 前端面板（从 `App.tsx` 拆出）：`workspace-request.ts`（工作区请求层）、`memory-panel.tsx`、`skills-panel.tsx`、`file-manager-panel.tsx`、`terminal-panel.tsx`、`task-list.tsx`。`App.tsx` 仍保留聊天面板、状态存储与审批弹窗。
+- 聊天工具：`src/chat-tool-definitions.ts`（定义）、`src/chat-tool-gateway.ts`（网关）
 - 文档面板内容来源：`frontend/src/docs-content.ts`
