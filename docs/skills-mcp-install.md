@@ -20,7 +20,7 @@
 获取方式：`git clone --depth 1` 各仓库，再整目录复制。SHA 取自克隆时的 `HEAD`，获取日期 2026-11-24。
 
 已知限制（未确认可用）：
-- `grill-me` 的 SKILL.md 写的是“调用 Skill 工具并传入 grilling”。Hiero 没有 `Skill` 工具，只有 `load_skill`，因此该指令无法直接执行。
+- `grill-me` 的原始 SKILL.md 调用的是不存在的 `Skill` 工具。已在本机 `.agent/skills/grill-me/SKILL.md`（gitignore）中改为 `load_skill` 调用 `grilling`。
 - `code-review` 需要子代理并行运行，且要求先执行 `/setup-matt-pocock-skills`。Hiero 未验证其是否支持这一流程。
 - `agent-browser` 的 SKILL.md 指示 `npm i -g agent-browser`。该步骤尚未执行，也未验证其 npm 包来源。
 - 技能内容为英文。用户无法直接阅读英文，使用时可能需要翻译。
@@ -53,6 +53,6 @@
 - 确认 token 权限：应为 fine-grained，仅限 `baijieO-o/hiero`，Contents / Issues / Pull requests / Metadata 只读（需用户在 GitHub 设置中核实）。
 - 撤销曾在聊天与 cmd 中泄露过的两个 token（需用户操作）。
 - 决定是否安装 `agent-browser` 的全局 CLI（会改动整机环境，需用户批准），并验证其 npm 包来源。
-- 决定 `grill-me` 是否改写为 `load_skill("grilling")` 调用，或不启用。SKILL.md 原文引用的 `Skill` 工具在 Hiero 中不存在。
-- 决定 `code-review` 是否保留。它依赖子代理并行与 `/setup-matt-pocock-skills`，Hiero 未验证支持。
+- 决定：`grill-me` 已按用户选择改写为 `load_skill("grilling")`。
+- 决定：`code-review` 按用户选择保留。限制：它依赖子代理并行与 `/setup-matt-pocock-skills`，Hiero 未验证支持这一流程，使用前需人工确认。
 - 验证 `load_skill` 能否加载任一项目技能并返回完整内容。
