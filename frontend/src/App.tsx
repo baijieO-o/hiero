@@ -786,6 +786,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
   };
 }, {
   name: 'hiero-chat',
+  version: 1,
   partialize: (state) => ({ conversations: state.conversations, activeId: state.activeId, options: state.options }),
   storage: {
     getItem: (name) => {

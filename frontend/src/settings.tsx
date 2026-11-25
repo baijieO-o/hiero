@@ -120,6 +120,7 @@ export const usePreferences = create<PreferenceState>()(persist((set) => ({
   reset: () => set({ values: DEFAULT_PREFERENCES }),
 }), {
   name: 'hiero-preferences',
+  version: 1,
   merge: (persisted, current) => {
     const saved = (persisted as Partial<PreferenceState> | undefined)?.values;
     return { ...current, values: { ...DEFAULT_PREFERENCES, ...saved } };
@@ -148,6 +149,7 @@ export const useSubagentPreferences = create<SubagentState>()(persist((set) => (
   reset: () => set({ values: SUBAGENT_DEFAULTS }),
 }), {
   name: 'hiero-subagent',
+  version: 1,
   merge: (persisted, current) => {
     const saved = (persisted as Partial<SubagentState> | undefined)?.values;
     return { ...current, values: { ...SUBAGENT_DEFAULTS, ...saved } };
@@ -182,7 +184,7 @@ export const useWorkspacePreferences = create<WorkspacePreferences>()(persist((s
   setNonGitPolicy: (value) => set({ nonGitPolicy: value }),
   categoryRules: DEFAULT_CATEGORY_RULES,
   setCategoryRule: (category, value) => set((state) => ({ categoryRules: { ...state.categoryRules, [category]: value } })),
-}), { name: 'hiero-workspace' }));
+}), { name: 'hiero-workspace', version: 1 }));
 
 export const TASK_MODEL_KIND_ORDER = ['chat', 'planning', 'execution', 'subagent', 'compaction'] as const;
 export type TaskModelKindId = (typeof TASK_MODEL_KIND_ORDER)[number];
