@@ -118,15 +118,126 @@ export function parseAnthropicResponse(payload: unknown, model: string, token: s
   return { model, token_id: token, content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}), ...(usage ? { usage } : {}) };
 }
 
+/** Converts internal messages to Gemini generateContent format: system goes to systemInstruction, assistant becomes role "model". */
+export function toGeminiContents(messages: readonly ModelMessage[]): { systemInstruction?: { parts: Record<string, unknown>[] }; contents: Record<string, unknown>[] } {
+  const systemParts: Record<string, unknown>[] = [];
+  const contents: Record<string, unknown>[] = [];
+  const nameById = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role === 'system') {
+      systemParts.push({ text: message.content });
+      continue;
+    }
+    if (message.role === 'tool') {
+      const name = message.name ?? nameById.get(message.tool_call_id ?? '') ?? 'tool';
+      const part = { functionResponse: { name, response: { content: message.content } } };
+      const last = contents[contents.length - 1];
+      if (last && last.role === 'user' && Array.isArray(last.parts) && (last.parts as Array<Record<string, unknown>>).every((item) => 'functionResponse' in item)) {
+        (last.parts as unknown[]).push(part);
+      } else {
+        contents.push({ role: 'user', parts: [part] });
+      }
+      continue;
+    }
+    if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
+      const parts: Record<string, unknown>[] = [];
+      if (message.content) parts.push({ text: message.content });
+      for (const call of message.tool_calls) {
+        nameById.set(call.id, call.function.name);
+        let args: unknown = {};
+        try { args = JSON.parse(call.function.arguments || '{}'); } catch { args = {}; }
+        parts.push({ functionCall: { name: call.function.name, args } });
+      }
+      contents.push({ role: 'model', parts });
+      continue;
+    }
+    const parts: Record<string, unknown>[] = [];
+    for (const url of message.images ?? []) {
+      const match = /^data:([^;]+);base64,(.*)$/s.exec(url);
+      if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+    }
+    parts.push({ text: message.content });
+    contents.push({ role: message.role === 'assistant' ? 'model' : 'user', parts });
+  }
+  return {
+    ...(systemParts.length > 0 ? { systemInstruction: { parts: systemParts } } : {}),
+    contents,
+  };
+}
+
+export function toGeminiTools(tools: ModelRequest['tools']): Record<string, unknown>[] | undefined {
+  if (!tools || tools.length === 0) return undefined;
+  return [{
+    functionDeclarations: tools.map((tool) => ({
+      name: tool.function.name,
+      ...(tool.function.description ? { description: tool.function.description } : {}),
+      parameters: tool.function.parameters,
+    })),
+  }];
+}
+
+export function parseGeminiResponse(payload: unknown, model: string, token: string): ModelResponse {
+  if (typeof payload !== 'object' || payload === null) throw error('MOD-004', 'blocker', 'Model response format is invalid.', 'Check the provider response schema.');
+  const value = payload as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: unknown; functionCall?: { name?: unknown; args?: unknown } }> } }>;
+    usageMetadata?: { promptTokenCount?: unknown; candidatesTokenCount?: unknown };
+  };
+  const parts = value.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) throw error('MOD-004', 'blocker', 'Model response is missing candidates.', 'Check the provider response schema.');
+  let text = '';
+  const toolCalls: ModelToolCall[] = [];
+  parts.forEach((part, index) => {
+    if (typeof part.text === 'string') text += part.text;
+    const call = part.functionCall;
+    if (call && typeof call.name === 'string') {
+      toolCalls.push({ id: `call_${index}_${call.name}`, type: 'function', function: { name: call.name, arguments: parseArguments(call.args) } });
+    }
+  });
+  const input = value.usageMetadata?.promptTokenCount;
+  const output = value.usageMetadata?.candidatesTokenCount;
+  const usage: ModelUsage | undefined = typeof input === 'number' && typeof output === 'number' ? { input_tokens: input, output_tokens: output } : undefined;
+  return { model, token_id: token, content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}), ...(usage ? { usage } : {}) };
+}
+
+/** Gemini generateContent API (POST {base}/v1beta/models/{model}:generateContent, x-goog-api-key auth). */
+export class GeminiGenerateContentTransport implements ModelTransport {
+  public constructor(private readonly baseUrl: string, private readonly options: ProtocolFetchOptions = {}) {}
+
+  public async complete(request: ModelRequest, token: string): Promise<ModelResponse> {
+    if (!this.baseUrl) throw error('MOD-002', 'blocker', 'Model endpoint is not configured.', 'Set the provider endpoint before starting the runtime.');
+    const model = request.model ?? 'unknown';
+    const { systemInstruction, contents } = toGeminiContents(request.messages ?? [{ role: 'user', content: request.prompt }]);
+    const tools = toGeminiTools(request.tools);
+    const body = {
+      contents,
+      ...(systemInstruction ? { systemInstruction } : {}),
+      ...(tools ? { tools } : {}),
+      ...(this.options.maxTokens ? { generationConfig: { maxOutputTokens: this.options.maxTokens } } : {}),
+    };
+    const url = `${this.baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
+    const headers: Record<string, string> = token ? { 'x-goog-api-key': token } : {};
+    const payload = await postJson(url, headers, body, request, this.options.timeoutMs ?? 120_000);
+    return parseGeminiResponse(payload, model, token);
+  }
+}
+
+/** Accepts a bare base URL or a versioned one and returns the base that ends in /v1beta (or the given version). */
+export function normalizeGeminiEndpoint(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  return /\/v1(beta|alpha)?$/.test(trimmed) ? trimmed : `${trimmed}/v1beta`;
+}
+
 /** Builds the transport for a provider's configured protocol. */
 export function transportForProtocol(config: Pick<ModelProviderConfig, 'endpoint' | 'protocol'>, maxTokens: number | undefined, paramsFor: (model: string | undefined) => ModelParams): ModelTransport {
   switch (config.protocol) {
     case 'anthropic':
       return new AnthropicMessagesTransport(normalizeAnthropicEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
+    case 'gemini':
+      return new GeminiGenerateContentTransport(normalizeGeminiEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
     case 'openai':
+    case 'openai-responses':
       return new OpenAICompatibleTransport(normalizeEndpoint(config.endpoint), undefined, maxTokens, paramsFor);
-    default:
-      throw new Error(`协议 ${config.protocol} 尚未实现。`);
   }
 }
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { after, before, test } from 'node:test';
-import { AnthropicMessagesTransport, normalizeAnthropicEndpoint, toAnthropicMessages, transportForProtocol } from '../src/model-protocols.js';
+import { AnthropicMessagesTransport, GeminiGenerateContentTransport, normalizeAnthropicEndpoint, normalizeGeminiEndpoint, toAnthropicMessages, transportForProtocol } from '../src/model-protocols.js';
 import { parseProviderList } from '../src/model-gateway.js';
 
 let server: Server;
@@ -99,6 +99,73 @@ test('协议配置默认 openai，并接受 anthropic 与 gemini 取值', () => 
   assert.throws(() => parseProviderList(JSON.stringify([{ name: 'c', endpoint: 'https://z', tokens: ['t'], models: ['m'], protocol: 'soap' }])), /protocol/);
 });
 
-test('transportForProtocol 对未实现的协议报错', () => {
-  assert.throws(() => transportForProtocol({ endpoint: 'https://z', protocol: 'gemini' }, undefined, () => ({})), /尚未实现/);
+let geminiStatus = 200;
+let geminiBody: Record<string, unknown> | undefined;
+let geminiPath = '';
+let geminiKey: string | undefined;
+
+test('Gemini 请求使用 systemInstruction、functionDeclarations 与 functionResponse', async () => {
+  const geminiServer = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      geminiPath = req.url ?? '';
+      geminiKey = req.headers['x-goog-api-key'] as string | undefined;
+      geminiBody = JSON.parse(raw) as Record<string, unknown>;
+      if (geminiStatus !== 200) {
+        res.writeHead(geminiStatus, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '好的' }, { functionCall: { name: 'read_file', args: { path: 'a.txt' } } }] } }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3 },
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => geminiServer.listen(0, '127.0.0.1', resolve));
+  const port = (geminiServer.address() as { port: number }).port;
+  try {
+    const transport = new GeminiGenerateContentTransport(`http://127.0.0.1:${port}/v1beta`, { maxTokens: 512 });
+    const response = await transport.complete({
+      prompt: '读文件',
+      model: 'gemini-test',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: '读文件' },
+        { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.txt"}' } }] },
+        { role: 'tool', content: 'hello', tool_call_id: 'c1', name: 'read_file' },
+      ],
+      tools: [{ type: 'function', function: { name: 'read_file', description: '读取', parameters: { type: 'object' } } }],
+    }, 'gkey');
+    assert.equal(geminiPath, '/v1beta/models/gemini-test:generateContent');
+    assert.equal(geminiKey, 'gkey');
+    assert.deepEqual(geminiBody?.systemInstruction, { parts: [{ text: 'sys' }] });
+    assert.deepEqual((geminiBody?.contents as Array<{ role: string }>).map((item) => item.role), ['user', 'model', 'user']);
+    assert.deepEqual((geminiBody?.contents as Array<{ parts: unknown[] }>)[2]?.parts, [{ functionResponse: { name: 'read_file', response: { content: 'hello' } } }]);
+    assert.deepEqual(geminiBody?.generationConfig, { maxOutputTokens: 512 });
+    assert.equal(response.content, '好的');
+    assert.equal(response.tool_calls?.[0]?.function.name, 'read_file');
+    assert.equal(response.tool_calls?.[0]?.function.arguments, '{"path":"a.txt"}');
+    assert.deepEqual(response.usage, { input_tokens: 5, output_tokens: 3 });
+
+    geminiStatus = 429;
+    await assert.rejects(
+      transport.complete({ prompt: 'hi', model: 'gemini-test', messages: [{ role: 'user', content: 'hi' }] }, 'k'),
+      (cause: unknown) => (cause as { status?: number }).status === 429,
+    );
+    geminiStatus = 200;
+  } finally {
+    await new Promise<void>((resolve) => geminiServer.close(() => resolve()));
+  }
+});
+
+test('normalizeGeminiEndpoint 补全 /v1beta，并保留已有版本', () => {
+  assert.equal(normalizeGeminiEndpoint('https://generativelanguage.googleapis.com'), 'https://generativelanguage.googleapis.com/v1beta');
+  assert.equal(normalizeGeminiEndpoint('https://gw.example/v1'), 'https://gw.example/v1');
+});
+
+test('transportForProtocol 为 gemini 返回 Gemini transport', () => {
+  assert.ok(transportForProtocol({ endpoint: 'https://z', protocol: 'gemini' }, undefined, () => ({})) instanceof GeminiGenerateContentTransport);
 });
