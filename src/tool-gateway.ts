@@ -3,6 +3,13 @@ import { z, type ZodType } from 'zod';
 import { error, type EvidenceRecord, type PermissionMode } from './contracts.js';
 import { categoryOf, DEFAULT_CATEGORY_RULES, type CategoryRules } from './tool-category-policy.js';
 
+function deniedError(toolName: string, timedOut: boolean) {
+  if (timedOut) {
+    return error('GOV-001', 'blocker', `Tool '${toolName}' was not run: the approval request timed out (审批已超时).`, 'Ask again and answer the approval request in time, or switch to a permission mode that does not need approval.');
+  }
+  return error('GOV-001', 'blocker', `Tool '${toolName}' was denied by the operator.`, 'Choose a different approach or ask for approval again.');
+}
+
 /**
  * Where a tool's effects land. `workspace` effects stay inside the task workspace and need approval
  * by default (the `write` category rule); `external` effects (commands, network, deletion) always need approval outside auto.
@@ -33,7 +40,7 @@ export interface ReviewPlan<TExecutable> {
 }
 
 /** Asks a human to approve an irreversible tool call. `accepted_hunks` limits a reviewed change to chosen hunks. */
-export type ApprovalHook = (toolName: string, input: unknown) => Promise<{ approved: boolean; accepted_hunks?: number[] | undefined }>;
+export type ApprovalHook = (toolName: string, input: unknown) => Promise<{ approved: boolean; accepted_hunks?: number[] | undefined; timed_out?: boolean | undefined }>;
 
 export class ToolGateway {
   private readonly tools = new Map<string, RegisteredTool<unknown, unknown, unknown>>();
@@ -109,9 +116,7 @@ export class ToolGateway {
       let accepted = new Set(plan.hunkIds);
       if (requiresApproval && approver) {
         const decision = await approver(toolName, { ...parsed.data, review: plan.preview, hunk_ids: plan.hunkIds });
-        if (!decision.approved) {
-          throw error('GOV-001', 'blocker', `Tool '${toolName}' was denied by the operator.`, 'Choose a different approach or ask for approval again.');
-        }
+        if (!decision.approved) throw deniedError(toolName, decision.timed_out === true);
         accepted = new Set(decision.accepted_hunks ?? plan.hunkIds);
       }
       const next = plan.apply(accepted);
@@ -121,9 +126,7 @@ export class ToolGateway {
       executable = next;
     } else if (requiresApproval && approver) {
       const decision = await approver(toolName, parsed.data);
-      if (!decision.approved) {
-        throw error('GOV-001', 'blocker', `Tool '${toolName}' was denied by the operator.`, 'Choose a different approach or ask for approval again.');
-      }
+      if (!decision.approved) throw deniedError(toolName, decision.timed_out === true);
     }
 
     try {

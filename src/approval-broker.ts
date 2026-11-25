@@ -11,6 +11,8 @@ export interface ApprovalDecision {
   approved: boolean;
   /** For file edits, the hunk ids the operator accepted. Omitted means every hunk. */
   accepted_hunks?: number[] | undefined;
+  /** Set when the request expired without an operator answer, so callers can report it as a timeout. */
+  timed_out?: boolean | undefined;
 }
 
 interface PendingApproval {
@@ -31,7 +33,7 @@ export class ApprovalBroker {
   public request(toolName: string, summary: string, input: unknown): Promise<ApprovalDecision> {
     const request: ApprovalRequest = { approval_id: randomUUID(), tool_name: toolName, summary, input };
     return new Promise<ApprovalDecision>((resolve) => {
-      const timer = setTimeout(() => this.settle(request.approval_id, { approved: false }), this.timeoutMs);
+      const timer = setTimeout(() => this.settle(request.approval_id, { approved: false, timed_out: true }), this.timeoutMs);
       this.pending.set(request.approval_id, { request, resolve, timer });
       this.notify(request);
     });

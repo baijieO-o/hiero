@@ -32,9 +32,19 @@ test('ApprovalBroker resolves approve and deny, ignores unknown or duplicate ids
   assert.equal(broker.pendingRequests().length, 0);
 });
 
-test('ApprovalBroker auto-denies after timeout', async () => {
+test('ApprovalBroker auto-denies after timeout and marks it as timed out', async () => {
   const broker = new ApprovalBroker(() => undefined, 5);
-  assert.deepEqual(await broker.request('term_exec', 'run', {}), { approved: false });
+  assert.deepEqual(await broker.request('term_exec', 'run', {}), { approved: false, timed_out: true });
+});
+
+test('ToolGateway says when an approval timed out instead of a generic denial', async () => {
+  const gateway = new ToolGateway();
+  gateway.setApprover(async () => ({ approved: false, timed_out: true }));
+  gateway.register({
+    name: 'write_file', irreversible: true, inputSchema: z.object({ path: z.string() }),
+    execute: async () => 'written',
+  });
+  await assert.rejects(gateway.execute('write_file', { path: 'a' }, 'intent', 'standard'), /审批已超时/);
 });
 
 test('ToolGateway waits for approver on irreversible tools and enforces denial', async () => {
