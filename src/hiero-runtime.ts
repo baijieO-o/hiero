@@ -10,6 +10,8 @@ import { AgentStateMachine, AgentState } from './state-machine.js';
 import { StateStore } from './state-store.js';
 import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type CompletionGateway } from './model-gateway.js';
 import { ToolGateway, type ApprovalHook } from './tool-gateway.js';
+import { createChatToolGateway, hitlBreakpointsFromEnv } from './chat-tool-gateway.js';
+export { hitlBreakpointsFromEnv };
 import { CapabilityRouter } from './capability-router.js';
 import { capabilityPromptBlock, mcpSearchGuidance } from './capability-summary.js';
 import { ASK_USER_TOOL_DEFINITION, CHAT_TOOL_DEFINITIONS, EDIT_FILE_TOOL_DEFINITION, READ_ONLY_WORKSPACE_TOOLS, WRITE_FILE_TOOL_DEFINITION } from './chat-tool-definitions.js';
@@ -478,11 +480,6 @@ function isWorkspaceRequest(message: unknown): message is WorkspaceRequest {
   if (typeof message !== 'object' || message === null) return false;
   const type = (message as { type?: unknown }).type;
   return type === 'folder_pick' || type === 'fs_list' || type === 'fs_read' || type === 'term_exec' || type === 'skill_list' || type === 'skill_read' || type === 'skill_save' || type === 'skill_delete' || type === 'memory_read' || type === 'memory_save' || type === 'deep_memory_list' || type === 'deep_memory_delete' || type === 'deep_memory_update' || type === 'deep_memory_set_enabled';
-}
-
-/** Tool names from HIERO_HITL_TOOLS (comma-separated) that always pause for approval outside auto mode. */
-export function hitlBreakpointsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
-  return [...new Set(['write_file', ...(env.HIERO_HITL_TOOLS ?? '').split(',').map((name) => name.trim()).filter((name) => name.length > 0)])];
 }
 
 export class HieroRuntime {
@@ -1352,70 +1349,17 @@ export class HieroRuntime {
     }
   }
 
-  /**
-   * Chat tools run through a per-request ToolGateway so they share schema checks and the approval policy.
-   * Memory writes change persistent state, so they are irreversible and need approval outside auto mode.
-   */
-  /** Builds the per-chat tool set. `applyHotPlug=false` keeps disabled tools listed, for the management API. */
+  /** Builds the per-chat tool set. Logic lives in chat-tool-gateway.ts; this binds the runtime-owned services. */
   private createChatToolGateway(workspacePath: string, applyHotPlug = true, categoryRules?: unknown, conversationId?: string): ToolGateway {
-    const tools = new ToolGateway();
-    tools.setCategoryRules(normalizeCategoryRules(categoryRules));
-    tools.register(createReadFileTool(workspacePath));
-    tools.register(createListDirTool(workspacePath));
-    tools.register(createWriteFileTool(workspacePath, this.writeSnapshots));
-    tools.register(createEditFileTool(workspacePath, this.writeSnapshots));
-    tools.register(createWebSearchTool(process.env.HIERO_BRAVE_API_KEY));
-    tools.register(createWebFetchTool());
-    for (const tool of createBrowserReadTools(this.browserSessions)) tools.register(tool);
-    for (const tool of createBrowserActionTools(this.browserSessions)) tools.register(tool);
-    registerLoadSkillTool(tools, this.capabilityRouter);
-    tools.register(createSymbolSearchTool(this.codeIndexFor(workspacePath)));
-    tools.register({
-      name: 'memory_recall',
-      inputSchema: z.object({ query: z.string().default('') }),
-      effect: 'read',
-      execute: async ({ query }) => {
-        const hits = await searchDeepMemory(workspacePath, query, 5, conversationId);
-        return { hits: hits.map(({ id, scope, content, tags, score, source }) => ({ id, scope, content, tags, score, source })) };
-      },
-    });
-    tools.register({
-      name: 'memory_remember',
-      inputSchema: z.object({ scope: z.string().optional(), content: z.string().default(''), tags: z.array(z.string()).optional(), source: z.string().optional(), session_only: z.boolean().optional() }),
-      irreversible: true,
-      effect: 'workspace',
-      execute: async (args) => {
-        const entry = await addDeepMemory(workspacePath, args.scope === 'global' ? 'global' : 'project', args.content, {
-          tags: args.tags ?? [],
-          source: args.source === 'inferred' ? 'inferred' : 'user',
-          ...(args.session_only && conversationId ? { sessionId: conversationId } : {}),
-        });
-        return { ok: true, id: entry.id, source: entry.source };
-      },
-    });
-    tools.register({
-      name: 'memory_append',
-      inputSchema: z.object({ scope: z.string().optional(), content: z.string().default('') }),
-      irreversible: true,
-      effect: 'workspace',
-      execute: async (args) => {
-        const record = await appendMemory(workspacePath, args.scope === 'global' ? 'global' : 'project', args.content);
-        return { ok: true, length: record.content.length, limit: record.limit };
-      },
-    });
-    tools.register({
-      name: 'start_process',
-      inputSchema: z.object({ command: z.string().min(1) }),
-      effect: 'external',
-      execute: async (args) => {
-        const info = this.processes.start(args.command, workspacePath, 'agent');
-        return { ok: true, id: info.id, status: info.status };
-      },
-    });
-    tools.setApprover((toolName, input) => this.requestToolApproval(toolName, input));
-    tools.setBreakpoints(hitlBreakpointsFromEnv());
-    if (applyHotPlug) for (const name of this.hotPlug.disabledToolNames()) tools.unregister(name);
-    return tools;
+    return createChatToolGateway({
+      writeSnapshots: this.writeSnapshots,
+      browserSessions: this.browserSessions,
+      capabilityRouter: this.capabilityRouter,
+      codeIndexFor: (dir) => this.codeIndexFor(dir),
+      processes: this.processes,
+      hotPlug: this.hotPlug,
+      requestApproval: (toolName, input) => this.requestToolApproval(toolName, input),
+    }, workspacePath, { applyHotPlug, categoryRules, conversationId });
   }
 
   /** Pauses the chat turn until the operator answers the ask_user form. The answer is returned to the model as the tool result. */
