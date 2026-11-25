@@ -22,3 +22,8 @@ test/*.d.ts.map
 .agent/
 
 frontend/tsconfig.tsbuildinfo
+# Local-only files (not part of the repo)
+.github/copilot-instructions.md
+docs/INDEX.md
+docs/hugging-face-forum-research-*.md
+scripts/
