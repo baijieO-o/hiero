@@ -60,6 +60,8 @@ const PANEL_TITLES: Record<PanelKind, string> = {
 const PANEL_KINDS = Object.keys(PANEL_TITLES).filter((kind) => kind !== 'blank') as PanelKind[];
 
 const HIDDEN_RAIL_KINDS: PanelKind[] = ['docs'];
+// 单例面板：同一工作区只保留一个，重复打开时切换到已有面板
+const SINGLETON_PANEL_KINDS = new Set<PanelKind>(['memory', 'skills', 'usage', 'schedules', 'process', 'debug', 'settings', 'diff']);
 // 按常用度排序：越常用越靠前
 const RAIL_ORDER: PanelKind[] = ['chat', 'terminal', 'files', 'browser', 'diff', 'skills', 'memory', 'schedules', 'process', 'usage', 'debug', 'settings'];
 const RAIL_KINDS = [
@@ -2117,6 +2119,15 @@ function App(): ReactElement {
 
   const openBuffer = (kind: PanelKind) => {
     if (!api) return;
+    if (SINGLETON_PANEL_KINDS.has(kind)) {
+      const screen = useWorkspaceStore.getState().activeScreen;
+      const existing = useWorkspaceStore.getState().buffers.find((buffer) => buffer.kind === kind && buffer.workspaceId === screen);
+      const existingPanel = existing ? api.panels.find((item) => item.id === existing.id) : undefined;
+      if (existingPanel) {
+        existingPanel.api.setActive();
+        return;
+      }
+    }
     const id = addBuffer(kind, useWorkspaceStore.getState().activeScreen);
     addBufferPanel(api, id, kind);
   };
