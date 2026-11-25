@@ -75,7 +75,7 @@ function taskModelCandidates(): string[] {
   if (main && main !== 'auto') names.push(main);
   return [...new Set(names)];
 }
-import { createEditFileTool, createListDirTool, createReadFileTool, createWriteFileTool } from './basic-tools.js';
+import { createEditFileTool, createListDirTool, createReadFileTool, createWriteFileTool, resolveWorkspacePath } from './basic-tools.js';
 import { createWebFetchTool, createWebSearchTool, fetchWebPage } from './web-tools.js';
 import { BrowserSessions, createBrowserActionTools, createBrowserReadTools } from './browser-session.js';
 import { LOAD_SKILL_TOOL_DEFINITION, registerLoadSkillTool } from './skill-tool.js';
@@ -627,7 +627,7 @@ export class HieroRuntime {
     const reply = (payload: { ok: true; status: 'restored' | 'skipped' } | { ok: false; message: string }) =>
       this.runtime.send({ type: 'FILE_REVERT_RESULT', payload: { path: request.path, ...payload } }, client);
     try {
-      const target = resolve(this.workspaceFor(request.workspace), request.path);
+      const target = resolveWorkspacePath(this.workspaceFor(request.workspace), request.path);
       const outcome = await this.writeSnapshots.revertFile(target);
       if (outcome === 'unknown') reply({ ok: false, message: '该文件没有可还原的 agent 写入记录。' });
       else reply({ ok: true, status: outcome });
