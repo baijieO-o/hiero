@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { after, before, test } from 'node:test';
-import { AnthropicMessagesTransport, GeminiGenerateContentTransport, normalizeAnthropicEndpoint, normalizeGeminiEndpoint, toAnthropicMessages, transportForProtocol } from '../src/model-protocols.js';
+import { AnthropicMessagesTransport, GeminiGenerateContentTransport, OpenAIResponsesTransport, normalizeAnthropicEndpoint, normalizeGeminiEndpoint, normalizeResponsesEndpoint, toAnthropicMessages, transportForProtocol } from '../src/model-protocols.js';
 import { parseProviderList } from '../src/model-gateway.js';
 
 let server: Server;
@@ -164,6 +164,74 @@ test('Gemini 请求使用 systemInstruction、functionDeclarations 与 functionR
 test('normalizeGeminiEndpoint 补全 /v1beta，并保留已有版本', () => {
   assert.equal(normalizeGeminiEndpoint('https://generativelanguage.googleapis.com'), 'https://generativelanguage.googleapis.com/v1beta');
   assert.equal(normalizeGeminiEndpoint('https://gw.example/v1'), 'https://gw.example/v1');
+});
+
+let responsesStatus = 200;
+let responsesBody: Record<string, unknown> | undefined;
+let responsesAuth: string | undefined;
+
+test('OpenAI Responses 请求把 system 转为 instructions，并回传 function_call_output', async () => {
+  const responsesServer = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      responsesAuth = req.headers.authorization;
+      responsesBody = JSON.parse(raw) as Record<string, unknown>;
+      if (responsesStatus !== 200) {
+        res.writeHead(responsesStatus, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        output: [
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '好' }] },
+          { type: 'function_call', call_id: 'call_9', name: 'read_file', arguments: '{"path":"a.txt"}' },
+        ],
+        usage: { input_tokens: 4, output_tokens: 2 },
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => responsesServer.listen(0, '127.0.0.1', resolve));
+  const port = (responsesServer.address() as { port: number }).port;
+  try {
+    const transport = new OpenAIResponsesTransport(`http://127.0.0.1:${port}/v1/responses`, { maxTokens: 256 });
+    const response = await transport.complete({
+      prompt: '读文件',
+      model: 'gpt-test',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: '读文件' },
+        { role: 'assistant', content: '', tool_calls: [{ id: 'call_9', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.txt"}' } }] },
+        { role: 'tool', content: 'hello', tool_call_id: 'call_9', name: 'read_file' },
+      ],
+      tools: [{ type: 'function', function: { name: 'read_file', description: '读取', parameters: { type: 'object' } } }],
+    }, 'sk-resp');
+    assert.equal(responsesAuth, 'Bearer sk-resp');
+    assert.equal(responsesBody?.instructions, 'sys');
+    assert.equal(responsesBody?.max_output_tokens, 256);
+    assert.deepEqual((responsesBody?.tools as Array<{ name: string }>)[0]?.name, 'read_file');
+    assert.deepEqual((responsesBody?.input as Array<Record<string, unknown>>)[1], { type: 'function_call', call_id: 'call_9', name: 'read_file', arguments: '{"path":"a.txt"}' });
+    assert.deepEqual((responsesBody?.input as Array<Record<string, unknown>>)[2], { type: 'function_call_output', call_id: 'call_9', output: 'hello' });
+    assert.equal(response.content, '好');
+    assert.equal(response.tool_calls?.[0]?.id, 'call_9');
+    assert.deepEqual(response.usage, { input_tokens: 4, output_tokens: 2 });
+
+    responsesStatus = 401;
+    await assert.rejects(
+      transport.complete({ prompt: 'hi', model: 'gpt-test', messages: [{ role: 'user', content: 'hi' }] }, 'bad'),
+      (cause: unknown) => (cause as { status?: number }).status === 401,
+    );
+    responsesStatus = 200;
+  } finally {
+    await new Promise<void>((resolve) => responsesServer.close(() => resolve()));
+  }
+});
+
+test('normalizeResponsesEndpoint 补全 /v1/responses', () => {
+  assert.equal(normalizeResponsesEndpoint('https://api.openai.com'), 'https://api.openai.com/v1/responses');
+  assert.equal(normalizeResponsesEndpoint('https://gw.example/v1'), 'https://gw.example/v1/responses');
+  assert.equal(normalizeResponsesEndpoint('https://gw.example/v1/responses'), 'https://gw.example/v1/responses');
 });
 
 test('transportForProtocol 为 gemini 返回 Gemini transport', () => {

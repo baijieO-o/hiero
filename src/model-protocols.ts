@@ -228,6 +228,96 @@ export function normalizeGeminiEndpoint(raw: string): string {
   return /\/v1(beta|alpha)?$/.test(trimmed) ? trimmed : `${trimmed}/v1beta`;
 }
 
+/** Converts internal messages to Responses API input items (function calls and outputs are separate items). */
+export function toResponsesInput(messages: readonly ModelMessage[]): { instructions?: string; input: Record<string, unknown>[] } {
+  const instructions: string[] = [];
+  const input: Record<string, unknown>[] = [];
+  for (const message of messages) {
+    if (message.role === 'system') {
+      instructions.push(message.content);
+      continue;
+    }
+    if (message.role === 'tool') {
+      input.push({ type: 'function_call_output', call_id: message.tool_call_id ?? '', output: message.content });
+      continue;
+    }
+    if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
+      if (message.content) input.push({ role: 'assistant', content: message.content });
+      for (const call of message.tool_calls) {
+        input.push({ type: 'function_call', call_id: call.id, name: call.function.name, arguments: call.function.arguments });
+      }
+      continue;
+    }
+    if (message.images && message.images.length > 0) {
+      const content: Record<string, unknown>[] = message.images.map((url) => ({ type: 'input_image', image_url: url }));
+      content.push({ type: 'input_text', text: message.content });
+      input.push({ role: message.role, content });
+      continue;
+    }
+    input.push({ role: message.role, content: message.content });
+  }
+  return { ...(instructions.length > 0 ? { instructions: instructions.join('\n\n') } : {}), input };
+}
+
+interface ResponsesOutputItem {
+  type?: unknown;
+  role?: unknown;
+  content?: unknown;
+  call_id?: unknown;
+  name?: unknown;
+  arguments?: unknown;
+}
+
+export function parseResponsesResponse(payload: unknown, model: string, token: string): ModelResponse {
+  if (typeof payload !== 'object' || payload === null) throw error('MOD-004', 'blocker', 'Model response format is invalid.', 'Check the provider response schema.');
+  const value = payload as { output?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown } };
+  if (!Array.isArray(value.output)) throw error('MOD-004', 'blocker', 'Model response is missing output items.', 'Check the provider response schema.');
+  let text = '';
+  const toolCalls: ModelToolCall[] = [];
+  for (const item of value.output as ResponsesOutputItem[]) {
+    if (item.type === 'message' && Array.isArray(item.content)) {
+      for (const part of item.content as Array<{ type?: unknown; text?: unknown }>) {
+        if (part.type === 'output_text' && typeof part.text === 'string') text += part.text;
+      }
+    }
+    if (item.type === 'function_call' && typeof item.call_id === 'string' && typeof item.name === 'string') {
+      toolCalls.push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: parseArguments(item.arguments) } });
+    }
+  }
+  const input = value.usage?.input_tokens;
+  const output = value.usage?.output_tokens;
+  const usage: ModelUsage | undefined = typeof input === 'number' && typeof output === 'number' ? { input_tokens: input, output_tokens: output } : undefined;
+  return { model, token_id: token, content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}), ...(usage ? { usage } : {}) };
+}
+
+/** OpenAI Responses API (POST {base}/v1/responses, Bearer auth). Non-streaming. */
+export class OpenAIResponsesTransport implements ModelTransport {
+  public constructor(private readonly endpoint: string, private readonly options: ProtocolFetchOptions = {}) {}
+
+  public async complete(request: ModelRequest, token: string): Promise<ModelResponse> {
+    if (!this.endpoint) throw error('MOD-002', 'blocker', 'Model endpoint is not configured.', 'Set the provider endpoint before starting the runtime.');
+    const { instructions, input } = toResponsesInput(request.messages ?? [{ role: 'user', content: request.prompt }]);
+    const tools = request.tools && request.tools.length > 0
+      ? request.tools.map((tool) => ({
+        type: 'function',
+        name: tool.function.name,
+        ...(tool.function.description ? { description: tool.function.description } : {}),
+        parameters: tool.function.parameters,
+      }))
+      : undefined;
+    const body = {
+      model: request.model,
+      input,
+      ...(instructions ? { instructions } : {}),
+      ...(tools ? { tools } : {}),
+      ...(this.options.maxTokens ? { max_output_tokens: this.options.maxTokens } : {}),
+    };
+    const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+    const payload = await postJson(this.endpoint, headers, body, request, this.options.timeoutMs ?? 120_000);
+    return parseResponsesResponse(payload, request.model ?? 'unknown', token);
+  }
+}
+
 /** Builds the transport for a provider's configured protocol. */
 export function transportForProtocol(config: Pick<ModelProviderConfig, 'endpoint' | 'protocol'>, maxTokens: number | undefined, paramsFor: (model: string | undefined) => ModelParams): ModelTransport {
   switch (config.protocol) {
@@ -235,10 +325,19 @@ export function transportForProtocol(config: Pick<ModelProviderConfig, 'endpoint
       return new AnthropicMessagesTransport(normalizeAnthropicEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
     case 'gemini':
       return new GeminiGenerateContentTransport(normalizeGeminiEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
-    case 'openai':
     case 'openai-responses':
+      return new OpenAIResponsesTransport(normalizeResponsesEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
+    case 'openai':
       return new OpenAICompatibleTransport(normalizeEndpoint(config.endpoint), undefined, maxTokens, paramsFor);
   }
+}
+
+/** Accepts a bare base URL, a /v1 base, or a full /responses URL and returns the responses endpoint. */
+export function normalizeResponsesEndpoint(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (trimmed.endsWith('/responses')) return trimmed;
+  return `${trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`}/responses`;
 }
 
 /** Accepts a bare base URL or a full /v1/messages URL and returns the messages endpoint. */
