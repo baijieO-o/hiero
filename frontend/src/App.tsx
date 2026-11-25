@@ -24,6 +24,7 @@ import { runtimeSocketFor, type RuntimeSocketMessage } from './runtime-socket';
 import { estimateCostUsd, formatCost } from './token-cost';
 import type { TerminalWriteLine } from './terminal-view';
 import { SettingsBuffer } from './settings-buffer';
+import { requestWorkspace, setDefaultWorkspaceProvider, type MemoryScope, type SkillScope } from './workspace-request';
 import { CAPABILITY_STATE_LABELS, mcpCapability, toggledCapability, type CapabilityEntry } from './capability-badge';
 
 const LazyTerminalView = lazy(() => import('./terminal-view').then((module) => ({ default: module.TerminalView })));
@@ -799,6 +800,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     },
   },
 }));
+setDefaultWorkspaceProvider(() => useChatStore.getState().options.workspace);
 
 /** Fills in traces that exist only on the backend (for example after browser storage was cleared). */
 function restoreServerTraces(): void {
@@ -1789,49 +1791,11 @@ interface WorkspaceEntry {
   modified: number;
 }
 
-type SkillScope = 'project' | 'user' | 'agents' | 'codex';
 const SKILL_SCOPE_LABELS: Record<SkillScope, string> = { project: '项目', user: '用户', agents: '通用', codex: 'Codex' };
 type SkillRecord = { id: string; name: string; scope: SkillScope; description: string; path: string; size: number };
 
-type WorkspaceRequestBody = { workspace?: string } & (
-  | { type: 'folder_pick'; initialPath?: string }
-  | { type: 'fs_list'; path?: string }
-  | { type: 'fs_read'; path: string }
-  | { type: 'term_exec'; command: string; cwd?: string; permission?: string }
-  | { type: 'skill_list' }
-  | { type: 'skill_read'; scope: SkillScope; name: string }
-  | { type: 'skill_save'; scope: SkillScope; name: string; content: string }
-  | { type: 'skill_delete'; scope: SkillScope; name: string }
-  | { type: 'memory_read'; scope: MemoryScope }
-  | { type: 'memory_save'; scope: MemoryScope; content: string }
-  | { type: 'deep_memory_list' }
-  | { type: 'deep_memory_delete'; scope: MemoryScope; id: string }
-  | { type: 'deep_memory_update'; scope: MemoryScope; id: string; content: string }
-  | { type: 'deep_memory_set_enabled'; scope: MemoryScope; id: string; enabled: boolean }
-);
-
-type MemoryScope = 'global' | 'project';
 type DeepMemoryEntry = { id: string; scope: MemoryScope; content: string; tags: string[]; created_at: string; source?: 'user' | 'inferred'; session_id?: string; enabled?: boolean };
 const MEMORY_SCOPE_LABELS: Record<MemoryScope, string> = { global: '全局准则', project: '项目记忆' };
-
-function requestWorkspace(body: WorkspaceRequestBody): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const socket = new WebSocket(RUNTIME_WS_URL);
-    const timer = window.setTimeout(() => { socket.close(); reject(new Error('请求超时，运行时无响应')); }, 60_000);
-    const workspace = body.workspace ?? useChatStore.getState().options.workspace;
-    socket.onopen = () => socket.send(JSON.stringify({ ...body, workspace, request_id: requestId }));
-    socket.onerror = () => { window.clearTimeout(timer); reject(new Error('无法连接运行时 ' + RUNTIME_WS_URL)); };
-    socket.onmessage = (event) => {
-      const message = JSON.parse(String(event.data)) as RuntimeMessage;
-      if (message.type !== 'WORKSPACE_RESULT' || message.payload?.request_id !== requestId) return;
-      window.clearTimeout(timer);
-      socket.close();
-      if (message.payload.ok === true) resolve(message.payload);
-      else reject(new Error(String(message.payload.message ?? '请求失败')));
-    };
-  });
-}
 
 type ApprovalRequest = ApprovalDialogRequest;
 
