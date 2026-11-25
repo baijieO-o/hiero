@@ -28,6 +28,7 @@ import { MemoryBuffer } from './memory-panel';
 import { SkillsBuffer } from './skills-panel';
 import { FileManagerBuffer, requestOpenFile, setOpenPanelHandler } from './file-manager-panel';
 import { TerminalBuffer } from './terminal-panel';
+import { TaskList } from './task-list';
 
 import { MAX_TEXT_PREVIEW_BYTES, classifyFile, folderNameFromEntry } from './dropped-files';
 import { FileRefChip, FilePreviewDialog, type DroppedFileRef } from './file-ref';
@@ -1973,6 +1974,13 @@ function UsagePanelHost(): ReactElement {
   return <UsagePanel conversations={conversations} />;
 }
 
+function TaskListHost({ onOpen }: { onOpen: (id: string) => void }): ReactElement {
+  const conversations = useChatStore((state) => state.conversations);
+  const activeId = useChatStore((state) => state.activeId);
+  const pending = useChatStore((state) => state.pending);
+  return <TaskList conversations={conversations} activeId={activeId} pending={pending} onOpen={onOpen} />;
+}
+
 function TerminalPanelHost(): ReactElement {
   const workspace = useChatStore((state) => state.options.workspace);
   return <TerminalBuffer workspace={workspace} getActiveRoot={activeWorkspaceRoot} />;
@@ -2051,40 +2059,6 @@ function CommandBar({ onRun }: { onRun: (kind: PanelKind) => void }): ReactEleme
 }
 
 // 任务列表布局：只读取已有的会话状态分组。全局只有一个 pending 标记，因此“运行中”仅对当前会话准确。
-function TaskList({ onOpen }: { onOpen: (id: string) => void }): ReactElement {
-  const conversations = useChatStore((state) => state.conversations);
-  const activeId = useChatStore((state) => state.activeId);
-  const pending = useChatStore((state) => state.pending);
-  const showMeta = usePreferences((state) => state.values.taskMeta);
-  const groupMode = usePreferences((state) => state.values.taskGroupMode);
-  const groups: { title: string; items: Conversation[] }[] = groupMode === 'time'
-    ? [{ title: '今天', items: [] }, { title: '近 7 天', items: [] }, { title: '更早', items: [] }]
-    : [{ title: '运行中', items: [] }, { title: '待处理', items: [] }, { title: '已完成', items: [] }];
-  const dayStart = new Date().setHours(0, 0, 0, 0);
-  const weekStart = dayStart - 6 * 24 * 60 * 60 * 1000;
-  for (const conv of [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)) {
-    if (groupMode === 'time') {
-      if (conv.updatedAt >= dayStart) groups[0]?.items.push(conv);
-      else if (conv.updatedAt >= weekStart) groups[1]?.items.push(conv);
-      else groups[2]?.items.push(conv);
-      continue;
-    }
-    const last = conv.messages[conv.messages.length - 1];
-    if (conv.id === activeId && pending) groups[0]?.items.push(conv);
-    else if (last?.role === 'user') groups[1]?.items.push(conv);
-    else groups[2]?.items.push(conv);
-  }
-  return <aside className="task-list" aria-label="任务列表">
-    {groups.map((group) => <section key={group.title} className="task-group">
-      <h3>{group.title}（{group.items.length}）</h3>
-      {group.items.length === 0 && <p className="task-empty">暂无</p>}
-      {group.items.map((conv) => <button key={conv.id} type="button" className={`task-item ${conv.id === activeId ? 'active' : ''}`} onClick={() => onOpen(conv.id)}>
-        <span>{conv.title || '新对话'}</span>
-        {showMeta && <small>{new Date(conv.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} · {conv.messages.length} 条消息</small>}
-      </button>)}
-    </section>)}
-  </aside>;
-}
 
 function App(): ReactElement {
   const screens = useWorkspaceStore((state) => state.screens);
@@ -2311,7 +2285,7 @@ function App(): ReactElement {
       <span className="topbar-meta"><button type="button" className="layout-reset" onClick={() => openBuffer('docs')}>文档</button><button type="button" className="layout-reset" onClick={onResetLayout}>重置布局</button> 个人 Agent 工作台 <span className={`live-pill ${runtimeConnected ? 'online' : 'offline'}`} role="status" aria-live="polite"><b /> {runtimeConnected ? '在线' : '离线'}</span></span>
     </header>
     <div className={`workspace-body ${layoutMode === 'tasks' ? 'layout-tasks' : ''}`}>
-      {layoutMode === 'tasks' && <TaskList onOpen={(id) => { useChatStore.getState().selectConversation(id); openBuffer('chat'); }} />}
+      {layoutMode === 'tasks' && <TaskListHost onOpen={(id) => { useChatStore.getState().selectConversation(id); openBuffer('chat'); }} />}
       <aside className={`quick-rail ${railOpen ? 'open' : 'closed'}`} aria-label="快捷入口" onPointerEnter={keepRailOpen} onPointerLeave={scheduleHideRail}>
         <button type="button" className="rail-toggle" onClick={toggleRail} aria-label={railOpen ? '收起快捷栏' : '展开快捷栏'}>{railOpen ? '«' : '»'}</button>
         {railOpen && RAIL_KINDS.map((kind) => <button key={kind} type="button" className="rail-item" onClick={() => openBuffer(kind)}><span>{kind.toUpperCase().slice(0, 3)}</span>{PANEL_TITLES[kind]}</button>)}
