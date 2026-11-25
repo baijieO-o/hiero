@@ -153,7 +153,7 @@ test('parseTokenList splits comma, semicolon and newline separators', () => {
 test('parseProviderList reads providers and rejects malformed config', () => {
   assert.deepEqual(parseProviderList(undefined), []);
   assert.deepEqual(parseProviderList('[{"name":"p","endpoint":"https://x.test/v1","tokens":["k1"],"models":["m1"]}]'), [
-    { name: 'p', endpoint: 'https://x.test/v1', tokens: ['k1'], models: ['m1'] },
+    { name: 'p', endpoint: 'https://x.test/v1', tokens: ['k1'], models: ['m1'], protocol: 'openai' },
   ]);
   assert.throws(() => parseProviderList('{not json'), /不是合法的 JSON/);
   assert.throws(() => parseProviderList('{"endpoint":"x"}'), /必须是 JSON 数组/);
@@ -171,7 +171,7 @@ test('RoutedModelGateway sends each model to the provider that lists it, with it
   }, [`${label}-key`], () => 0);
   const fallback = makeGateway('default');
   const router = new RoutedModelGateway(fallback, [
-    { config: { name: 'other', endpoint: 'unused', tokens: [], models: ['other-model'] }, gateway: makeGateway('other') },
+    { config: { name: 'other', endpoint: 'unused', tokens: [], models: ['other-model'], protocol: 'openai' }, gateway: makeGateway('other') },
   ]);
   const routed = await router.complete({ ...task, model_config: { preferred_model: 'other-model', fallback_chain: [] } }, { prompt: 'hi' });
   assert.equal(routed.content, 'other');

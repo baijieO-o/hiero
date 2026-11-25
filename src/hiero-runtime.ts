@@ -32,6 +32,7 @@ import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
 import { diffSnapshots, snapshotTextFiles } from './workspace-diff.js';
 import { loadLocalLlmEnv, modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
+import { transportForProtocol } from './model-protocols.js';
 
 // Snowdome adapter errors go to a file: the backend's stdout is not kept, so a failed resident would otherwise leave no trace.
 function appendSnowdomeLog(message: string): void {
@@ -692,7 +693,7 @@ export class HieroRuntime {
     if (providers.length === 0) return gateway;
     const routed = providers.map((config) => ({
       config,
-      gateway: new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(config.endpoint), undefined, outputLimit, paramsFor), config.tokens, undefined, undefined, undefined, onCall),
+      gateway: new ModelGateway(transportForProtocol(config, outputLimit, paramsFor), config.tokens, undefined, undefined, undefined, onCall),
     }));
     console.info(`[hiero] Routing models across ${providers.length} extra provider(s): ${providers.map((provider) => provider.name).join(', ')}.`);
     return new RoutedModelGateway(gateway, routed);

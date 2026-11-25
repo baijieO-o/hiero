@@ -219,11 +219,17 @@ export function parseTokenList(raw: string | undefined): string[] {
 }
 
 /** One OpenAI-compatible provider with its own endpoint and keys, used for the models listed in `models`. */
+export type ModelProtocol = 'openai' | 'openai-responses' | 'anthropic' | 'gemini';
+
+export const MODEL_PROTOCOLS: readonly ModelProtocol[] = ['openai', 'openai-responses', 'anthropic', 'gemini'];
+
 export interface ModelProviderConfig {
   name: string;
   endpoint: string;
   tokens: string[];
   models: string[];
+  /** Wire protocol the endpoint speaks. Defaults to 'openai' (Chat Completions). */
+  protocol: ModelProtocol;
 }
 
 /**
@@ -249,7 +255,11 @@ export function parseProviderList(raw: string | undefined): ModelProviderConfig[
     const models = Array.isArray(entry.models) ? entry.models.filter((model): model is string => typeof model === 'string' && model.trim() !== '').map((model) => model.trim()) : [];
     if (!endpoint) throw new Error(`HIERO_LLM_PROVIDERS 中的供应商 ${name} 缺少 endpoint。`);
     if (models.length === 0) throw new Error(`HIERO_LLM_PROVIDERS 中的供应商 ${name} 缺少 models。`);
-    return { name, endpoint, tokens, models };
+    const protocol = entry.protocol ?? 'openai';
+    if (typeof protocol !== 'string' || !(MODEL_PROTOCOLS as readonly string[]).includes(protocol)) {
+      throw new Error(`HIERO_LLM_PROVIDERS 中的供应商 ${name} 的 protocol 必须是 ${MODEL_PROTOCOLS.join(' / ')} 之一。`);
+    }
+    return { name, endpoint, tokens, models, protocol: protocol as ModelProtocol };
   });
 }
 
