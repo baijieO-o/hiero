@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilityPromptBlock, mcpCapability, toggledCapability } from '../src/capability-summary.js';
+import { capabilityPromptBlock, mcpCapability, mcpSearchGuidance, toggledCapability } from '../src/capability-summary.js';
 
 test('MCP server is available only when enabled and connected', () => {
   assert.equal(mcpCapability('fs', true, { name: 'fs', connected: true, tool_count: 3 }).state, 'available');
@@ -29,4 +29,21 @@ test('MCP server is retrying only while its plug is backing off', () => {
 
 test('prompt block is empty when there are no capabilities', () => {
   assert.equal(capabilityPromptBlock([]), '');
+});
+
+test('search_tools guidance names only connected MCP servers', () => {
+  const entries = [
+    mcpCapability('github', true, { name: 'github', connected: true, tool_count: 46 }),
+    mcpCapability('playwright', true, { name: 'playwright', connected: false, tool_count: 0, error: 'spawn failed' }),
+    toggledCapability('read_file', true),
+  ];
+  const guidance = mcpSearchGuidance(entries, new Set(['github', 'playwright']));
+  assert.match(guidance, /MCP servers available: github\./);
+  assert.match(guidance, /search_tools/);
+  assert.doesNotMatch(guidance, /playwright/);
+});
+
+test('search_tools guidance is empty when no MCP server is available', () => {
+  const entries = [mcpCapability('github', true, { name: 'github', connected: false, tool_count: 0 })];
+  assert.equal(mcpSearchGuidance(entries, new Set(['github'])), '');
 });

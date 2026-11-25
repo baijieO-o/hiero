@@ -37,6 +37,16 @@ export function toggledCapability(name: string, enabled: boolean): CapabilityEnt
 }
 
 /**
+ * MCP tools are not in the model's tool list; they are reached only through `search_tools`.
+ * Returns a guidance line when at least one MCP server is available, so the model looks there instead of falling back to web tools.
+ */
+export function mcpSearchGuidance(entries: readonly CapabilityEntry[], mcpNames: ReadonlySet<string>): string {
+  const available = entries.filter((entry) => mcpNames.has(entry.name) && entry.state === 'available').map((entry) => entry.name);
+  if (available.length === 0) return '';
+  return `MCP servers available: ${available.join(', ')}. Their tools are not listed directly. For requests about these services (for example GitHub repositories, issues, or pull requests), first call search_tools with a short capability query to find the matching MCP tool, and use it instead of web search.`;
+}
+
+/**
  * Builds the short system-prompt block that tells the model what it can use right now.
  * Lists only usable entries by name and summarizes the rest, so the model does not claim a disabled or disconnected capability.
  */
