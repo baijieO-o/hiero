@@ -571,7 +571,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], steers: [], error: null });
+        set({ pending: false, streamingSegments: [], steers: [], plan: [], error: null });
       } else if (message.type === 'CHAT_PLAN') {
         set({ plan: parsePlanSteps(message.payload?.steps) });
       } else if (message.type === 'CHAT_STEER_APPLIED' || message.type === 'CHAT_STEER_REJECTED') {
@@ -590,7 +590,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         lastFailedSend = null;
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], steers: [], error: null });
+        set({ pending: false, streamingSegments: [], steers: [], plan: [], error: null });
       } else if (message.type === 'CHAT_UNKNOWN') {
         // The backend no longer has this run (it restarted or the record expired), so nothing can be recovered.
         lastFailedSend = null;
@@ -599,7 +599,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         discardDeltas();
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], steers: [], error: '未找到该请求的记录，可能后端已重启，请重试。' });
+        set({ pending: false, streamingSegments: [], steers: [], plan: [], error: '未找到该请求的记录，可能后端已重启，请重试。' });
       } else if (message.type === 'CHAT_ERROR') {
         const rawDetail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
         const errorCode = typeof message.payload?.code === 'string' ? message.payload.code : '';
@@ -610,7 +610,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         discardDeltas();
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], steers: [], error: detail });
+        set({ pending: false, streamingSegments: [], steers: [], plan: [], error: detail });
       }
     };
     // The backend keeps a chat run alive when the socket drops. On reconnect the pending request is re-attached
