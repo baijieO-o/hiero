@@ -208,6 +208,20 @@ function appendTextSegment(segments: ChatSegment[], text: string): ChatSegment[]
   return [...segments, { kind: 'text', text }];
 }
 
+type PlanStepStatus = 'pending' | 'in_progress' | 'done';
+interface PlanStep { title: string; status: PlanStepStatus }
+
+/** Keeps only well-formed plan steps from a CHAT_PLAN payload. */
+function parsePlanSteps(raw: unknown): PlanStep[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item): PlanStep[] => {
+    const title = typeof item?.title === 'string' ? item.title : '';
+    const status = item?.status;
+    if (!title || (status !== 'pending' && status !== 'in_progress' && status !== 'done')) return [];
+    return [{ title, status }];
+  });
+}
+
 /** Builds the text-only content and tool list that older message rendering and persistence still use. */
 function summarizeSegments(segments: ChatSegment[]): { content: string; steps: ToolStep[] } {
   let content = '';
@@ -316,6 +330,8 @@ interface ChatState {
   streamingSegments: ChatSegment[];
   /** Supplements sent while a run is in progress, shown until the backend applies or rejects them. */
   steers: ChatSteer[];
+  /** The step plan the model published with update_plan for the latest run. Empty when the run did not plan. */
+  plan: PlanStep[];
   error: string | null;
   compacting: boolean;
   /** Latest context usage per conversation id, requested when the session info panel opens. */
@@ -556,6 +572,8 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         activeRequest = null;
         writeActiveRequest(null);
         set({ pending: false, streamingSegments: [], steers: [], error: null });
+      } else if (message.type === 'CHAT_PLAN') {
+        set({ plan: parsePlanSteps(message.payload?.steps) });
       } else if (message.type === 'CHAT_STEER_APPLIED' || message.type === 'CHAT_STEER_REJECTED') {
         const steerId = typeof message.payload?.steer_id === 'string' ? message.payload.steer_id : '';
         const applied = message.type === 'CHAT_STEER_APPLIED';
@@ -631,6 +649,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     pending: restored !== null,
     streamingSegments: [],
     steers: [],
+    plan: [],
     error: null,
     compacting: false,
     contextUsage: {},
@@ -771,7 +790,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       pendingFiles = [];
       discardDeltas();
       textBreak = false;
-      set({ pending: true, streamingSegments: [], steers: [], error: null });
+      set({ pending: true, streamingSegments: [], steers: [], plan: [], error: null });
       const target = ensureSocket();
       const { model, permission, workspace } = state.options;
       const subagent = useSubagentPreferences.getState().values;
@@ -1226,7 +1245,7 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, editAndResend, send, retry, cancel, steer, steers } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, editAndResend: state.editAndResend, send: state.send, retry: state.retry, cancel: state.cancel, steer: state.steer, steers: state.steers })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, editAndResend, send, retry, cancel, steer, steers, plan, streamingSegments } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, editAndResend: state.editAndResend, send: state.send, retry: state.retry, cancel: state.cancel, steer: state.steer, steers: state.steers, plan: state.plan, streamingSegments: state.streamingSegments })));
   const [draft, setDraft] = useState('');
   const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1582,6 +1601,41 @@ function ChatPanel(): ReactElement {
           onCompact={() => compactConversation(active.id)}
           onClose={() => setSessionInfoOpen(false)}
         />}
+        {(pending || plan.length > 0) && (() => {
+          const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+          const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+          const runningTools = streamingSegments.filter((seg): seg is Extract<ChatSegment, { kind: 'tool' }> => seg.kind === 'tool');
+          const artifacts = pending ? [] : (lastAssistant?.files ?? []);
+          return <section className="chat-run-board" aria-label="运行面板">
+            <div className="chat-run-region">
+              <header className="chat-run-board-head"><span>任务</span></header>
+              <p className="chat-run-goal">{lastUser?.content ?? '（无）'}</p>
+            </div>
+            {plan.length > 0 && <div className="chat-run-region">
+              <header className="chat-run-board-head"><span>计划</span><span className="chat-run-board-progress">{plan.filter((step) => step.status === 'done').length}/{plan.length}</span></header>
+              <ol className="chat-plan-steps">
+                {plan.map((step, index) => <li key={`${index}-${step.title}`} className={`chat-plan-step chat-plan-${step.status}`}>
+                  <span className="chat-plan-mark" aria-hidden="true">{step.status === 'done' ? '✓' : step.status === 'in_progress' ? '›' : '·'}</span>
+                  <span className="chat-plan-title">{step.title}</span>
+                  <span className="chat-plan-status">{step.status === 'done' ? '完成' : step.status === 'in_progress' ? '进行中' : '待办'}</span>
+                </li>)}
+              </ol>
+            </div>}
+            {pending && <div className="chat-run-region">
+              <header className="chat-run-board-head"><span>执行</span><span className="chat-run-board-progress">{runningTools.length} 次工具</span></header>
+              <ul className="chat-run-exec">
+                {runningTools.length === 0 && <li className="chat-run-empty">等待模型响应…</li>}
+                {runningTools.map((seg, index) => <li key={`${index}-${seg.step.name}`}>{seg.step.name}</li>)}
+              </ul>
+            </div>}
+            {artifacts.length > 0 && <div className="chat-run-region">
+              <header className="chat-run-board-head"><span>成果</span><span className="chat-run-board-progress">{artifacts.length} 个文件</span></header>
+              <ul className="chat-run-exec">
+                {artifacts.map((file) => <li key={file}>{file}</li>)}
+              </ul>
+            </div>}
+          </section>;
+        })()}
         {pending && steers.length > 0 && <ul className="chat-steer-list" aria-label="执行中的补充信息">
           {steers.map((item) => <li key={item.id} className={`chat-steer chat-steer-${item.status}`} title={item.reason}>
             <span className="chat-steer-status">{item.status === 'queued' ? '等待应用' : item.status === 'applied' ? '已应用' : '未采用'}</span>

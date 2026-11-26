@@ -5,6 +5,7 @@ import { AgentStateMachine, type AgentState, type StateTransition } from './stat
 import type { VerificationResult } from './verification.js';
 import type { TaskStatus } from './task-status.js';
 import type { ChatTraceEvent } from './chat-trace.js';
+import type { PlanStep } from './chat-plan.js';
 import type { StoredChatTrace } from './trace-store.js';
 import type { ManagedProcessInfo, ManagedProcessLine } from './process-manager.js';
 import type { TaskRecord } from './state-store.js';
@@ -48,6 +49,7 @@ export type RuntimeEvent =
   | { type: 'CHAT_STEER_QUEUED'; payload: { request_id: string; steer_id: string } }
   | { type: 'CHAT_STEER_APPLIED'; payload: { request_id: string; steer_id: string } }
   | { type: 'CHAT_STEER_REJECTED'; payload: { request_id: string; steer_id: string; reason: string } }
+  | { type: 'CHAT_PLAN'; payload: { request_id: string; steps: PlanStep[] } }
   | { type: 'CHAT_UNKNOWN'; payload: { request_id: string } }
   | { type: 'CHAT_USAGE'; payload: { request_id: string; usage: ContextUsageBreakdown } }
   | { type: 'USAGE_STATS'; payload: { request_id: string } & UsageStats }

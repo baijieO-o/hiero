@@ -132,6 +132,36 @@ export const CHAT_TOOL_DEFINITIONS: ModelToolDefinition[] = [
   DELEGATE_TASK_TOOL_DEFINITION,
 ];
 
+/** update_plan is handled by the runtime, not the tool gateway. It only records the plan for the UI and needs no approval. */
+export const UPDATE_PLAN_TOOL_DEFINITION: ModelToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'update_plan',
+    description: 'Publish or revise the step plan for a multi-step task so the user can follow progress. Call it once at the start with the steps, then call it again whenever a step starts, finishes, or the plan changes. Pass the full list each time. Keep steps short and concrete. Use it only for tasks that need several steps.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        steps: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'done'] },
+            },
+            required: ['title', 'status'],
+          },
+        },
+      },
+      required: ['steps'],
+    },
+  },
+};
+
 /**  ask_user is only offered in interactive chat. Scheduled tasks use a separate tool list, so they never see it. */
 export const ASK_USER_TOOL_DEFINITION: ModelToolDefinition = {
   type: 'function',

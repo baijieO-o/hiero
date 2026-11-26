@@ -14,7 +14,8 @@ import { createChatToolGateway, hitlBreakpointsFromEnv } from './chat-tool-gatew
 export { hitlBreakpointsFromEnv };
 import { CapabilityRouter } from './capability-router.js';
 import { capabilityPromptBlock, mcpSearchGuidance } from './capability-summary.js';
-import { ASK_USER_TOOL_DEFINITION, CHAT_TOOL_DEFINITIONS, EDIT_FILE_TOOL_DEFINITION, READ_ONLY_WORKSPACE_TOOLS, WRITE_FILE_TOOL_DEFINITION } from './chat-tool-definitions.js';
+import { parsePlanArguments } from './chat-plan.js';
+import { ASK_USER_TOOL_DEFINITION, CHAT_TOOL_DEFINITIONS, EDIT_FILE_TOOL_DEFINITION, READ_ONLY_WORKSPACE_TOOLS, UPDATE_PLAN_TOOL_DEFINITION, WRITE_FILE_TOOL_DEFINITION } from './chat-tool-definitions.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
 import { McpToolClient } from './mcp-client.js';
 import { HotPlugRegistry, type PlugStatus } from './hot-plug.js';
@@ -237,8 +238,9 @@ export function resolveChatWorkspace(workspace: string | undefined, allowedRoots
 
 function chatToolDefinitions(subagent: SubagentSettings): ModelToolDefinition[] {
   const base = subagent.enabled ? CHAT_TOOL_DEFINITIONS : CHAT_TOOL_DEFINITIONS.filter((tool) => !SUBAGENT_TOOL_NAMES.has(tool.function.name));
-  return [...base, ASK_USER_TOOL_DEFINITION];
+  return [...base, ASK_USER_TOOL_DEFINITION, UPDATE_PLAN_TOOL_DEFINITION];
 }
+
 
 /**
  * Builds the model messages for a chat turn. When the client has compacted earlier history, the summary is placed
@@ -1305,6 +1307,7 @@ export class HieroRuntime {
       const applySteers = () => {
         const items = steer.drain();
         if (items.length === 0) return false;
+        console.log(`[chat ${request.request_id}] applied ${items.length} steer(s) before model call`);
         messages.push(steerMessage(items));
         for (const item of items) emit({ type: 'CHAT_STEER_APPLIED', payload: { request_id: request.request_id, steer_id: item.steer_id } });
         return true;
@@ -1320,13 +1323,6 @@ export class HieroRuntime {
         track(response);
         endModelCall({ ok: true, detail: response.usage ? `输入 ${response.usage.input_tokens} / 输出 ${response.usage.output_tokens} tokens` : undefined });
         if (!response.tool_calls || response.tool_calls.length === 0) {
-          // The answer was written before this supplement arrived, so answer again with it included.
-          if (steer.hasPending() && step + 1 < CHAT_TOOL_ROUNDS) {
-            emit({ type: 'CHAT_RESET', payload: { request_id: request.request_id } });
-            messages.push({ role: 'assistant', content: response.content });
-            response = undefined;
-            continue;
-          }
           break;
         }
         emit({ type: 'CHAT_RESET', payload: { request_id: request.request_id } });
@@ -1353,6 +1349,14 @@ export class HieroRuntime {
             result = await this.runDelegatedTask(mode, call.function.arguments, workspacePath, task, signal, subagent, request.category_rules, request.conversation_id);
           } else if (call.function.name === 'ask_user') {
             result = await this.runAskUser(call.function.arguments, signal);
+          } else if (call.function.name === 'update_plan') {
+            const steps = parsePlanArguments(call.function.arguments);
+            if (steps) {
+              emit({ type: 'CHAT_PLAN', payload: { request_id: request.request_id, steps } });
+              result = JSON.stringify({ status: 'recorded', steps: steps.length });
+            } else {
+              result = JSON.stringify({ error: 'update_plan requires 1-20 steps, each with a non-empty title and status pending, in_progress, or done.' });
+            }
           } else {
             result = await this.runChatTool(chatToolGateway, call.function.name, call.function.arguments, task.permission_mode);
           }

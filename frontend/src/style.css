@@ -915,6 +915,18 @@ select option, select optgroup { background-color: var(--option-bg); color: var(
 select { color-scheme: inherit; }
 
 .chat-steer-list { list-style: none; margin: 0 0 8px; padding: 0 12px; display: grid; gap: 4px; }
+.chat-run-board { margin: 0 12px 8px; padding: 8px 10px; border: 1px solid var(--border, #d0d7de); border-radius: 8px; font-size: 13px; }
+.chat-run-board-head { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 4px; }
+.chat-run-board-progress { font-variant-numeric: tabular-nums; opacity: 0.75; }
+.chat-run-region + .chat-run-region { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border, #d0d7de); }
+.chat-run-goal { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }
+.chat-run-exec { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-family: ui-monospace, monospace; font-size: 12px; }
+.chat-run-empty { opacity: 0.6; }
+.chat-plan-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.chat-plan-step { display: grid; grid-template-columns: 16px 1fr auto; gap: 6px; align-items: baseline; }
+.chat-plan-done .chat-plan-title { text-decoration: line-through; opacity: 0.6; }
+.chat-plan-in_progress { font-weight: 600; }
+.chat-plan-status { font-size: 12px; opacity: 0.7; }
 .chat-steer { display: flex; gap: 8px; align-items: baseline; font-size: 13px; padding: 4px 10px; border-radius: 10px; border: 1px dashed var(--border, #888); opacity: 0.9; }
 .chat-steer-status { flex: none; font-size: 12px; opacity: 0.75; }
 .chat-steer-text { overflow-wrap: anywhere; }
