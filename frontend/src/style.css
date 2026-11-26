@@ -899,3 +899,6 @@ button, textarea, select { font: inherit; }
 .task-item.active { background: rgba(255, 255, 255, 0.12); }
 .task-item { display: flex; flex-direction: column; gap: 2px; }
 .task-item small { opacity: 0.6; font-size: 11px; }
+
+select option, select optgroup { background-color: var(--surface-2); color: var(--text-strong); }
+select { color-scheme: inherit; }
