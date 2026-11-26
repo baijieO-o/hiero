@@ -352,6 +352,8 @@ function readPathArgument(rawArguments: string): string {
 }
 
 /** Messages to send to the backend: the summary covers the older part, so only the messages after it are sent. Divider rows are never sent. */
+const CHAT_SUGGESTIONS = ['总结当前工作区的项目结构', '帮我审查最近的代码改动', '列出可以优化的地方并说明风险'];
+
 function sendableHistory(conversation: Conversation, extra: ChatMessage[] = []): ChatMessage[] {
   return sendableMessages(conversation, extra);
 }
@@ -1288,9 +1290,10 @@ function ChatPanel(): ReactElement {
     setScrolledUp(false);
     log.scrollTo({ top: log.scrollHeight, behavior: 'smooth' });
   };
+  const lastMessageLength = messages.length > 0 ? messages[messages.length - 1].content.length : 0;
   useEffect(() => {
     if (autoScroll && logRef.current && logRef.current.dataset.userScrolledUp !== 'true') logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [autoScroll, messages.length]);
+  }, [autoScroll, messages.length, lastMessageLength]);
   const [jumpOpen, setJumpOpen] = useState(false);
   useEffect(() => { setJumpOpen(false); }, [activeId]);
   useEffect(() => { if (sessionInfoOpen && active && !pending) requestContextUsage(active.id); }, [sessionInfoOpen, activeId, messages.length, pending]);
@@ -1515,7 +1518,13 @@ function ChatPanel(): ReactElement {
         </div>}
         <div className="chat-log-wrap">
         <div className="chat-log" ref={logRef}>
-          {messages.length === 0 && !pending && <p className="chat-empty">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>}
+          {messages.length === 0 && !pending && <div className="chat-empty">
+            <p className="chat-empty-hint">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>
+            <p className="chat-empty-capability">我可以读写工作区文件、运行命令、搜索网页，并协助规划与审查代码。</p>
+            <div className="chat-suggestions">
+              {CHAT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} className="chat-suggestion" onClick={() => { setDraft(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}
+            </div>
+          </div>}
           {messages.map((message, index) => message.compactedMarker
             ? <div key={index} className="chat-compacted-divider" role="separator">已压缩之前的对话</div>
             : <ChatMessageView key={index} anchorIndex={index} role={message.role} content={message.content} images={message.images} files={message.files} steps={message.steps} segments={message.segments} usage={message.usage} model={message.model} status={message.status} trace={message.trace} completedAt={message.completedAt} onRewind={message.role === 'user' ? () => rewindConversation(index) : undefined} onFork={message.role === 'user' ? () => forkConversation(index) : undefined} onEditResend={message.role === 'user' ? (text) => editAndResend(index, text) : undefined} rewindDisabled={pending} />)}
