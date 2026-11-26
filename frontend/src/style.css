@@ -15,6 +15,8 @@
   --accent-hi: color-mix(in srgb, var(--accent) 60%, #fff);
   --accent-text: #ddf5bd;
   --accent-contrast: #0d1608;
+  --option-bg: #1d2026;
+  --option-text: #f4f5f7;
   --panel-opacity: 1;
   color-scheme: dark;
 }
@@ -30,6 +32,8 @@
   --text-muted: #5b6880;
   --accent: #3f8a1c;
   --accent-text: #2f6b12;
+  --option-bg: #ffffff;
+  --option-text: #0f1726;
   color-scheme: light;
 }
 :root[data-theme='light'] .dockview-theme-abyss {
@@ -900,5 +904,5 @@ button, textarea, select { font: inherit; }
 .task-item { display: flex; flex-direction: column; gap: 2px; }
 .task-item small { opacity: 0.6; font-size: 11px; }
 
-select option, select optgroup { background-color: var(--surface-2); color: var(--text-strong); }
+select option, select optgroup { background-color: var(--option-bg); color: var(--option-text); }
 select { color-scheme: inherit; }

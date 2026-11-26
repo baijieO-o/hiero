@@ -12,6 +12,8 @@ export const THEME_VARIABLES = [
   '--accent',
   '--accent-text',
   '--accent-contrast',
+  '--option-bg',
+  '--option-text',
 ] as const;
 
 export type ThemeVariable = (typeof THEME_VARIABLES)[number];

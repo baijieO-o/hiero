@@ -345,6 +345,8 @@ const THEME_VARIABLE_LABELS: Record<(typeof THEME_VARIABLES)[number], string> = 
   '--accent': '强调色（同「强调色」设置）',
   '--accent-text': '强调文字',
   '--accent-contrast': '强调色上的文字',
+  '--option-bg': '下拉选项背景',
+  '--option-text': '下拉选项文字',
 };
 
 function ThemePaletteControl({ palette, onChange }: { palette: ThemePalette; onChange: (value: ThemePalette) => void }): ReactElement {
