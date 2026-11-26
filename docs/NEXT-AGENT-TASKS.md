@@ -56,8 +56,9 @@
 
 ## 6. 待办（按优先级）
 
-1. **修复计划状态残留（小）**：`frontend/src/App.tsx` 中 `plan` 只在发送时重置（约 793 行）。运行完成、报错或取消后，计划区仍保留旧内容。应在 complete / error / cancel 路径同样处理，并补一个界面状态测试或 e2e 检查。
-2. **循环级 steer 单测（小）**：`test/chat-steer.test.js` 目前只覆盖队列与事件；需要补 `runChat` 循环中“补充在下一次模型调用前被应用”的脚本化测试。注意测试时序：steer 必须在运行中发送，否则会变成新一轮。
+1. **【已完成】修复计划状态残留（小）**：`frontend/src/App.tsx` 的 CHAT_CANCELLED、CHAT_UNKNOWN、CHAT_ERROR 与完成路径现在都会把 `plan` 置空。已验证：`frontend` 下 `tsc --noEmit` 与 `npm run build` 通过。**未补界面状态测试或 e2e 检查**，仍为缺口。提交 `9e3d2b7`，未推送。
+2. **【已完成】循环级 steer 单测（小）**：新增 `test/chat-steer-loop.test.ts`。它用本地模拟模型服务，在第一次模型请求进行中排队补充，断言第二次请求包含补充文本，并发出 `CHAT_STEER_APPLIED`。已验证：`node --test dist/test/chat-steer-loop.test.js` 通过；`chat-steer` 与 `chat-tools` 共 8/8 通过。提交 `9e3d2b7`，未推送。
+   - 既有问题（未处理）：`test/chat-steer.test.ts` 注释存在编码错误（UTF-8 被按 GBK 解码），建议单独提交修复。
 3. **计划可编辑（中）**：为计划步骤增加稳定 ID；允许用户在计划区调整步骤与补充约束；Agent 下一次调用时读取修改后的计划（闭环）。先读 P1 全文确认“人提供中间步骤”的具体做法，再决定语义。
 4. **DAG 路径的 steer 注入（中）**：注入点不变，只做设计，代码未改。`src/agent-executor.ts` 的 `exec()`（约 85–134 行）；`src/agent-workflow.ts` 的 `stepVerifier`（约 180–195 行）与 `execDag`（约 200–230 行）；`src/plan-dag.ts` 的 `runPlanDag`（约 60–90 行）。
 5. **执行区中断与纠正（中）**：目前只有 Stop（整轮取消）。需要“暂停并纠正后继续”的语义，并区分取消与纠正。
