@@ -14,7 +14,7 @@ import { createChatToolGateway, hitlBreakpointsFromEnv } from './chat-tool-gatew
 export { hitlBreakpointsFromEnv };
 import { CapabilityRouter } from './capability-router.js';
 import { capabilityPromptBlock, mcpSearchGuidance } from './capability-summary.js';
-import { parsePlanArguments } from './chat-plan.js';
+import { PlanIdAllocator, parsePlanArguments, parsePlanSteps, type PlanStep, type PlanStepInput } from './chat-plan.js';
 import { ASK_USER_TOOL_DEFINITION, CHAT_TOOL_DEFINITIONS, EDIT_FILE_TOOL_DEFINITION, READ_ONLY_WORKSPACE_TOOLS, UPDATE_PLAN_TOOL_DEFINITION, WRITE_FILE_TOOL_DEFINITION } from './chat-tool-definitions.js';
 import { mcpConfigPath, readMcpConfig, saveMcpConfig, toClientConfig, type McpServerEntry } from './mcp-config.js';
 import { McpToolClient } from './mcp-client.js';
@@ -280,12 +280,15 @@ function isTaskHistoryRequest(message: unknown): boolean {
 interface ChatCancelRequest { type: 'chat_cancel'; request_id: string }
 
 /** 运行中的补充信息：在当前运行的下一次模型调用前生效，不打断正在进行的调用。 */
-interface ChatSteerRequest { type: 'chat_steer'; request_id: string; steer_id: string; text: string }
+/** A user plan edit (`plan`) replaces the whole plan. Its `text` is a short note shown to the model with the plan. */
+interface ChatSteerRequest { type: 'chat_steer'; request_id: string; steer_id: string; text: string; plan?: PlanStepInput[] }
 
 function isChatSteerRequest(message: unknown): message is ChatSteerRequest {
   if (typeof message !== 'object' || message === null) return false;
   const candidate = message as Partial<Record<keyof ChatSteerRequest, unknown>>;
-  return candidate.type === 'chat_steer' && typeof candidate.request_id === 'string' && typeof candidate.steer_id === 'string' && typeof candidate.text === 'string' && candidate.text.trim().length > 0;
+  if (candidate.type !== 'chat_steer' || typeof candidate.request_id !== 'string' || typeof candidate.steer_id !== 'string' || typeof candidate.text !== 'string') return false;
+  if (candidate.plan !== undefined) return parsePlanSteps(candidate.plan) !== undefined;
+  return candidate.text.trim().length > 0;
 }
 
 interface BrowserPauseRequest { type: 'browser_agent_pause'; paused: boolean }
@@ -1227,7 +1230,9 @@ export class HieroRuntime {
   private steerChat(request: ChatSteerRequest, client: WebSocket): void {
     const steer = this.chatSteers.get(request.request_id);
     const run = this.chatRuns.get(request.request_id);
-    const item = steer?.push(request.steer_id, request.text.trim());
+    const plan = request.plan ? parsePlanSteps(request.plan) : undefined;
+    const text = request.text.trim() || '用户修改了计划';
+    const item = steer?.push(request.steer_id, text, plan);
     if (!steer || !item || !run) {
       this.runtime.send({ type: 'CHAT_STEER_REJECTED', payload: { request_id: request.request_id, steer_id: request.steer_id, reason: '该请求已结束' } }, client);
       return;
@@ -1304,10 +1309,17 @@ export class HieroRuntime {
       const chatToolGateway = this.createChatToolGateway(workspacePath, true, request.category_rules, request.conversation_id);
       const compactor = this.createCompactor();
       // Supplements queued during the run enter the context right before the next model call.
+      // The plan of this run. Its step ids are kept across model revisions and user edits.
+      let currentPlan: PlanStep[] = [];
       const applySteers = () => {
         const items = steer.drain();
         if (items.length === 0) return false;
         console.log(`[chat ${request.request_id}] applied ${items.length} steer(s) before model call`);
+        for (const item of items) {
+          if (item.plan) currentPlan = new PlanIdAllocator(currentPlan).assign(item.plan);
+        }
+        const planEdit = items.find((item) => item.plan);
+        if (planEdit) emit({ type: 'CHAT_PLAN', payload: { request_id: request.request_id, steps: currentPlan } });
         messages.push(steerMessage(items));
         for (const item of items) emit({ type: 'CHAT_STEER_APPLIED', payload: { request_id: request.request_id, steer_id: item.steer_id } });
         return true;
@@ -1350,10 +1362,11 @@ export class HieroRuntime {
           } else if (call.function.name === 'ask_user') {
             result = await this.runAskUser(call.function.arguments, signal);
           } else if (call.function.name === 'update_plan') {
-            const steps = parsePlanArguments(call.function.arguments);
-            if (steps) {
-              emit({ type: 'CHAT_PLAN', payload: { request_id: request.request_id, steps } });
-              result = JSON.stringify({ status: 'recorded', steps: steps.length });
+            const inputs = parsePlanArguments(call.function.arguments);
+            if (inputs) {
+              currentPlan = new PlanIdAllocator(currentPlan).assign(inputs);
+              emit({ type: 'CHAT_PLAN', payload: { request_id: request.request_id, steps: currentPlan } });
+              result = JSON.stringify({ status: 'recorded', steps: currentPlan.map((step) => ({ id: step.id, title: step.title, status: step.status })) });
             } else {
               result = JSON.stringify({ error: 'update_plan requires 1-20 steps, each with a non-empty title and status pending, in_progress, or done.' });
             }

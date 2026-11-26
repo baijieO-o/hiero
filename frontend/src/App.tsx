@@ -209,16 +209,58 @@ function appendTextSegment(segments: ChatSegment[], text: string): ChatSegment[]
 }
 
 type PlanStepStatus = 'pending' | 'in_progress' | 'done';
-interface PlanStep { title: string; status: PlanStepStatus }
+/** `id` is assigned by the backend and stays stable across model revisions and user edits. */
+interface PlanStep { id: string; title: string; status: PlanStepStatus }
+
+const PLAN_STATUS_LABEL: Record<PlanStepStatus, string> = { pending: '待办', in_progress: '进行中', done: '完成' };
+
+/**
+ * The plan zone of the run board. It shows the plan read-only; while the run is pending, 编辑 opens a draft
+ * where steps can be retitled, re-statused, removed, or added. 保存 sends the whole draft as one edit.
+ */
+function PlanEditor({ plan, pending, onSave }: { plan: PlanStep[]; pending: boolean; onSave: (steps: Array<{ title: string; status: PlanStepStatus }>) => void }) {
+  const [draft, setDraft] = useState<Array<{ title: string; status: PlanStepStatus }> | null>(null);
+  const done = plan.filter((step) => step.status === 'done').length;
+  const canSave = draft !== null && draft.length > 0 && draft.every((step) => step.title.trim().length > 0);
+  return <div className="chat-run-region">
+    <header className="chat-run-board-head">
+      <span>计划</span>
+      <span className="chat-run-board-progress">{done}/{plan.length}</span>
+      {pending && draft === null && <button type="button" className="chat-plan-edit" onClick={() => setDraft(plan.map(({ title, status }) => ({ title, status })))}>编辑</button>}
+    </header>
+    {draft === null && <ol className="chat-plan-steps">
+      {plan.map((step) => <li key={step.id} className={`chat-plan-step chat-plan-${step.status}`}>
+        <span className="chat-plan-mark" aria-hidden="true">{step.status === 'done' ? '✓' : step.status === 'in_progress' ? '›' : '·'}</span>
+        <span className="chat-plan-title">{step.title}</span>
+        <span className="chat-plan-status">{PLAN_STATUS_LABEL[step.status]}</span>
+      </li>)}
+    </ol>}
+    {draft !== null && <div className="chat-plan-draft">
+      {draft.map((step, index) => <div key={index} className="chat-plan-draft-row">
+        <input aria-label={`第 ${index + 1} 步标题`} value={step.title} maxLength={200} onChange={(event) => setDraft(draft.map((item, i) => i === index ? { ...item, title: event.target.value } : item))} />
+        <select aria-label={`第 ${index + 1} 步状态`} value={step.status} onChange={(event) => setDraft(draft.map((item, i) => i === index ? { ...item, status: event.target.value as PlanStepStatus } : item))}>
+          {(Object.keys(PLAN_STATUS_LABEL) as PlanStepStatus[]).map((status) => <option key={status} value={status}>{PLAN_STATUS_LABEL[status]}</option>)}
+        </select>
+        <button type="button" aria-label={`删除第 ${index + 1} 步`} onClick={() => setDraft(draft.filter((_, i) => i !== index))}>×</button>
+      </div>)}
+      <div className="chat-plan-draft-actions">
+        <button type="button" disabled={draft.length >= 20} onClick={() => setDraft([...draft, { title: '', status: 'pending' }])}>添加步骤</button>
+        <button type="button" onClick={() => setDraft(null)}>取消</button>
+        <button type="button" disabled={!canSave} onClick={() => { onSave(draft.map((step) => ({ title: step.title.trim(), status: step.status }))); setDraft(null); }}>保存</button>
+      </div>
+    </div>}
+  </div>;
+}
 
 /** Keeps only well-formed plan steps from a CHAT_PLAN payload. */
 function parsePlanSteps(raw: unknown): PlanStep[] {
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((item): PlanStep[] => {
+    const id = typeof item?.id === 'string' ? item.id : '';
     const title = typeof item?.title === 'string' ? item.title : '';
     const status = item?.status;
-    if (!title || (status !== 'pending' && status !== 'in_progress' && status !== 'done')) return [];
-    return [{ title, status }];
+    if (!id || !title || (status !== 'pending' && status !== 'in_progress' && status !== 'done')) return [];
+    return [{ id, title, status }];
   });
 }
 
@@ -360,6 +402,8 @@ interface ChatState {
   cancel: () => void;
   /** Adds a supplement to the run in progress; it takes effect at the next model call. */
   steer: (text: string) => void;
+  /** Replaces the whole plan of the run in progress; the edit takes effect at the next model call. */
+  steerPlan: (steps: Array<{ title: string; status: PlanStepStatus }>) => void;
 }
 
 /** A user supplement sent during a run. `queued` waits for the backend; `applied` is in the model context; `rejected` was not used. */
@@ -837,6 +881,17 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       if (target.readyState === WebSocket.OPEN) target.send(payload);
       else target.addEventListener('open', () => target.send(payload), { once: true });
     },
+    steerPlan: (steps) => {
+      const request = activeRequest;
+      if (!request || !get().pending || steps.length === 0) return;
+      const steerId = `steer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const text = '用户修改了计划';
+      set((state) => ({ steers: [...state.steers, { id: steerId, text, status: 'queued' }] }));
+      const target = ensureSocket();
+      const payload = JSON.stringify({ type: 'chat_steer', request_id: request.requestId, steer_id: steerId, text, plan: steps });
+      if (target.readyState === WebSocket.OPEN) target.send(payload);
+      else target.addEventListener('open', () => target.send(payload), { once: true });
+    },
   };
 }, {
   name: 'hiero-chat',
@@ -1245,7 +1300,7 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, editAndResend, send, retry, cancel, steer, steers, plan, streamingSegments } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, editAndResend: state.editAndResend, send: state.send, retry: state.retry, cancel: state.cancel, steer: state.steer, steers: state.steers, plan: state.plan, streamingSegments: state.streamingSegments })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, editAndResend, send, retry, cancel, steer, steerPlan, steers, plan, streamingSegments } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, editAndResend: state.editAndResend, send: state.send, retry: state.retry, cancel: state.cancel, steer: state.steer, steerPlan: state.steerPlan, steers: state.steers, plan: state.plan, streamingSegments: state.streamingSegments })));
   const [draft, setDraft] = useState('');
   const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1611,16 +1666,7 @@ function ChatPanel(): ReactElement {
               <header className="chat-run-board-head"><span>任务</span></header>
               <p className="chat-run-goal">{lastUser?.content ?? '（无）'}</p>
             </div>
-            {plan.length > 0 && <div className="chat-run-region">
-              <header className="chat-run-board-head"><span>计划</span><span className="chat-run-board-progress">{plan.filter((step) => step.status === 'done').length}/{plan.length}</span></header>
-              <ol className="chat-plan-steps">
-                {plan.map((step, index) => <li key={`${index}-${step.title}`} className={`chat-plan-step chat-plan-${step.status}`}>
-                  <span className="chat-plan-mark" aria-hidden="true">{step.status === 'done' ? '✓' : step.status === 'in_progress' ? '›' : '·'}</span>
-                  <span className="chat-plan-title">{step.title}</span>
-                  <span className="chat-plan-status">{step.status === 'done' ? '完成' : step.status === 'in_progress' ? '进行中' : '待办'}</span>
-                </li>)}
-              </ol>
-            </div>}
+            {plan.length > 0 && <PlanEditor plan={plan} pending={pending} onSave={steerPlan} />}
             {pending && <div className="chat-run-region">
               <header className="chat-run-board-head"><span>执行</span><span className="chat-run-board-progress">{runningTools.length} 次工具</span></header>
               <ul className="chat-run-exec">

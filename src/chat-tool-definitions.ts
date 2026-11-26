@@ -137,7 +137,7 @@ export const UPDATE_PLAN_TOOL_DEFINITION: ModelToolDefinition = {
   type: 'function',
   function: {
     name: 'update_plan',
-    description: 'Publish or revise the step plan for a multi-step task so the user can follow progress. Call it once at the start with the steps, then call it again whenever a step starts, finishes, or the plan changes. Pass the full list each time. Keep steps short and concrete. Use it only for tasks that need several steps.',
+    description: 'Publish or revise the step plan for a multi-step task so the user can follow progress. Call it once at the start with the steps, then call it again whenever a step starts, finishes, or the plan changes. Pass the full list each time. Keep each step title identical across calls so the step keeps its id; the result lists the id of each step. The user may edit the plan during the run, and an edited plan appears in your context. Keep steps short and concrete. Use it only for tasks that need several steps.',
     parameters: {
       type: 'object',
       additionalProperties: false,

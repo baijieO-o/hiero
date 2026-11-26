@@ -927,6 +927,11 @@ select { color-scheme: inherit; }
 .chat-plan-done .chat-plan-title { text-decoration: line-through; opacity: 0.6; }
 .chat-plan-in_progress { font-weight: 600; }
 .chat-plan-status { font-size: 12px; opacity: 0.7; }
+.chat-plan-edit { margin-left: auto; font-size: 12px; }
+.chat-plan-draft { display: grid; gap: 4px; }
+.chat-plan-draft-row { display: grid; grid-template-columns: 1fr auto auto; gap: 4px; }
+.chat-plan-draft-row input { min-width: 0; }
+.chat-plan-draft-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .chat-steer { display: flex; gap: 8px; align-items: baseline; font-size: 13px; padding: 4px 10px; border-radius: 10px; border: 1px dashed var(--border, #888); opacity: 0.9; }
 .chat-steer-status { flex: none; font-size: 12px; opacity: 0.75; }
 .chat-steer-text { overflow-wrap: anywhere; }

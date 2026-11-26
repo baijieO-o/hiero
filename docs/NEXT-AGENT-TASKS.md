@@ -45,6 +45,8 @@
 | 后端类型检查 | 通过 | `npx tsc -p .` |
 | 聊天 steer 单测 | 3/3 通过 | `node --test dist/test/chat-steer.test.js` |
 | 计划单测 | 2/2 通过 | `node --test dist/test/chat-plan.test.js` |
+| 计划可编辑（待办 3）：计划单测与循环单测 | 7/7 通过 | `node --test dist/test/chat-plan.test.js dist/test/chat-steer-loop.test.js` |
+| 计划残留修复与循环 steer 单测（待办 1、2） | 通过 | `node --test dist/test/chat-steer-loop.test.js`（提交 `9e3d2b7`） |
 | 前端类型检查与构建 | 通过（已知 500 kB chunk 警告，既有） | `frontend` 下 `tsc --noEmit`、`npm run build` |
 | 四区域与中途补充的浏览器 e2e | 已通过 | 页面渲染计划、运行中补充 |
 
@@ -59,7 +61,7 @@
 1. **【已完成】修复计划状态残留（小）**：`frontend/src/App.tsx` 的 CHAT_CANCELLED、CHAT_UNKNOWN、CHAT_ERROR 与完成路径现在都会把 `plan` 置空。已验证：`frontend` 下 `tsc --noEmit` 与 `npm run build` 通过。**未补界面状态测试或 e2e 检查**，仍为缺口。提交 `9e3d2b7`，未推送。
 2. **【已完成】循环级 steer 单测（小）**：新增 `test/chat-steer-loop.test.ts`。它用本地模拟模型服务，在第一次模型请求进行中排队补充，断言第二次请求包含补充文本，并发出 `CHAT_STEER_APPLIED`。已验证：`node --test dist/test/chat-steer-loop.test.js` 通过；`chat-steer` 与 `chat-tools` 共 8/8 通过。提交 `9e3d2b7`，未推送。
    - 既有问题（未处理）：`test/chat-steer.test.ts` 注释存在编码错误（UTF-8 被按 GBK 解码），建议单独提交修复。
-3. **计划可编辑（中）**：为计划步骤增加稳定 ID；允许用户在计划区调整步骤与补充约束；Agent 下一次调用时读取修改后的计划（闭环）。先读 P1 全文确认“人提供中间步骤”的具体做法，再决定语义。
+3. **【已完成】计划可编辑（中）**：后端在首次发布时分配稳定步骤 ID（`s1`、`s2`…，同一运行内不复用）；模型按相同标题重发布时保留原 ID。用户编辑（`chat_steer` 携带 `plan`）整体替换计划，经 steer 队列在下一次模型调用前注入，并在对话中说明“用户修改了计划”。前端计划区提供编辑（标题、状态、删除、添加），运行结束后不可编辑。依据 P1（arXiv 2410.00079）§3.2：用户在步骤等待期间干预，系统把输入并入轨迹。已验证：`node --test dist/test/chat-plan.test.js dist/test/chat-steer-loop.test.js` 共 7/7 通过；`frontend` 下 `tsc --noEmit` 与 `npm run build` 通过。**未验证**：真实模型是否遵循标题匹配以保留 ID；编辑 UI 未做浏览器 e2e。提交 `04f6125`，未推送。
 4. **DAG 路径的 steer 注入（中）**：注入点不变，只做设计，代码未改。`src/agent-executor.ts` 的 `exec()`（约 85–134 行）；`src/agent-workflow.ts` 的 `stepVerifier`（约 180–195 行）与 `execDag`（约 200–230 行）；`src/plan-dag.ts` 的 `runPlanDag`（约 60–90 行）。
 5. **执行区中断与纠正（中）**：目前只有 Stop（整轮取消）。需要“暂停并纠正后继续”的语义，并区分取消与纠正。
 6. **成果区修改入口（中）**：对成果提出修改，作为新 steer 或新一轮请求，需要定义与来源的关系。
