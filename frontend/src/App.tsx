@@ -353,6 +353,8 @@ function readPathArgument(rawArguments: string): string {
 
 /** Messages to send to the backend: the summary covers the older part, so only the messages after it are sent. Divider rows are never sent. */
 const CHAT_SUGGESTIONS = ['总结当前工作区的项目结构', '帮我审查最近的代码改动', '列出可以优化的地方并说明风险'];
+/** Suggestions shown when the user has shared browser pages, so prompts match what the agent can already see. */
+const PAGE_SUGGESTIONS = ['检查这个页面的可访问性问题', '根据这个页面的内容，帮我整理一份要点', '对比这个页面与我的工作区实现'];
 
 function sendableHistory(conversation: Conversation, extra: ChatMessage[] = []): ChatMessage[] {
   return sendableMessages(conversation, extra);
@@ -1522,7 +1524,7 @@ function ChatPanel(): ReactElement {
             <p className="chat-empty-hint">{sendKey === 'mod-enter' ? '输入问题开始对话。Ctrl/Cmd+Enter 发送，Enter 换行。' : '输入问题开始对话。Enter 发送，Shift+Enter 换行。'}</p>
             <p className="chat-empty-capability">我可以读写工作区文件、运行命令、搜索网页，并协助规划与审查代码。</p>
             <div className="chat-suggestions">
-              {CHAT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} className="chat-suggestion" onClick={() => { setDraft(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}
+              {(sharedPageUrls.length > 0 ? PAGE_SUGGESTIONS : CHAT_SUGGESTIONS).map((suggestion) => <button type="button" key={suggestion} className="chat-suggestion" onClick={() => { setDraft(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}
             </div>
           </div>}
           {messages.map((message, index) => message.compactedMarker

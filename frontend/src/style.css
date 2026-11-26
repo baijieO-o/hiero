@@ -711,8 +711,10 @@ button, textarea, select { font: inherit; }
 
 
 /* 输入框：圆角一体容器，工具栏在底部 */
-.chat-composer .chat-input-box { gap: 0; padding: 6px 8px 6px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
-.chat-composer .chat-input-box:focus-within { border-color: var(--accent, #1f6feb); }
+/* 参考 Apple HIG Liquid Glass：输入控件浮在内容层之上，使用半透明材质与模糊，保证可读性 */
+.chat-composer .chat-input-box { gap: 0; padding: 6px 8px 6px; border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); border-radius: 16px; background: color-mix(in srgb, var(--surface-2) 82%, transparent); backdrop-filter: blur(16px) saturate(150%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 6px 20px rgba(0, 0, 0, .18); transition: border-color .2s ease, box-shadow .2s ease; }
+.chat-composer .chat-input-box:focus-within { border-color: var(--accent, #1f6feb); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 0 0 3px color-mix(in srgb, var(--accent, #1f6feb) 25%, transparent), 0 6px 20px rgba(0, 0, 0, .18); }
+@media (prefers-reduced-motion: reduce) { .chat-composer .chat-input-box { transition: none; } }
 .chat-composer .chat-input-box textarea { border: none; outline: none; background: transparent; box-shadow: none; padding: 2px 4px 4px; min-height: 36px; max-height: 180px; }
 .chat-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .chat-usage-ring { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: none; border-radius: 50%; background: transparent; color: var(--text-muted); cursor: pointer; }
