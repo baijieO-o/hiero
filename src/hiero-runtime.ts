@@ -87,6 +87,7 @@ import { paramsForModel, ConfigWatcher } from './config.js';
 import { Telemetry } from './telemetry.js';
 import { readUsageStats } from './usage-stats.js';
 import { ChatTrace, isToolErrorResult, summarizeForTrace } from './chat-trace.js';
+import { ChatSteerQueue, steerMessage } from './chat-steer.js';
 import { appendChatTrace, listChatTraces } from './trace-store.js';
 import { LONG_REPLY_THRESHOLD, saveLongReply } from './reply-store.js';
 import { canDelegate, DELEGATE_READ_TOOL_DEFINITION, DELEGATE_TASK_TOOL_DEFINITION, DELEGATE_WRITE_TOOL_DEFINITION, normalizeSubagentSettings, runReadOnlySubagent, type SubagentSettings } from './read-only-subagent.js';
@@ -275,6 +276,15 @@ function isTaskHistoryRequest(message: unknown): boolean {
 }
 
 interface ChatCancelRequest { type: 'chat_cancel'; request_id: string }
+
+/** 运行中的补充信息：在当前运行的下一次模型调用前生效，不打断正在进行的调用。 */
+interface ChatSteerRequest { type: 'chat_steer'; request_id: string; steer_id: string; text: string }
+
+function isChatSteerRequest(message: unknown): message is ChatSteerRequest {
+  if (typeof message !== 'object' || message === null) return false;
+  const candidate = message as Partial<Record<keyof ChatSteerRequest, unknown>>;
+  return candidate.type === 'chat_steer' && typeof candidate.request_id === 'string' && typeof candidate.steer_id === 'string' && typeof candidate.text === 'string' && candidate.text.trim().length > 0;
+}
 
 interface BrowserPauseRequest { type: 'browser_agent_pause'; paused: boolean }
 function isBrowserPauseRequest(message: unknown): message is BrowserPauseRequest {
@@ -525,6 +535,7 @@ export class HieroRuntime {
   private readonly telemetry = new Telemetry(this.configWatcher.current().logging.file);
   private readonly activeChats = new Map<string, AbortController>();
   private readonly chatRuns = new Map<string, ChatRunBuffer>();
+  private readonly chatSteers = new Map<string, ChatSteerQueue>();
   private readonly stateStore: StateStore;
   private currentTaskId: string | undefined;
   /** Tasks the wall-clock limit gave up on; their late return must not overwrite the failed state. */
@@ -565,7 +576,9 @@ export class HieroRuntime {
       else if (isProcessRequest(message)) this.handleProcessRequest(message, client);
       else if (isAllowlistRequest(message)) this.handleAllowlistRequest(message, client);
       else if (isChatRequest(message)) await this.handleChat(message, client);
-      else if (isChatCancelRequest(message)) {
+      else if (isChatSteerRequest(message)) {
+        this.steerChat(message, client);
+      } else if (isChatCancelRequest(message)) {
         if (!this.cancelChat(message.request_id, client)) client.send(JSON.stringify({ type: 'CHAT_CANCELLED', payload: { request_id: message.request_id } }));
       }
       else if (isBrowserPauseRequest(message)) {
@@ -1150,15 +1163,20 @@ export class HieroRuntime {
     const model = request.model ?? process.env.HIERO_LLM_MODEL ?? 'auto';
     const controller = new AbortController();
     this.activeChats.set(request.request_id, controller);
+    const steer = new ChatSteerQueue();
+    this.chatSteers.set(request.request_id, steer);
     const run: ChatRunBuffer = { events: [], client, finished: false };
     this.chatRuns.set(request.request_id, run);
     console.log(`[chat ${request.request_id}] start model=${model} client=${client ? 'attached' : 'none'}`);
     try {
-      await this.runChat(request, model, run, controller.signal);
+      await this.runChat(request, model, run, controller.signal, steer);
     } catch (cause) {
       const record = this.machine.toErrorRecord(cause);
       this.sendChat(request.request_id, run, { type: 'CHAT_ERROR', payload: { request_id: request.request_id, code: record.code, message: record.message } });
     } finally {
+      // Anything still queued never reached the model; tell the client instead of dropping it silently.
+      for (const item of steer.close()) this.sendChat(request.request_id, run, { type: 'CHAT_STEER_REJECTED', payload: { request_id: request.request_id, steer_id: item.steer_id, reason: '运行已结束，未应用' } });
+      this.chatSteers.delete(request.request_id);
       this.activeChats.delete(request.request_id);
       run.finished = true;
       run.finishedAt = Date.now();
@@ -1200,6 +1218,22 @@ export class HieroRuntime {
     }
   }
 
+  /**
+   * Queues a mid-run supplement for an active chat. It is applied before the next model call.
+   * A missing or finished run is rejected to the sender right away.
+   */
+  private steerChat(request: ChatSteerRequest, client: WebSocket): void {
+    const steer = this.chatSteers.get(request.request_id);
+    const run = this.chatRuns.get(request.request_id);
+    const item = steer?.push(request.steer_id, request.text.trim());
+    if (!steer || !item || !run) {
+      this.runtime.send({ type: 'CHAT_STEER_REJECTED', payload: { request_id: request.request_id, steer_id: request.steer_id, reason: '该请求已结束' } }, client);
+      return;
+    }
+    this.sendChat(request.request_id, run, { type: 'CHAT_STEER_QUEUED', payload: { request_id: request.request_id, steer_id: request.steer_id } });
+    console.log(`[chat ${request.request_id}] steer queued ${request.steer_id}`);
+  }
+
   /** Aborts an in-flight chat. The model call stops immediately and the client gets CHAT_CANCELLED. */
   private cancelChat(requestId: string, client?: WebSocket): boolean {
     const controller = this.activeChats.get(requestId);
@@ -1226,7 +1260,7 @@ export class HieroRuntime {
     }
   }
 
-  private async runChat(request: RuntimeChatRequest, model: string, run: ChatRunBuffer, signal: AbortSignal): Promise<void> {
+  private async runChat(request: RuntimeChatRequest, model: string, run: ChatRunBuffer, signal: AbortSignal, steer: ChatSteerQueue): Promise<void> {
     const requestId = request.request_id;
     const emit = (event: RuntimeEvent) => this.sendChat(requestId, run, event);
     const workspacePath = await this.resolveConversationWorkspace(request);
@@ -1267,16 +1301,34 @@ export class HieroRuntime {
       // One gateway per chat turn: its registrations and policy depend only on this request.
       const chatToolGateway = this.createChatToolGateway(workspacePath, true, request.category_rules, request.conversation_id);
       const compactor = this.createCompactor();
+      // Supplements queued during the run enter the context right before the next model call.
+      const applySteers = () => {
+        const items = steer.drain();
+        if (items.length === 0) return false;
+        messages.push(steerMessage(items));
+        for (const item of items) emit({ type: 'CHAT_STEER_APPLIED', payload: { request_id: request.request_id, steer_id: item.steer_id } });
+        return true;
+      };
       for (let step = 0; step < CHAT_TOOL_ROUNDS; step += 1) {
         if (estimateTokens(messages, toolDefinitions) > CHAT_COMPACT_TOKENS) {
           const compacted = await compactor.compact(task, messages);
           messages.splice(0, messages.length, ...compacted);
         }
+        applySteers();
         const endModelCall = trace.begin('model_call', `模型调用 ${step + 1}`);
         response = await this.gateway.complete(task, { prompt: '', messages, tools: toolDefinitions, onDelta, signal });
         track(response);
         endModelCall({ ok: true, detail: response.usage ? `输入 ${response.usage.input_tokens} / 输出 ${response.usage.output_tokens} tokens` : undefined });
-        if (!response.tool_calls || response.tool_calls.length === 0) break;
+        if (!response.tool_calls || response.tool_calls.length === 0) {
+          // The answer was written before this supplement arrived, so answer again with it included.
+          if (steer.hasPending() && step + 1 < CHAT_TOOL_ROUNDS) {
+            emit({ type: 'CHAT_RESET', payload: { request_id: request.request_id } });
+            messages.push({ role: 'assistant', content: response.content });
+            response = undefined;
+            continue;
+          }
+          break;
+        }
         emit({ type: 'CHAT_RESET', payload: { request_id: request.request_id } });
         messages.push({ role: 'assistant', content: response.content, tool_calls: response.tool_calls });
         let delegatedThisTurn = 0;
@@ -1324,6 +1376,7 @@ export class HieroRuntime {
         response = undefined;
       }
       if (!response) {
+        applySteers();
         const endFinalCall = trace.begin('model_call', `模型调用 ${usage.calls + 1}`);
         response = await this.gateway.complete(task, { prompt: '', messages, onDelta, signal });
         track(response);

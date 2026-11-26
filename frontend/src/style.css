@@ -913,3 +913,10 @@ button, textarea, select { font: inherit; }
 
 select option, select optgroup { background-color: var(--option-bg); color: var(--option-text); }
 select { color-scheme: inherit; }
+
+.chat-steer-list { list-style: none; margin: 0 0 8px; padding: 0 12px; display: grid; gap: 4px; }
+.chat-steer { display: flex; gap: 8px; align-items: baseline; font-size: 13px; padding: 4px 10px; border-radius: 10px; border: 1px dashed var(--border, #888); opacity: 0.9; }
+.chat-steer-status { flex: none; font-size: 12px; opacity: 0.75; }
+.chat-steer-text { overflow-wrap: anywhere; }
+.chat-steer-applied { border-style: solid; }
+.chat-steer-rejected { opacity: 0.6; text-decoration: line-through; }

@@ -45,6 +45,9 @@ export type RuntimeEvent =
   | { type: 'CHAT_TRACE_HISTORY'; payload: { workspace: string; traces: StoredChatTrace[] } }
   | { type: 'TASK_HISTORY'; payload: { tasks: TaskRecord[] } }
   | { type: 'CHAT_CANCELLED'; payload: { request_id: string } }
+  | { type: 'CHAT_STEER_QUEUED'; payload: { request_id: string; steer_id: string } }
+  | { type: 'CHAT_STEER_APPLIED'; payload: { request_id: string; steer_id: string } }
+  | { type: 'CHAT_STEER_REJECTED'; payload: { request_id: string; steer_id: string; reason: string } }
   | { type: 'CHAT_UNKNOWN'; payload: { request_id: string } }
   | { type: 'CHAT_USAGE'; payload: { request_id: string; usage: ContextUsageBreakdown } }
   | { type: 'USAGE_STATS'; payload: { request_id: string } & UsageStats }

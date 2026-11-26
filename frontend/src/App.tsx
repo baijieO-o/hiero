@@ -314,6 +314,8 @@ interface ChatState {
   pending: boolean;
   /** Ordered text and tool segments for the reply in progress. Only the streaming bubble subscribes to this. */
   streamingSegments: ChatSegment[];
+  /** Supplements sent while a run is in progress, shown until the backend applies or rejects them. */
+  steers: ChatSteer[];
   error: string | null;
   compacting: boolean;
   /** Latest context usage per conversation id, requested when the session info panel opens. */
@@ -340,6 +342,16 @@ interface ChatState {
   send:  (text: string, images?: string[], sharedUrls?: string[], taskCard?: { acceptance_criteria: string[]; budget_envelope: { max_tokens: number; max_time_ms: number } }) => void;
   retry: () => void;
   cancel: () => void;
+  /** Adds a supplement to the run in progress; it takes effect at the next model call. */
+  steer: (text: string) => void;
+}
+
+/** A user supplement sent during a run. `queued` waits for the backend; `applied` is in the model context; `rejected` was not used. */
+interface ChatSteer {
+  id: string;
+  text: string;
+  status: 'queued' | 'applied' | 'rejected';
+  reason?: string;
 }
 
 function readPathArgument(rawArguments: string): string {
@@ -543,7 +555,14 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         updateConversation(conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], error: null });
+        set({ pending: false, streamingSegments: [], steers: [], error: null });
+      } else if (message.type === 'CHAT_STEER_APPLIED' || message.type === 'CHAT_STEER_REJECTED') {
+        const steerId = typeof message.payload?.steer_id === 'string' ? message.payload.steer_id : '';
+        const applied = message.type === 'CHAT_STEER_APPLIED';
+        const reason = typeof message.payload?.reason === 'string' ? message.payload.reason : undefined;
+        set((state) => ({
+          steers: state.steers.map((steer) => steer.id === steerId ? { ...steer, status: applied ? 'applied' : 'rejected', ...(reason ? { reason } : {}) } : steer),
+        }));
       } else if (message.type === 'CHAT_CANCELLED') {
         const finished = finishStream({});
         const partial = finished.content.trim();
@@ -553,7 +572,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         lastFailedSend = null;
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], error: null });
+        set({ pending: false, streamingSegments: [], steers: [], error: null });
       } else if (message.type === 'CHAT_UNKNOWN') {
         // The backend no longer has this run (it restarted or the record expired), so nothing can be recovered.
         lastFailedSend = null;
@@ -562,7 +581,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         discardDeltas();
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], error: '未找到该请求的记录，可能后端已重启，请重试。' });
+        set({ pending: false, streamingSegments: [], steers: [], error: '未找到该请求的记录，可能后端已重启，请重试。' });
       } else if (message.type === 'CHAT_ERROR') {
         const rawDetail = typeof message.payload?.message === 'string' ? message.payload.message : '请求失败';
         const errorCode = typeof message.payload?.code === 'string' ? message.payload.code : '';
@@ -573,7 +592,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
         discardDeltas();
         activeRequest = null;
         writeActiveRequest(null);
-        set({ pending: false, streamingSegments: [], error: detail });
+        set({ pending: false, streamingSegments: [], steers: [], error: detail });
       }
     };
     // The backend keeps a chat run alive when the socket drops. On reconnect the pending request is re-attached
@@ -611,6 +630,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     activeId: initial.id,
     pending: restored !== null,
     streamingSegments: [],
+    steers: [],
     error: null,
     compacting: false,
     contextUsage: {},
@@ -751,7 +771,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       pendingFiles = [];
       discardDeltas();
       textBreak = false;
-      set({ pending: true, streamingSegments: [], error: null });
+      set({ pending: true, streamingSegments: [], steers: [], error: null });
       const target = ensureSocket();
       const { model, permission, workspace } = state.options;
       const subagent = useSubagentPreferences.getState().values;
@@ -771,7 +791,7 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
     cancel: () => {
       const request = activeRequest;
       if (!request) {
-        if (get().pending) set({ pending: false, streamingSegments: [], error: null });
+        if (get().pending) set({ pending: false, streamingSegments: [], steers: [], error: null });
         return;
       }
       const target = ensureSocket();
@@ -785,7 +805,18 @@ const useChatStore = create<ChatState>()(persist((set, get) => {
       if (hasContent) {
         updateConversation(request.conversationId, (conv) => ({ ...conv, messages: [...conv.messages, finished], updatedAt: Date.now() }));
       }
-      set({ pending: false, streamingSegments: [], error: null });
+      set({ pending: false, streamingSegments: [], steers: [], error: null });
+    },
+    steer: (text) => {
+      const trimmed = text.trim();
+      const request = activeRequest;
+      if (!trimmed || !request || !get().pending) return;
+      const steerId = `steer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      set((state) => ({ steers: [...state.steers, { id: steerId, text: trimmed, status: 'queued' }] }));
+      const target = ensureSocket();
+      const payload = JSON.stringify({ type: 'chat_steer', request_id: request.requestId, steer_id: steerId, text: trimmed });
+      if (target.readyState === WebSocket.OPEN) target.send(payload);
+      else target.addEventListener('open', () => target.send(payload), { once: true });
     },
   };
 }, {
@@ -1195,7 +1226,7 @@ const StreamingBubble = memo(function StreamingBubble(): ReactElement {
 });
 
 function ChatPanel(): ReactElement {
-  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, editAndResend, send, retry, cancel } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, editAndResend: state.editAndResend, send: state.send, retry: state.retry, cancel: state.cancel })));
+  const { conversations, activeId, pending, error, compacting, contextUsage, requestContextUsage, compactConversation, browserPageToShare, takeBrowserPageShare, options, setOption, newConversation, selectConversation, renameConversation, deleteConversation, deleteConversations, togglePin, rewindConversation, forkConversation, editAndResend, send, retry, cancel, steer, steers } = useChatStore(useShallow((state) => ({ conversations: state.conversations, activeId: state.activeId, pending: state.pending, error: state.error, compacting: state.compacting, contextUsage: state.contextUsage, requestContextUsage: state.requestContextUsage, compactConversation: state.compactConversation, browserPageToShare: state.browserPageToShare, takeBrowserPageShare: state.takeBrowserPageShare, options: state.options, setOption: state.setOption, newConversation: state.newConversation, selectConversation: state.selectConversation, renameConversation: state.renameConversation, deleteConversation: state.deleteConversation, deleteConversations: state.deleteConversations, togglePin: state.togglePin, rewindConversation: state.rewindConversation, forkConversation: state.forkConversation, editAndResend: state.editAndResend, send: state.send, retry: state.retry, cancel: state.cancel, steer: state.steer, steers: state.steers })));
   const [draft, setDraft] = useState('');
   const [sharedPageUrls, setSharedPageUrls] = useState<string[]>([]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1358,6 +1389,13 @@ function ChatPanel(): ReactElement {
     addFileRefs(otherFiles);
   };
   const submit = async () => {
+    if (pending) {
+      // While a run is in progress, a plain-text draft becomes a supplement instead of a new turn.
+      if (!draft.trim() || images.length > 0 || fileRefs.length > 0 || sharedPageUrls.length > 0) return;
+      steer(draft);
+      setDraft('');
+      return;
+    }
     if (!draft.trim() && images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0) return;
     if (images.length === 0 && fileRefs.length === 0 && sharedPageUrls.length === 0 && draft.trim() === '/compact') {
       setDraft('');
@@ -1544,6 +1582,12 @@ function ChatPanel(): ReactElement {
           onCompact={() => compactConversation(active.id)}
           onClose={() => setSessionInfoOpen(false)}
         />}
+        {pending && steers.length > 0 && <ul className="chat-steer-list" aria-label="执行中的补充信息">
+          {steers.map((item) => <li key={item.id} className={`chat-steer chat-steer-${item.status}`} title={item.reason}>
+            <span className="chat-steer-status">{item.status === 'queued' ? '等待应用' : item.status === 'applied' ? '已应用' : '未采用'}</span>
+            <span className="chat-steer-text">{item.text}</span>
+          </li>)}
+        </ul>}
         <div className="chat-composer" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={onDrop}>
           <div className="chat-input-box">
             {sharedPageUrls.length > 0 && <div className="chat-file-refs">
@@ -1563,7 +1607,7 @@ function ChatPanel(): ReactElement {
               </div>)}
               {imageError && <span className="chat-attachment-error">{imageError}</span>}
             </div>}
-            <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="发送消息给 Hiero……（可粘贴或拖入图片）" />
+            <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder={pending ? '执行中：输入补充信息，将在下一步生效' : '发送消息给 Hiero……（可粘贴或拖入图片）'} />
             <div className="chat-toolbar">
               <input ref={fileInputRef} type="file" accept="image/*" multiple hidden onChange={(event) => { addImageFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
               <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={pending || images.length >= MAX_CHAT_IMAGES} aria-label="添加图片" title="添加图片">
