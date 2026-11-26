@@ -5,7 +5,8 @@
 - 功能说明与配置：[docs/FEATURES.md](docs/FEATURES.md)
 - 架构与实现状态：[ARCHITECTURE.md](ARCHITECTURE.md) 第 7 节
 - 未实现与待决策事项：见下文第 5 节
-- 提交状态：最新提交为 `6379b81`（定时任务墙钟上限）及其之前的 19 个本地提交，尚未推送到 `origin/main`（`1cb88dc`）。推送前需用户确认。
+- **下一位接手者请先读 [docs/NEXT-AGENT-TASKS.md](docs/NEXT-AGENT-TASKS.md)**：参考论文、目标、已完成工作与待办清单。
+- 提交状态：最新提交为 `be27b60`（四区域运行面板），已推送到 `origin/main`。聊天 steer（`763ba14`）与 `update_plan` 也已包含在内。
 - 手动冒烟验证步骤见 [docs/SMOKE-TEST.md](docs/SMOKE-TEST.md)；真实模型、真实文件读写与 Docker 运行均需按清单实测，文档本身不代表验证通过。
 
 ## 1. 项目

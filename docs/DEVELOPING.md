@@ -60,6 +60,8 @@ interface RegisteredTool<TInput, TResult> {
 - **模型提供方协议**：在模型配置中设置 `protocol`，可选 `openai`（默认）、`openai-responses`、`anthropic`、`gemini`。新增协议时在 `src/model-protocols.ts` 的 `transportForProtocol` 中加分支，并在 `test/model-protocols.test.ts` 用 mock 服务器补测试。
 - **主题**：支持预设、自定义色板、JSON 导入导出和自定义 CSS，见设置的「外观」分类。
 - **模型提供方协议**：在提供方配置中设置 `protocol`（`openai` / `openai-responses` / `anthropic` / `gemini`，缺省为 `openai`）。新增协议时在 `src/model-protocols.ts` 实现 transport，并在 `transportForProtocol` 中注册，测试放入 `test/model-protocols.test.ts`。
+- **聊天计划工具 `update_plan`**：模型用 `update_plan` 工具上报当前计划的步骤与状态，后端在 `src/chat-plan.ts` 做校验并发出 `CHAT_PLAN` 运行事件，前端据此渲染四区域运行面板中的「计划区」。修改计划结构时同步更新 `src/chat-tool-definitions.ts`、`src/chat-plan.ts` 与 `test/chat-plan.test.ts`。
+- **执行中干预（chat steering）**：聊天运行中用户发送的普通文本消息会进入 `src/chat-steer.ts` 的 `ChatSteerQueue`，下一次模型调用前由 `hiero-runtime.ts` 的 `applySteers` 应用。新增干预语义时保持队列与 `CHAT_STEER_*` 事件（`runtime-server.ts` 的 `RuntimeEvent` 联合）成对更新。
 
 ## 4. 脚手架
 
