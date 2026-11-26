@@ -9,13 +9,39 @@ import type { ModelParams } from './config.js';
 interface ProtocolFetchOptions {
   timeoutMs?: number;
   maxTokens?: number;
+  paramsFor?: (model: string | undefined) => ModelParams;
 }
 
-/** Runs one HTTP request with a timeout that is also cancelled by the caller's signal. */
-async function postJson(url: string, headers: Record<string, string>, body: unknown, request: ModelRequest, timeoutMs: number): Promise<unknown> {
+/** Per-model params from config win over the env-level max token default. */
+function requestParams(options: ProtocolFetchOptions, model: string | undefined): ModelParams {
+  const configured = options.paramsFor?.(model) ?? {};
+  const maxTokens = configured.max_tokens ?? options.maxTokens;
+  return {
+    ...(configured.temperature !== undefined ? { temperature: configured.temperature } : {}),
+    ...(configured.top_p !== undefined ? { top_p: configured.top_p } : {}),
+    ...(maxTokens ? { max_tokens: maxTokens } : {}),
+  };
+}
+
+/**
+ * Sends one POST. `handle` receives the response plus a callback that resets the stall timer;
+ * non-streaming handlers never call it, so the timeout is then a total deadline.
+ * Cancellation and stalls map to the same errors as OpenAICompatibleTransport.
+ */
+async function sendRequest<T>(url: string, headers: Record<string, string>, body: unknown, request: ModelRequest, timeoutMs: number, handle: (response: Response, onChunk: () => void) => Promise<T>): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const armTimer = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  };
+  armTimer();
   const onCancel = () => controller.abort();
+  if (request.signal?.aborted) controller.abort();
   request.signal?.addEventListener('abort', onCancel, { once: true });
   try {
     const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal: controller.signal });
@@ -24,11 +50,63 @@ async function postJson(url: string, headers: Record<string, string>, body: unkn
       failure.status = response.status;
       throw failure;
     }
-    return await response.json();
+    return await handle(response, armTimer);
+  } catch (cause) {
+    if (request.signal?.aborted) throw error('MOD-007', 'degradation', 'Model request was cancelled by the user.', 'Send a new message to continue.');
+    if (timedOut) throw Object.assign(new Error(`Model request stalled: no data received for ${timeoutMs}ms.`, { cause }), { name: 'TimeoutError' });
+    throw cause;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     request.signal?.removeEventListener('abort', onCancel);
   }
+}
+
+function isEventStream(response: Response): boolean {
+  return (response.headers.get('content-type') ?? '').includes('text/event-stream');
+}
+
+/** Calls `onData` for every JSON object on an SSE `data:` line. Anthropic and Responses put the event name in `type`; Gemini sends bare objects. */
+async function readSseData(body: ReadableStream<Uint8Array>, onChunk: () => void, onData: (payload: Record<string, unknown>) => void): Promise<void> {
+  const decoder = new TextDecoder();
+  const reader = body.getReader();
+  let buffer = '';
+  const handleLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    let parsed: unknown;
+    try { parsed = JSON.parse(data); } catch { return; }
+    if (typeof parsed === 'object' && parsed !== null) onData(parsed as Record<string, unknown>);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onChunk();
+    buffer += decoder.decode(value, { stream: true });
+    let newline = buffer.indexOf('\n');
+    while (newline !== -1) {
+      handleLine(buffer.slice(0, newline));
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf('\n');
+    }
+  }
+  handleLine(buffer);
+}
+
+function streamFailure(): never {
+  throw error('MOD-004', 'blocker', 'Model stream reported an error.', 'Check the provider status and request parameters.');
+}
+
+function readUsageCounts(raw: unknown, inputKey: string, outputKey: string): { input?: number; output?: number } {
+  if (typeof raw !== 'object' || raw === null) return {};
+  const value = raw as Record<string, unknown>;
+  const input = value[inputKey];
+  const output = value[outputKey];
+  return {
+    ...(typeof input === 'number' ? { input } : {}),
+    ...(typeof output === 'number' ? { output } : {}),
+  };
 }
 
 function parseArguments(raw: unknown): string {
@@ -208,17 +286,51 @@ export class GeminiGenerateContentTransport implements ModelTransport {
     const model = request.model ?? 'unknown';
     const { systemInstruction, contents } = toGeminiContents(request.messages ?? [{ role: 'user', content: request.prompt }]);
     const tools = toGeminiTools(request.tools);
+    const params = requestParams(this.options, request.model);
+    const generationConfig = {
+      ...(params.max_tokens ? { maxOutputTokens: params.max_tokens } : {}),
+      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+      ...(params.top_p !== undefined ? { topP: params.top_p } : {}),
+    };
     const body = {
       contents,
       ...(systemInstruction ? { systemInstruction } : {}),
       ...(tools ? { tools } : {}),
-      ...(this.options.maxTokens ? { generationConfig: { maxOutputTokens: this.options.maxTokens } } : {}),
+      ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
     };
-    const url = `${this.baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
+    const onDelta = request.onDelta;
+    const action = onDelta ? 'streamGenerateContent?alt=sse' : 'generateContent';
+    const url = `${this.baseUrl}/models/${encodeURIComponent(model)}:${action}`;
     const headers: Record<string, string> = token ? { 'x-goog-api-key': token } : {};
-    const payload = await postJson(url, headers, body, request, this.options.timeoutMs ?? 120_000);
-    return parseGeminiResponse(payload, model, token);
+    return await sendRequest(url, headers, body, request, this.options.timeoutMs ?? 120_000, async (response, onChunk) => {
+      if (!onDelta || !isEventStream(response) || !response.body) return parseGeminiResponse(await response.json(), model, token);
+      return await readGeminiStream(response.body, onDelta, onChunk, model, token);
+    });
   }
+}
+
+/** Gemini streams full candidate objects as SSE; each carries text parts and/or functionCall parts. */
+async function readGeminiStream(body: ReadableStream<Uint8Array>, onDelta: (text: string) => void, onChunk: () => void, model: string, token: string): Promise<ModelResponse> {
+  let text = '';
+  let usage: ModelUsage | undefined;
+  const toolCalls: ModelToolCall[] = [];
+  await readSseData(body, onChunk, (chunk) => {
+    const candidate = (chunk.candidates as Array<{ content?: { parts?: Array<{ text?: unknown; functionCall?: { name?: unknown; args?: unknown } }> } }> | undefined)?.[0];
+    for (const part of candidate?.content?.parts ?? []) {
+      if (typeof part.text === 'string' && part.text.length > 0) {
+        text += part.text;
+        onDelta(part.text);
+      }
+      const call = part.functionCall;
+      if (call && typeof call.name === 'string') {
+        const index = toolCalls.length;
+        toolCalls.push({ id: `call_${index}_${call.name}`, type: 'function', function: { name: call.name, arguments: parseArguments(call.args) } });
+      }
+    }
+    const counts = readUsageCounts(chunk.usageMetadata, 'promptTokenCount', 'candidatesTokenCount');
+    if (counts.input !== undefined && counts.output !== undefined) usage = { input_tokens: counts.input, output_tokens: counts.output };
+  });
+  return { model, token_id: token, content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}), ...(usage ? { usage } : {}) };
 }
 
 /** Accepts a bare base URL or a versioned one and returns the base that ends in /v1beta (or the given version). */
@@ -290,7 +402,7 @@ export function parseResponsesResponse(payload: unknown, model: string, token: s
   return { model, token_id: token, content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}), ...(usage ? { usage } : {}) };
 }
 
-/** OpenAI Responses API (POST {base}/v1/responses, Bearer auth). Non-streaming. */
+/** OpenAI Responses API (POST {base}/v1/responses, Bearer auth). Streams SSE when onDelta is set. */
 export class OpenAIResponsesTransport implements ModelTransport {
   public constructor(private readonly endpoint: string, private readonly options: ProtocolFetchOptions = {}) {}
 
@@ -305,28 +417,69 @@ export class OpenAIResponsesTransport implements ModelTransport {
         parameters: tool.function.parameters,
       }))
       : undefined;
+    const params = requestParams(this.options, request.model);
+    const onDelta = request.onDelta;
     const body = {
       model: request.model,
       input,
       ...(instructions ? { instructions } : {}),
       ...(tools ? { tools } : {}),
-      ...(this.options.maxTokens ? { max_output_tokens: this.options.maxTokens } : {}),
+      ...(params.max_tokens ? { max_output_tokens: params.max_tokens } : {}),
+      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+      ...(params.top_p !== undefined ? { top_p: params.top_p } : {}),
+      ...(onDelta ? { stream: true } : {}),
     };
     const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
-    const payload = await postJson(this.endpoint, headers, body, request, this.options.timeoutMs ?? 120_000);
-    return parseResponsesResponse(payload, request.model ?? 'unknown', token);
+    const model = request.model ?? 'unknown';
+    return await sendRequest(this.endpoint, headers, body, request, this.options.timeoutMs ?? 120_000, async (response, onChunk) => {
+      if (!onDelta || !isEventStream(response) || !response.body) return parseResponsesResponse(await response.json(), model, token);
+      return await readResponsesStream(response.body, onDelta, onChunk, model, token);
+    });
   }
 }
 
+/**
+ * Responses SSE: text arrives as response.output_text.delta; function calls appear in response.output_item.added
+ * and are completed with their arguments; response.completed carries the final usage.
+ */
+async function readResponsesStream(body: ReadableStream<Uint8Array>, onDelta: (text: string) => void, onChunk: () => void, model: string, token: string): Promise<ModelResponse> {
+  let text = '';
+  let usage: ModelUsage | undefined;
+  const calls = new Map<string, { id: string; name: string; args: string }>();
+  await readSseData(body, onChunk, (event) => {
+    if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+      text += event.delta;
+      onDelta(event.delta);
+    } else if (event.type === 'response.output_item.added') {
+      const item = event.item as { type?: unknown; id?: unknown; call_id?: unknown; name?: unknown } | undefined;
+      if (item?.type === 'function_call' && typeof item.call_id === 'string' && typeof item.name === 'string') {
+        calls.set(typeof item.id === 'string' ? item.id : item.call_id, { id: item.call_id, name: item.name, args: '' });
+      }
+    } else if (event.type === 'response.function_call_arguments.delta' && typeof event.item_id === 'string' && typeof event.delta === 'string') {
+      const call = calls.get(event.item_id);
+      if (call) call.args += event.delta;
+    } else if (event.type === 'response.completed') {
+      const counts = readUsageCounts((event.response as { usage?: unknown } | undefined)?.usage, 'input_tokens', 'output_tokens');
+      if (counts.input !== undefined && counts.output !== undefined) usage = { input_tokens: counts.input, output_tokens: counts.output };
+    } else if (event.type === 'error' || event.type === 'response.failed') {
+      streamFailure();
+    }
+  });
+  const toolCalls: ModelToolCall[] = [...calls.values()].map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.args || '{}' } }));
+  return { model, token_id: token, content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}), ...(usage ? { usage } : {}) };
+}
+
+
 /** Builds the transport for a provider's configured protocol. */
 export function transportForProtocol(config: Pick<ModelProviderConfig, 'endpoint' | 'protocol'>, maxTokens: number | undefined, paramsFor: (model: string | undefined) => ModelParams): ModelTransport {
+  const options: ProtocolFetchOptions = { ...(maxTokens ? { maxTokens } : {}), paramsFor };
   switch (config.protocol) {
     case 'anthropic':
-      return new AnthropicMessagesTransport(normalizeAnthropicEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
+      return new AnthropicMessagesTransport(normalizeAnthropicEndpoint(config.endpoint), options);
     case 'gemini':
-      return new GeminiGenerateContentTransport(normalizeGeminiEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
+      return new GeminiGenerateContentTransport(normalizeGeminiEndpoint(config.endpoint), options);
     case 'openai-responses':
-      return new OpenAIResponsesTransport(normalizeResponsesEndpoint(config.endpoint), { ...(maxTokens ? { maxTokens } : {}) });
+      return new OpenAIResponsesTransport(normalizeResponsesEndpoint(config.endpoint), options);
     case 'openai':
       return new OpenAICompatibleTransport(normalizeEndpoint(config.endpoint), undefined, maxTokens, paramsFor);
   }
@@ -355,16 +508,68 @@ export class AnthropicMessagesTransport implements ModelTransport {
     if (!this.endpoint) throw error('MOD-002', 'blocker', 'Model endpoint is not configured.', 'Set the provider endpoint before starting the runtime.');
     const { system, messages } = toAnthropicMessages(request.messages ?? [{ role: 'user', content: request.prompt }]);
     const tools = toAnthropicTools(request.tools);
+    const params = requestParams(this.options, request.model);
+    const onDelta = request.onDelta;
     const body = {
       model: request.model,
-      max_tokens: this.options.maxTokens ?? 4096,
+      max_tokens: params.max_tokens ?? 4096,
       messages,
       ...(system ? { system } : {}),
       ...(tools ? { tools } : {}),
+      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+      ...(params.top_p !== undefined ? { top_p: params.top_p } : {}),
+      ...(onDelta ? { stream: true } : {}),
     };
     const headers: Record<string, string> = { 'anthropic-version': '2023-06-01' };
     if (token) headers['x-api-key'] = token;
-    const payload = await postJson(this.endpoint, headers, body, request, this.options.timeoutMs ?? 120_000);
-    return parseAnthropicResponse(payload, request.model ?? 'unknown', token);
+    const model = request.model ?? 'unknown';
+    return await sendRequest(this.endpoint, headers, body, request, this.options.timeoutMs ?? 120_000, async (response, onChunk) => {
+      if (!onDelta || !isEventStream(response) || !response.body) return parseAnthropicResponse(await response.json(), model, token);
+      return await readAnthropicStream(response.body, onDelta, onChunk, model, token);
+    });
   }
+}
+
+/** Reads Anthropic Messages SSE events. Text deltas go to onDelta; tool input JSON is accumulated per block index. */
+async function readAnthropicStream(body: ReadableStream<Uint8Array>, onDelta: (text: string) => void, onChunk: () => void, model: string, token: string): Promise<ModelResponse> {
+  let text = '';
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let hasUsage = false;
+  const blocks = new Map<number, { kind: 'text' } | { kind: 'tool'; id: string; name: string; json: string }>();
+  await readSseData(body, onChunk, (event) => {
+    const index = typeof event.index === 'number' ? event.index : -1;
+    if (event.type === 'content_block_start') {
+      const block = event.content_block as { type?: unknown; id?: unknown; name?: unknown } | undefined;
+      if (block?.type === 'tool_use') {
+        blocks.set(index, { kind: 'tool', id: typeof block.id === 'string' ? block.id : `tool_${index}`, name: typeof block.name === 'string' ? block.name : '', json: '' });
+      } else if (block?.type === 'text') {
+        blocks.set(index, { kind: 'text' });
+      }
+    } else if (event.type === 'content_block_delta') {
+      const delta = event.delta as { type?: unknown; text?: unknown; partial_json?: unknown } | undefined;
+      if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+        text += delta.text;
+        onDelta(delta.text);
+      } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+        const block = blocks.get(index);
+        if (block?.kind === 'tool') block.json += delta.partial_json;
+      }
+    } else if (event.type === 'message_start') {
+      const usage = (event.message as { usage?: unknown } | undefined)?.usage;
+      const counts = readUsageCounts(usage, 'input_tokens', 'output_tokens');
+      if (counts.input !== undefined) { inputTokens = counts.input; hasUsage = true; }
+    } else if (event.type === 'message_delta') {
+      const counts = readUsageCounts(event.usage, 'input_tokens', 'output_tokens');
+      if (counts.output !== undefined) { outputTokens = counts.output; hasUsage = true; }
+    } else if (event.type === 'error') {
+      streamFailure();
+    }
+  });
+  const toolCalls: ModelToolCall[] = [];
+  for (const block of [...blocks.values()]) {
+    if (block.kind === 'tool') toolCalls.push({ id: block.id, type: 'function', function: { name: block.name, arguments: block.json.trim() ? block.json : '{}' } });
+  }
+  const usage: ModelUsage | undefined = hasUsage ? { input_tokens: inputTokens, output_tokens: outputTokens } : undefined;
+  return { model, token_id: token, content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}), ...(usage ? { usage } : {}) };
 }

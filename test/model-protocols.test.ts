@@ -185,7 +185,7 @@ test('OpenAI Responses 请求把 system 转为 instructions，并回传 function
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         output: [
-          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '好' }] },
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '\u597d' }] },
           { type: 'function_call', call_id: 'call_9', name: 'read_file', arguments: '{"path":"a.txt"}' },
         ],
         usage: { input_tokens: 4, output_tokens: 2 },
@@ -213,7 +213,7 @@ test('OpenAI Responses 请求把 system 转为 instructions，并回传 function
     assert.deepEqual((responsesBody?.tools as Array<{ name: string }>)[0]?.name, 'read_file');
     assert.deepEqual((responsesBody?.input as Array<Record<string, unknown>>)[1], { type: 'function_call', call_id: 'call_9', name: 'read_file', arguments: '{"path":"a.txt"}' });
     assert.deepEqual((responsesBody?.input as Array<Record<string, unknown>>)[2], { type: 'function_call_output', call_id: 'call_9', output: 'hello' });
-    assert.equal(response.content, '好');
+    assert.equal(response.content, '\u597d');
     assert.equal(response.tool_calls?.[0]?.id, 'call_9');
     assert.deepEqual(response.usage, { input_tokens: 4, output_tokens: 2 });
 
@@ -236,4 +236,105 @@ test('normalizeResponsesEndpoint 补全 /v1/responses', () => {
 
 test('transportForProtocol 为 gemini 返回 Gemini transport', () => {
   assert.ok(transportForProtocol({ endpoint: 'https://z', protocol: 'gemini' }, undefined, () => ({})) instanceof GeminiGenerateContentTransport);
+});
+
+/** Serves a fixed SSE body for one request, then closes. Used by the streaming tests below. */
+async function withSseServer(events: string, run: (url: string) => Promise<void>): Promise<void> {
+  const sse = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(events);
+    });
+  });
+  await new Promise<void>((resolve) => sse.listen(0, '127.0.0.1', resolve));
+  const address = sse.address();
+  try {
+    if (typeof address === 'object' && address) await run(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve) => sse.close(() => resolve()));
+  }
+}
+
+test('Anthropic streaming: text deltas, tool_use arguments and usage', async () => {
+  const events = [
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\u4f60"}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\u597d"}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_9","name":"read_file","input":{}}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\\"a.txt\\"}"}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":9}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join('');
+  await withSseServer(events, async (url) => {
+    const deltas: string[] = [];
+    const response = await new AnthropicMessagesTransport(`${url}/v1/messages`).complete({
+      prompt: 'x', model: 'claude-test', onDelta: (text) => deltas.push(text),
+    }, 'sk-test');
+    assert.deepEqual(deltas, ['\u4f60', '\u597d']);
+    assert.equal(response.content, '\u4f60\u597d');
+    assert.equal(response.tool_calls?.[0]?.id, 'toolu_9');
+    assert.equal(response.tool_calls?.[0]?.function.arguments, '{"path":"a.txt"}');
+    assert.deepEqual(response.usage, { input_tokens: 5, output_tokens: 9 });
+  });
+});
+
+test('Gemini streaming: SSE text and functionCall', async () => {
+  const events = [
+    'data: {"candidates":[{"content":{"parts":[{"text":"\u597d"}]}}]}\n\n',
+    'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"a.txt"}}}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4}}\n\n',
+  ].join('');
+  await withSseServer(events, async (url) => {
+    const deltas: string[] = [];
+    const response = await new GeminiGenerateContentTransport(`${url}/v1beta`).complete({
+      prompt: 'x', model: 'gemini-test', onDelta: (text) => deltas.push(text),
+    }, 'key');
+    assert.deepEqual(deltas, ['\u597d']);
+    assert.equal(response.content, '\u597d');
+    assert.equal(response.tool_calls?.[0]?.function.name, 'read_file');
+    assert.equal(response.tool_calls?.[0]?.function.arguments, '{"path":"a.txt"}');
+    assert.deepEqual(response.usage, { input_tokens: 3, output_tokens: 4 });
+  });
+});
+
+test('OpenAI Responses streaming: text, function_call and response.completed usage', async () => {
+  const events = [
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"\u597d"}\n\n',
+    'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file"}}\n\n',
+    'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"path\\":\\"a.txt\\"}"}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":6}}}\n\n',
+  ].join('');
+  await withSseServer(events, async (url) => {
+    const deltas: string[] = [];
+    const response = await new OpenAIResponsesTransport(`${url}/v1/responses`).complete({
+      prompt: 'x', model: 'gpt-test', onDelta: (text) => deltas.push(text),
+    }, 'sk-test');
+    assert.deepEqual(deltas, ['\u597d']);
+    assert.equal(response.tool_calls?.[0]?.id, 'call_1');
+    assert.equal(response.tool_calls?.[0]?.function.arguments, '{"path":"a.txt"}');
+    assert.deepEqual(response.usage, { input_tokens: 2, output_tokens: 6 });
+  });
+});
+
+test('Anthropic streaming: error event throws MOD-004', async () => {
+  await withSseServer('event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n\n', async (url) => {
+    await assert.rejects(
+      new AnthropicMessagesTransport(`${url}/v1/messages`).complete({ prompt: 'x', onDelta: () => undefined }, 'sk-test'),
+      (err: unknown) => (err as { code?: string }).code === 'MOD-004' || /MOD-004/.test(String(err)),
+    );
+  });
+});
+
+test('requestParams: temperature and max_tokens are sent to Anthropic', async () => {
+  nextStatus = 200;
+  const transport = transportForProtocol(
+    { endpoint: baseUrl, protocol: 'anthropic' },
+    1024,
+    () => ({ temperature: 0.2 }),
+  );
+  await transport.complete({ prompt: 'x', model: 'claude-test' }, 'sk-test');
+  assert.equal(lastBody?.temperature, 0.2);
+  assert.equal(lastBody?.max_tokens, 1024);
 });

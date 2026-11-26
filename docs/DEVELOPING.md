@@ -57,7 +57,9 @@ interface RegisteredTool<TInput, TResult> {
 - **Skill**：可复用的任务说明，由 Skill 系统加载，适合不需要写代码的能力扩展。
 - **MCP 服务器**：在设置的「MCP 服务器」分类中配置。通过 `registerMcpTool` 接入的工具默认视为 `external` 且不可逆，因此默认需要审批。
 - **前端设置**：`frontend/src/settings.tsx` 中的 `PREFERENCE_SCHEMA` 定义设置项。加 `advanced: true` 可将字段收入「高级设置」折叠区。新增键会由 `merge` 自动填充默认值，旧的本地存储数据不会失效。
+- **模型提供方协议**：在模型配置中设置 `protocol`，可选 `openai`（默认）、`openai-responses`、`anthropic`、`gemini`。新增协议时在 `src/model-protocols.ts` 的 `transportForProtocol` 中加分支，并在 `test/model-protocols.test.ts` 用 mock 服务器补测试。
 - **主题**：支持预设、自定义色板、JSON 导入导出和自定义 CSS，见设置的「外观」分类。
+- **模型提供方协议**：在提供方配置中设置 `protocol`（`openai` / `openai-responses` / `anthropic` / `gemini`，缺省为 `openai`）。新增协议时在 `src/model-protocols.ts` 实现 transport，并在 `transportForProtocol` 中注册，测试放入 `test/model-protocols.test.ts`。
 
 ## 4. 脚手架
 
