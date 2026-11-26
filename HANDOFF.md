@@ -49,6 +49,9 @@ Set-Location frontend; npm run dev   # 前端
 - **深层记忆**：第 0、1 层已实现；第 2 层为关键词检索，配置 `HIERO_EMBED_*` 后可加向量检索。
 - **Trace 与成本**：每次聊天记录执行时间线，持久化到工作区 `.hiero/traces.jsonl`；会话累计 token 与估算成本（价格表自动拉取，缓存 24 小时）。
 - **令牌用量**：模型网关记录 `usage`；价格估算为估算值。
+- **聊天界面（前端）**：空态显示能力说明与建议按钮，按分享页面切换建议集合（`frontend/src/App.tsx` 的 `CHAT_SUGGESTIONS` / `PAGE_SUGGESTIONS`），点击只填入输入框，不自动发送。输入框为浮动玻璃层（`backdrop-filter`），`prefers-reduced-motion` 时关闭过渡；`prefers-reduced-transparency` 尚未单独适配。流式输出时只在底部跟随滚动。下拉弹层颜色由 `select option` 规则与自定义配色中的"下拉选项背景 / 文字"决定。
+  - 已验证：构建与 `tsc` 通过；建议按钮程序化点击可填入输入框；输入框计算样式生效。
+  - 未验证：分享页面后的页面建议（代码路径已接入，未在浏览器中走通分享流程）；调整下拉选项颜色后的联动效果；鼠标直接点击建议按钮时被设置浮层遮挡（属于 dockview 浮层的正常覆盖，未修复）。
 
 ## 4. 共享浏览器（部分完成，未提交）
 
