@@ -31,6 +31,31 @@ test('saveModelSettings keeps existing tokens when the token field is blank', as
   }
 });
 
+test('saveModelSettings persists the global protocol and normalizes the endpoint for it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hiero-protocol-'));
+  const previous = { endpoint: process.env.HIERO_LLM_ENDPOINT, protocol: process.env.HIERO_LLM_PROTOCOL, tokens: process.env.HIERO_LLM_TOKENS };
+  const runtime = new HieroRuntime(0);
+  runtime.secrets = new SecretStore(join(root, 'store'));
+  try {
+    const saved = runtime.saveModelSettings({ endpoint: 'https://anthropic.test', protocol: 'anthropic', model: 'claude-x', tokens: 'k1' }, root);
+    assert.equal(saved.protocol, 'anthropic');
+    assert.equal(saved.endpoint, 'https://anthropic.test/v1/messages');
+    const text = readFileSync(join(root, '.env'), 'utf8');
+    assert.ok(text.includes('HIERO_LLM_PROTOCOL=anthropic'));
+    assert.equal(runtime.readModelSettings().protocol, 'anthropic');
+
+    const fallback = runtime.saveModelSettings({ endpoint: 'https://plain.test/v1', protocol: 'bogus', model: 'm', tokens: '' }, root);
+    assert.equal(fallback.protocol, 'openai');
+    assert.equal(fallback.endpoint, 'https://plain.test/v1/chat/completions');
+  } finally {
+    await runtime.close();
+    for (const [key, value] of Object.entries({ HIERO_LLM_ENDPOINT: previous.endpoint, HIERO_LLM_PROTOCOL: previous.protocol, HIERO_LLM_TOKENS: previous.tokens })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('readModelSettings reports token count without exposing token values', async () => {
   const previous = { endpoint: process.env.HIERO_LLM_ENDPOINT, tokens: process.env.HIERO_LLM_TOKENS, model: process.env.HIERO_LLM_MODEL };
   process.env.HIERO_LLM_ENDPOINT = 'https://example.test/v1';

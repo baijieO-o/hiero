@@ -1,5 +1,5 @@
 import { error } from './contracts.js';
-import type { ModelMessage, ModelProviderConfig, ModelRequest, ModelResponse, ModelToolCall, ModelTransport, ModelUsage } from './model-gateway.js';
+import type { ModelMessage, ModelProtocol, ModelProviderConfig, ModelRequest, ModelResponse, ModelToolCall, ModelTransport, ModelUsage } from './model-gateway.js';
 import { OpenAICompatibleTransport } from './model-gateway.js';
 import { normalizeEndpoint } from './llm-env.js';
 import type { ModelParams } from './config.js';
@@ -482,6 +482,16 @@ export function transportForProtocol(config: Pick<ModelProviderConfig, 'endpoint
       return new OpenAIResponsesTransport(normalizeResponsesEndpoint(config.endpoint), options);
     case 'openai':
       return new OpenAICompatibleTransport(normalizeEndpoint(config.endpoint), undefined, maxTokens, paramsFor);
+  }
+}
+
+/** Normalizes a base URL to the request path that the given protocol uses. */
+export function normalizeEndpointForProtocol(raw: string, protocol: ModelProtocol): string {
+  switch (protocol) {
+    case 'anthropic': return normalizeAnthropicEndpoint(raw);
+    case 'gemini': return normalizeGeminiEndpoint(raw);
+    case 'openai-responses': return normalizeResponsesEndpoint(raw);
+    case 'openai': return normalizeEndpoint(raw);
   }
 }
 

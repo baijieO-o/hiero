@@ -223,6 +223,12 @@ export type ModelProtocol = 'openai' | 'openai-responses' | 'anthropic' | 'gemin
 
 export const MODEL_PROTOCOLS: readonly ModelProtocol[] = ['openai', 'openai-responses', 'anthropic', 'gemini'];
 
+/** Returns the protocol for a raw env/form value, falling back to 'openai' when unset or unknown. */
+export function parseModelProtocol(raw: string | undefined): ModelProtocol {
+  const value = (raw ?? '').trim();
+  return (MODEL_PROTOCOLS as readonly string[]).includes(value) ? (value as ModelProtocol) : 'openai';
+}
+
 export interface ModelProviderConfig {
   name: string;
   endpoint: string;

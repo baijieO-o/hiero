@@ -50,7 +50,7 @@ export type RuntimeEvent =
   | { type: 'USAGE_STATS'; payload: { request_id: string } & UsageStats }
   | { type: 'MODEL_LIST'; payload: { request_id: string; models: string[]; error?: string } }
   | { type: 'CHAT_COMPACTED'; payload: { request_id: string; summary: string; before_tokens: number; after_tokens: number; kept_messages: number } | { request_id: string; ok: false; message: string } }
-  | { type: 'SETTINGS'; payload: { endpoint: string; model: string; token_count: number } }
+  | { type: 'SETTINGS'; payload: { endpoint: string; protocol: string; model: string; token_count: number; providers?: Array<{ name: string; endpoint: string; protocol: string; model_count: number }> } }
   | { type: 'SETTINGS_SAVE_RESULT'; payload: { ok: true; settings: { endpoint: string; model: string; token_count: number } } | { ok: false; message: string } }
   | { type: 'SCHEDULES'; payload: { ok: true; tasks: ScheduledTask[] } | { ok: false; message: string; tasks: ScheduledTask[] } }
   | { type: 'MCP_CONFIG'; payload: { servers: McpServerEntry[]; statuses: McpServerStatus[]; path: string } }

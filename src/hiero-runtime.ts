@@ -8,7 +8,7 @@ import { breakdownContextUsage, type ContextUsageBreakdown } from './context-usa
 import { AgentWorkflow, type AutomaticHandoffResult, type WorkflowOptions, type WorkflowOutcome } from './agent-workflow.js';
 import { AgentStateMachine, AgentState } from './state-machine.js';
 import { StateStore } from './state-store.js';
-import { ModelGateway, OpenAICompatibleTransport, RoutedModelGateway, parseProviderList, parseTokenList, type CompletionGateway } from './model-gateway.js';
+import { ModelGateway, RoutedModelGateway, parseModelProtocol, parseProviderList, parseTokenList, type CompletionGateway, type ModelProtocol } from './model-gateway.js';
 import { ToolGateway, type ApprovalHook } from './tool-gateway.js';
 import { createChatToolGateway, hitlBreakpointsFromEnv } from './chat-tool-gateway.js';
 export { hitlBreakpointsFromEnv };
@@ -32,7 +32,7 @@ import { WriteSnapshotStore, humanModifiedWarning } from './write-snapshots.js';
 import { SystemAgentClient } from './system-agent-client.js';
 import { diffSnapshots, snapshotTextFiles } from './workspace-diff.js';
 import { loadLocalLlmEnv, modelsEndpoint, normalizeEndpoint, writeLocalEnv } from './llm-env.js';
-import { transportForProtocol } from './model-protocols.js';
+import { normalizeEndpointForProtocol, transportForProtocol } from './model-protocols.js';
 
 // Snowdome adapter errors go to a file: the backend's stdout is not kept, so a failed resident would otherwise leave no trace.
 function appendSnowdomeLog(message: string): void {
@@ -57,6 +57,8 @@ export interface ModelSettingsInput {
   endpoint: string;
   model: string;
   tokens: string;
+  /** Protocol of the global endpoint. Missing or unknown values keep the OpenAI Chat Completions default. */
+  protocol?: string;
   /** Optional manual model per task kind. Missing or blank kinds fall back to auto selection. */
   task_models?: TaskModelOverrides;
 }
@@ -687,7 +689,8 @@ export class HieroRuntime {
     const outputLimit = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : undefined;
     const paramsFor = (model: string | undefined) => paramsForModel(this.configWatcher.current(), model);
     const onCall = (event: { model: string; ok: boolean; inputTokens?: number; outputTokens?: number }) => this.telemetry.record({ name: 'model.call', ...event });
-    const gateway = new ModelGateway(new OpenAICompatibleTransport(normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? ''), undefined, outputLimit, paramsFor), tokens, undefined, undefined, undefined, onCall);
+    const globalConfig = { endpoint: process.env.HIERO_LLM_ENDPOINT ?? '', protocol: parseModelProtocol(process.env.HIERO_LLM_PROTOCOL) };
+    const gateway = new ModelGateway(transportForProtocol(globalConfig, outputLimit, paramsFor), tokens, undefined, undefined, undefined, onCall);
 
     const providers = parseProviderList(process.env.HIERO_LLM_PROVIDERS);
     if (providers.length === 0) return gateway;
@@ -856,14 +859,16 @@ export class HieroRuntime {
   }
 
   /** Returns model settings for display. API tokens are never returned, only their count. */
-  public readModelSettings(): { endpoint: string; model: string; token_count: number; task_models: TaskModelOverrides; model_candidates: string[] } {
+  public readModelSettings(): { endpoint: string; protocol: ModelProtocol; model: string; token_count: number; task_models: TaskModelOverrides; model_candidates: string[]; providers: Array<{ name: string; endpoint: string; protocol: ModelProtocol; model_count: number }> } {
     const endpoint = process.env.HIERO_LLM_ENDPOINT ?? '';
     return {
       endpoint,
+      protocol: parseModelProtocol(process.env.HIERO_LLM_PROTOCOL),
       model: process.env.HIERO_LLM_MODEL ?? 'auto',
       token_count: parseTokenList(process.env.HIERO_LLM_TOKENS).length,
       task_models: parseTaskModelOverrides(process.env.HIERO_LLM_TASK_MODELS),
       model_candidates: taskModelCandidates(),
+      providers: parseProviderList(process.env.HIERO_LLM_PROVIDERS).map((provider) => ({ name: provider.name, endpoint: provider.endpoint, protocol: provider.protocol, model_count: provider.models.length })),
     };
   }
 
@@ -872,7 +877,8 @@ export class HieroRuntime {
    * An empty token field keeps the existing tokens so the UI never has to echo them back.
    */
   public saveModelSettings(input: ModelSettingsInput, root = process.cwd()): ReturnType<HieroRuntime['readModelSettings']> {
-    const endpoint = normalizeEndpoint(input.endpoint) || normalizeEndpoint(process.env.HIERO_LLM_ENDPOINT ?? '');
+    const protocol = parseModelProtocol(input.protocol);
+    const endpoint = normalizeEndpointForProtocol(input.endpoint, protocol) || normalizeEndpointForProtocol(process.env.HIERO_LLM_ENDPOINT ?? '', protocol);
     const model = input.model.trim() || 'auto';
     const newTokens = parseTokenList(input.tokens);
     const tokens = newTokens.length > 0 ? newTokens : parseTokenList(process.env.HIERO_LLM_TOKENS);
@@ -883,6 +889,7 @@ export class HieroRuntime {
     }
     const values: Record<string, string> = {
       HIERO_LLM_ENDPOINT: endpoint,
+      HIERO_LLM_PROTOCOL: protocol,
       HIERO_LLM_MODEL: model,
       HIERO_LLM_TOKENS: tokens.join(','),
       HIERO_LLM_TASK_MODELS: Object.keys(taskModels).length > 0 ? JSON.stringify(taskModels) : '',

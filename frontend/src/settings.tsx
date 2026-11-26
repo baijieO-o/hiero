@@ -198,11 +198,20 @@ export const TASK_MODEL_KIND_TEXT: Record<TaskModelKindId, string> = {
 
 export interface ModelSettings {
   endpoint: string;
+  protocol?: string;
   model: string;
   token_count: number;
   task_models?: Partial<Record<TaskModelKindId, string>>;
   model_candidates?: string[];
+  providers?: Array<{ name: string; endpoint: string; protocol: string; model_count: number }>;
 }
+
+const PROTOCOL_LABELS: Record<string, string> = {
+  openai: 'OpenAI Chat Completions',
+  'openai-responses': 'OpenAI Responses',
+  anthropic: 'Anthropic Messages',
+  gemini: 'Google Gemini generateContent',
+};
 
 export function applyPreferenceTheme(values: PreferenceValues): void {
   const root = document.documentElement;
@@ -429,8 +438,9 @@ function PreferenceControl({ field, value, onChange }: { field: PreferenceField;
 
 export type ModelListState = { status: 'idle' } | { status: 'loading' } | { status: 'ready'; models: string[] } | { status: 'error'; message: string };
 
-export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, onFetchModels }: { modelSettings: ModelSettings | null; saveState: SaveState; onSave: (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void }): ReactElement {
+export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, onFetchModels }: { modelSettings: ModelSettings | null; saveState: SaveState; onSave: (input: { endpoint: string; protocol: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void }): ReactElement {
   const [endpoint, setEndpoint] = useState('');
+  const [protocol, setProtocol] = useState<string>('openai');
   const [model, setModel] = useState('');
   const [tokens, setTokens] = useState('');
   const [taskModels, setTaskModels] = useState<Partial<Record<TaskModelKindId, string>>>({});
@@ -440,6 +450,7 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
   useEffect(() => {
     if (!modelSettings || dirty) return;
     setEndpoint(modelSettings.endpoint);
+    setProtocol(modelSettings.protocol ?? 'openai');
     setModel(modelSettings.model);
     setTaskModels(modelSettings.task_models ?? {});
   }, [modelSettings, dirty]);
@@ -453,7 +464,7 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onSave({ endpoint, model, tokens, task_models: taskModels });
+    onSave({ endpoint, protocol, model, tokens, task_models: taskModels });
   };
 
   const statusText = saveState.status === 'saving'
@@ -468,8 +479,14 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
     <section className="model-config-block">
       <h4>全局配置</h4>
       <label className="settings-field">
-        <span><strong>Global Base URL</strong><small>OpenAI 兼容接口的基础地址，例如 https://example.com/v1（会自动补全 /chat/completions）</small></span>
+        <span><strong>Global Base URL</strong><small>供应商的基础地址，例如 https://example.com/v1；路径会按所选协议自动补全</small></span>
         <input value={endpoint} onChange={(event) => { setEndpoint(event.target.value); setDirty(true); }} placeholder="https://..." aria-label="Global Base URL" />
+      </label>
+      <label className="settings-field">
+        <span><strong>Global 协议</strong><small>该地址使用的接口协议：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 或 Google Gemini generateContent</small></span>
+        <select value={protocol} onChange={(event) => { setProtocol(event.target.value); setDirty(true); }} aria-label="Global 协议">
+          {Object.entries(PROTOCOL_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select>
       </label>
       <label className="settings-field">
         <span><strong>Global API Key</strong><small>多个用逗号分隔，用于轮换。已保存 {modelSettings?.token_count ?? 0} 个；留空则保留原有密钥。保存在本地 .env，不会回显。</small></span>
@@ -479,16 +496,24 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
 
     <section className="model-config-block">
       <h4>提供商管理</h4>
-      <p className="settings-mcp-hint">当前只支持一个 OpenAI 兼容提供商，由上面的全局配置提供。</p>
+      <p className="settings-mcp-hint">上面的全局配置使用所选协议。其余提供商在 .env 的 HIERO_LLM_PROVIDERS 中配置，每个可单独选择协议（openai / openai-responses / anthropic / gemini）。</p>
       <table className="model-config-table">
-        <thead><tr><th>Provider ID</th><th>Base URL</th><th>API Key</th><th>API Mode</th></tr></thead>
+          <thead><tr><th>Provider ID</th><th>Base URL</th><th>模型数</th><th>API Mode</th></tr></thead>
         <tbody>
           <tr>
-            <td><code>openai-compatible</code></td>
+              <td><code>global</code></td>
             <td><code>{endpoint || '未设置'}</code></td>
-            <td>{modelSettings?.token_count ?? 0} 个</td>
-            <td title="后端目前只支持 OpenAI 兼容模式">OpenAI（唯一模式）</td>
+              <td>{modelSettings?.token_count ?? 0} 个密钥</td>
+              <td>{PROTOCOL_LABELS[modelSettings?.protocol ?? 'openai'] ?? modelSettings?.protocol}</td>
           </tr>
+            {(modelSettings?.providers ?? []).map((provider) => (
+              <tr key={provider.name}>
+                <td><code>{provider.name}</code></td>
+                <td><code>{provider.endpoint}</code></td>
+                <td>{provider.model_count} 个</td>
+                <td title={`protocol: ${provider.protocol}`}>{PROTOCOL_LABELS[provider.protocol] ?? provider.protocol}</td>
+              </tr>
+            ))}
         </tbody>
       </table>
     </section>
@@ -513,7 +538,7 @@ export function ModelGatewayForm({ modelSettings, saveState, onSave, modelList, 
           {modelList.models.map((id) => <tr key={id} className={id === model ? 'model-config-current' : undefined}>
             <td><code>{id}</code></td>
             <td>openai-compatible</td>
-            <td><button type="button" className="ghost-button" onClick={() => { setModel(id); storeDefaultModel(id); onSave({ endpoint, model: id, tokens: '', task_models: taskModels }); }}>{id === model ? '当前' : '设为默认'}</button></td>
+            <td><button type="button" className="ghost-button" onClick={() => { setModel(id); storeDefaultModel(id); onSave({ endpoint, protocol, model: id, tokens: '', task_models: taskModels }); }}>{id === model ? '当前' : '设为默认'}</button></td>
           </tr>)}
         </tbody>
       </table> : null}
@@ -805,7 +830,7 @@ function UpdateCheckSection(): ReactElement {
   </div>;
 }
 
-export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList, onFetchModels, mcpConfig, mcpSaveState, onSaveMcp }: { modelSettings: ModelSettings | null; saveState: SaveState; onSaveModel: (input: { endpoint: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void; mcpConfig: McpConfigState | null; mcpSaveState: McpSaveState; onSaveMcp: (servers: McpServerEntry[]) => void }): ReactElement {
+export function SettingsPanel({ modelSettings, saveState, onSaveModel, modelList, onFetchModels, mcpConfig, mcpSaveState, onSaveMcp }: { modelSettings: ModelSettings | null; saveState: SaveState; onSaveModel: (input: { endpoint: string; protocol: string; model: string; tokens: string; task_models: Partial<Record<TaskModelKindId, string>> }) => void; modelList: ModelListState; onFetchModels: (input: { endpoint: string; tokens: string }) => void; mcpConfig: McpConfigState | null; mcpSaveState: McpSaveState; onSaveMcp: (servers: McpServerEntry[]) => void }): ReactElement {
   const values = usePreferences((state) => state.values);
   const update = usePreferences((state) => state.update);
   const reset = usePreferences((state) => state.reset);

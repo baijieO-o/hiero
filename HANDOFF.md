@@ -37,6 +37,7 @@ Set-Location frontend; npm run dev   # 前端
 - **定时任务墙钟上限**（`src/hiero-runtime.ts`）：每次定时任务的 `handleMessage` 外层有 150 秒上限，超时写回 `failed` 并释放 `scheduleRunning`，避免挂起任务阻塞后续调度。只放弃等待，**不中断底层模型请求**（执行器与网关尚未接受 `AbortSignal`）。离线 e2e 见 `test/scheduled-e2e.test.ts`。\n- **执行保护**（`src/agent-executor.ts`）：同一工具同一参数连续 3 次触发 `MOD-005` 熔断；超时触发 `MOD-006`。工具结果超过 8,000 字符时截断（头 70% + 尾 30%）。
 - **上下文压缩**（`src/context-compactor.ts`）：超阈值时把旧历史压缩为摘要，保留首条用户消息原文（锚点）、未完成待办与精确路径，并保留最近 6 条原文。聊天路径由 `handleChatCompact` 驱动，固定预算 24,000 token。前端 `/compact` 与摘要分隔线已实现。
 - **模型协议**（`src/model-protocols.ts`，`src/model-gateway.ts`）：每个模型提供方可设 `protocol` 字段：`openai`（默认，Chat Completions）、`openai-responses`（Responses API）、`anthropic`（Messages API）、`gemini`（generateContent API）。四种协议均支持流式、工具调用、usage，并接入 `temperature` / `max_tokens` 参数。由 `test/model-protocols.test.ts`（15 例，mock HTTP 服务器）覆盖；**尚未在真实供应商上验证**，Gemini 与 Responses 的 SSE 字段以离线假设为准。`openai-responses` 作为独立协议值的命名待确认。
+  - 全局网关协议由 `.env` 的 `HIERO_LLM_PROTOCOL` 决定（取值同上，未知值回退 `openai`），可在设置页"模型与网关 → 全局配置"中通过"Global 协议"下拉框修改；保存时 endpoint 会按所选协议自动规范化。提供商表格的 API Mode 列显示各行协议。设置相关测试见 `test/settings.test.ts`（3 例）。
 - **用户中断**：Stop 按钮发送 `chat_cancel`，后端中止模型请求，已生成的部分文本保存为助手消息。
 - **MCP**：stdio / sse / http；`${VAR}` 占位符从环境变量展开，凭据不写入 `mcp.json`；预设（filesystem、GitHub、Postgres）默认禁用；管理 UI 已实现。
 - **子代理**（`src/read-only-subagent.ts`）：`delegate_read`（只读）、`delegate_write`（含 `write_file`，经审批）、`delegate_task`（通用，可调用 MCP）。每轮并发与每聊天总数有上限，不允许嵌套。
