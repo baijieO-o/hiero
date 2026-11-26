@@ -15,10 +15,10 @@
 | 编号 | 标题 | 链接 | 已读范围 | 与 Hiero 的关系 |
 | --- | --- | --- | --- | --- |
 | P1 | Interactive Speculative Planning | https://huggingface.co/papers/2410.00079 | 仅摘要 | 人的中途干预融入规划；用人提供的中间步骤提高效率。对应“执行中修改”路径 |
-| P2 | A Design Space for Intelligent Agents in Mixed-Initiative Visual Analytics | https://huggingface.co/papers/2512.23372 | 仅摘要（综述 90 个系统、207 个 Agent，六维设计空间：感知、环境理解、行动、沟通等） | 决定 Agent 能观察什么、能做什么、如何沟通。主要面向混合主动式可视分析，**不应直接当作通用结论** |
-| P3 | Terminal Is All You Need: Design Properties for Human-AI Agent Collaboration | https://huggingface.co/papers/2603.10664 | 仅摘要（三个设计属性：表示兼容性、行动透明性、人参与的低门槛） | 图形界面也要让用户看懂 Agent 做了什么，而不只是显示“正在思考” |
+| P2 | A Design Space for Intelligent Agents in Mixed-Initiative Visual Analytics | https://arxiv.org/abs/2512.23372（HTML: https://arxiv.org/html/2512.23372） | 已读 §1–§4.1（方法、纳入标准、六维定义的开头）。未读 §4.2 之后与附录 | 六维：Configuration+Logic、World Model、Observations、Communication、Actions、Infrastructure Layer。主要面向混合主动式可视分析，**不应直接当作通用结论** |
+| P3 | Terminal Is All You Need: Design Properties for Human-AI Agent Collaboration | https://huggingface.co/papers/2603.10664 | 全文（CHI 2026 workshop 短文，立场性质） | 三个设计属性：表示兼容性、交互媒介透明性、人参与的低门槛 |
 
-**未确认：** P2、P3 全文未读，上表只依据摘要。在引用其具体实验数字或细节前必须先读全文。
+**未确认：** P2 只读到 §4.1；其余维度的编码结论未核实。P1 只读了 §3.2。P3 是立场文，不是实证结论。
 
 ## 3. 界面四区域（设计建议，基于 P1 思路）
 
@@ -29,9 +29,10 @@
 | 执行区 | 当前动作、工具调用及其结果 | 中断执行、提供纠正信息 | 仅在 pending 时显示工具段；中断已有（Stop 按钮）；纠正走 steer |
 | 成果区 | 生成的文档、分析或其他产物 | 检查结果、提出修改 | 显示最后一条助手消息的文件；**尚无“提出修改”入口** |
 
-## 4. 已完成（已提交并推送，`be27b60`）
+## 4. 已完成（已提交并推送到 `origin/main`，当前 `7a354a6`）
 
-所有代码提交均在 `main`，已推送到 `origin/main`。
+- **计划残留与循环 steer 测试**，提交 `9e3d2b7`（待办 1、2）；文档 `92b9ff7`。
+- **计划可编辑（稳定步骤 ID）**，提交 `7a354a6`（待办 3）：`src/chat-plan.ts` 的 `PlanIdAllocator`、`parsePlanSteps`；`src/chat-steer.ts` 的 `SteerItem.plan`；`src/hiero-runtime.ts` 的 `steerChat` 与计划注入；`frontend/src/App.tsx` 的 `PlanEditor`。
 
 - **聊天执行中补充（steer）**，提交 `763ba14`：`src/chat-steer.ts` 的 `ChatSteerQueue`；`src/hiero-runtime.ts` 中 `handleChat`、`steerChat`、`applySteers`；事件 `CHAT_STEER_QUEUED` / `CHAT_STEER_APPLIED` / `CHAT_STEER_REJECTED`。补充在**下一次模型调用前**生效，不打断正在进行的模型请求。
 - **`update_plan` 工具与计划事件**：`src/chat-tool-definitions.ts` 的 `UPDATE_PLAN_TOOL_DEFINITION`；`src/chat-plan.ts` 的 `parsePlanArguments`；事件 `CHAT_PLAN`。
@@ -45,14 +46,15 @@
 | 后端类型检查 | 通过 | `npx tsc -p .` |
 | 聊天 steer 单测 | 3/3 通过 | `node --test dist/test/chat-steer.test.js` |
 | 计划单测 | 2/2 通过 | `node --test dist/test/chat-plan.test.js` |
-| 计划可编辑（待办 3）：计划单测与循环单测 | 7/7 通过 | `node --test dist/test/chat-plan.test.js dist/test/chat-steer-loop.test.js` |
+| 计划可编辑（待办 3）：计划单测与循环单测 | 7/7 通过（重新构建后再次确认） | `npx tsc -p .` 后 `node --test dist/test/chat-plan.test.js dist/test/chat-steer-loop.test.js` |
 | 计划残留修复与循环 steer 单测（待办 1、2） | 通过 | `node --test dist/test/chat-steer-loop.test.js`（提交 `9e3d2b7`） |
 | 前端类型检查与构建 | 通过（已知 500 kB chunk 警告，既有） | `frontend` 下 `tsc --noEmit`、`npm run build` |
 | 四区域与中途补充的浏览器 e2e | 已通过 | 页面渲染计划、运行中补充 |
 
 **未验证：**
 - 真实模型下是否会按要求更新计划步骤状态（in_progress / done），长任务中未测。
-- `update_plan` 没有步骤 ID，计划修改语义未验证。
+- 真实模型是否按标题保留步骤 ID（待办 3）未测。
+- 计划编辑 UI 的浏览器 e2e 未做。
 - 真实模型上 steer 的效果未测。
 - 完整 `npm test` 会挂起（见 `docs/DEVELOPING.md` §5）。请用 `npx tsc -p .` 加逐个 `node --test dist/test/<file>.test.js`。
 
@@ -61,12 +63,14 @@
 1. **【已完成】修复计划状态残留（小）**：`frontend/src/App.tsx` 的 CHAT_CANCELLED、CHAT_UNKNOWN、CHAT_ERROR 与完成路径现在都会把 `plan` 置空。已验证：`frontend` 下 `tsc --noEmit` 与 `npm run build` 通过。**未补界面状态测试或 e2e 检查**，仍为缺口。提交 `9e3d2b7`，未推送。
 2. **【已完成】循环级 steer 单测（小）**：新增 `test/chat-steer-loop.test.ts`。它用本地模拟模型服务，在第一次模型请求进行中排队补充，断言第二次请求包含补充文本，并发出 `CHAT_STEER_APPLIED`。已验证：`node --test dist/test/chat-steer-loop.test.js` 通过；`chat-steer` 与 `chat-tools` 共 8/8 通过。提交 `9e3d2b7`，未推送。
    - 既有问题（未处理）：`test/chat-steer.test.ts` 注释存在编码错误（UTF-8 被按 GBK 解码），建议单独提交修复。
-3. **【已完成】计划可编辑（中）**：后端在首次发布时分配稳定步骤 ID（`s1`、`s2`…，同一运行内不复用）；模型按相同标题重发布时保留原 ID。用户编辑（`chat_steer` 携带 `plan`）整体替换计划，经 steer 队列在下一次模型调用前注入，并在对话中说明“用户修改了计划”。前端计划区提供编辑（标题、状态、删除、添加），运行结束后不可编辑。依据 P1（arXiv 2410.00079）§3.2：用户在步骤等待期间干预，系统把输入并入轨迹。已验证：`node --test dist/test/chat-plan.test.js dist/test/chat-steer-loop.test.js` 共 7/7 通过；`frontend` 下 `tsc --noEmit` 与 `npm run build` 通过。**未验证**：真实模型是否遵循标题匹配以保留 ID；编辑 UI 未做浏览器 e2e。提交 `04f6125`，未推送。
-4. **DAG 路径的 steer 注入（中）**：注入点不变，只做设计，代码未改。`src/agent-executor.ts` 的 `exec()`（约 85–134 行）；`src/agent-workflow.ts` 的 `stepVerifier`（约 180–195 行）与 `execDag`（约 200–230 行）；`src/plan-dag.ts` 的 `runPlanDag`（约 60–90 行）。
-5. **执行区中断与纠正（中）**：目前只有 Stop（整轮取消）。需要“暂停并纠正后继续”的语义，并区分取消与纠正。
-6. **成果区修改入口（中）**：对成果提出修改，作为新 steer 或新一轮请求，需要定义与来源的关系。
-7. **读全文并对照 P2、P3（设计）**：确认六维设计空间与三个设计属性，映射到四区域与事件设计。把结论写进本文，而不是只写在对话里。
-8. **清理**：临时日志 `$env:TEMP\hiero-out.log` 与 `hiero-err.log` 在收尾时删除。
+3. **【已完成】计划可编辑（中）**：后端在首次发布时分配稳定步骤 ID（`s1`、`s2`…，同一运行内不复用）；模型按相同标题重发布时保留原 ID。用户编辑（`chat_steer` 携带 `plan`）整体替换计划，经 steer 队列在下一次模型调用前注入，并在对话中说明“用户修改了计划”。前端计划区提供编辑（标题、状态、删除、添加），运行结束后不可编辑。依据 P1（arXiv 2410.00079）§3.2：用户在步骤等待期间干预，系统把输入并入轨迹。已验证：`node --test dist/test/chat-plan.test.js dist/test/chat-steer-loop.test.js` 共 7/7 通过；`frontend` 下 `tsc --noEmit` 与 `npm run build` 通过。**未验证**：真实模型是否遵循标题匹配以保留 ID；编辑 UI 未做浏览器 e2e。提交 `7a354a6`（已推送）。
+4. **DAG 路径的 steer 注入（中）**：【设计，代码未改】当前 steer 只在 `runChat`（线性聊天循环）中生效。DAG 路径（`src/agent-workflow.ts` 的 `execDag` 约 200–230 行，`src/agent-executor.ts` 的 `exec()` 约 85–134 行，`src/plan-dag.ts` 的 `runPlanDag` 约 60–90 行）没有注入点。方案：把队列按节点分派；在每个节点开始 `exec()` 前、以及 `stepVerifier` 判定后，把未消费的补充合并进该节点的输入。已在运行中的节点不改动。依据 P1 §3.2：补充属于“下一次调用”的输入。
+5. **执行区中断与纠正（中）【设计，代码未改】**：现有 Stop 取消整轮。新语义“暂停并纠正后继续”：中断当前模型请求或工具调用，把纠正作为 steer 注入，然后从同一计划步骤恢复。与取消的区别是：取消不保留上下文，暂停保留运行状态。需先确认是否能中止进行中的模型请求（目前 steer 不打断在途请求，见 §6 第 3 条的说明）。
+6. **成果区修改入口（中）【设计，代码未改】**：成果区的“提出修改”应作为新一轮用户消息，引用上一轮产物，而不是 steer。原因：steer 只在运行中有效，而成果区的修改通常在运行结束后。steer 与新一轮共用同一条消息格式，成果区只负责把产物引用附上。
+7. **P2、P3 对照（完成，见 §2 与下文）**：
+   - P2 六维（Configuration+Logic、World Model、Observations、Communication、Actions、Infrastructure）映射到 Hiero：World Model 对应计划状态，Observations 对应工具结果进入执行区，Actions 对应工具调用与 `update_plan`，Communication 对应 steer、计划编辑等用户通道，Infrastructure 对应事件与 `RuntimeEvent`。P2 的研究对象是混合主动式可视分析，软件 Agent 的自主性普遍低。**结论只作设计参考，不能推断 Hiero 的效果。**
+   - P3 三个属性映射到界面：表示兼容性（计划与执行区用同一份数据结构）、交互媒介透明性（执行区必须展示真实工具调用与结果，不只显示“思考中”）、低门槛参与（补充与编辑直接在运行面板完成，不要求用户离开对话）。P3 是立场文，不含实证数字。
+8. **清理（阻塞）**：`D:\DevData\temp\hiero-out.log` 与 `hiero-err.log` 被另一进程占用，删除失败（"正由另一进程使用"）。未结束任何进程。需要用户确认是否可以结束占用进程，或保留这两个文件。
 
 ## 7. 运行与约束
 
